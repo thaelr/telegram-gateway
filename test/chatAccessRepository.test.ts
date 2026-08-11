@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AccessContext } from "../src/types.js";
 
 process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
+process.env.INTERNAL_API_KEY ??= "test-internal-key";
 
 const { ChatAccessRepository } = await import("../src/chatAccessRepository.js");
 

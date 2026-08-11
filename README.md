@@ -1,128 +1,99 @@
 # chat-router-service
 
-Small TypeScript backend for routing and access decisions in chat-based applications.
+TypeScript backend for decision-making in chat products.
 
-It accepts a normalized inbound event, loads access context from Postgres, applies routing and entitlement rules, and returns one executable `action` plus the event context that downstream systems need.
+It keeps routing, access checks, and media-commerce policy outside workflow automation, while leaving side effects to the caller.
 
-This service is intentionally narrow:
+## Bounded Contexts
 
-- it decides
-- another system executes
+- `router-decision`
+  Classifies normalized inbound events and returns a single executable `action`.
+- `media-commerce-decision`
+  Decides media offer, callback, invoice, pre-checkout, payment, and fulfillment behavior for a media add-on flow.
 
 Typical deployment model:
 
-`event source -> router service -> workflow/app backend -> side effects`
+`event source -> chat-router-service -> workflow/app backend -> external side effects`
 
-## What It Solves
+## What Stays In This Service
 
-- command and callback classification
-- access checks for gated flows
+- routing and intent classification
 - terms / subscription / usage-limit checks
-- stable idempotency keys for downstream mutations
-- a single action-first contract for orchestration layers
+- idempotency key generation for downstream mutations
+- media offer and payment decision logic
+- token ownership and payment lifecycle validation
 
-## Architecture
+## What Stays Outside
 
-```text
-POST /v1/router-decision
-        |
-        v
-AccessDecisionService
-        |
-        v
-ChatAccessRepository
-        |
-        v
-Postgres
-```
+- Telegram API calls
+- message send/edit/delete operations
+- invoice link creation
+- workflow orchestration
 
-Execution stays outside this service. A workflow engine, bot backend, or queue consumer can call the router and then route only by `action`.
+## API
 
-## Request / Response Model
+### Public
 
-Input:
+- `GET /healthz`
 
-- normalized chat event
-- command / callback / payment / reachability metadata
-- user and chat identifiers
+### Internal
 
-Output:
+All `/v1/*` endpoints require an internal API key header.
 
-- `domain`
-- `intent`
+- Header name: `INTERNAL_API_KEY_HEADER`
+- Header value: `INTERNAL_API_KEY`
+
+Endpoints:
+
+- `POST /v1/router-decision`
+- `POST /v1/access-decision`
+- `POST /v1/media-commerce-decision`
+
+## Request / Response Shape
+
+The service accepts normalized events and returns decision objects that preserve the context required by downstream execution.
+
+Router responses include fields such as:
+
 - `action`
 - `allowed`
 - `idempotency_key`
-- passthrough event fields for downstream execution
-- access context fields when relevant
+- passthrough event metadata
+- access-context fields when relevant
 
-Example request:
+Media-commerce responses include fields such as:
 
-```json
-{
-  "chat_id": 123456,
-  "source": "telegram",
-  "update_id": 987654,
-  "source_user_id": 123456,
-  "command": "/subscription",
-  "event_type": "command.received",
-  "message_type": "command"
-}
-```
-
-Example response:
-
-```json
-{
-  "domain": "command",
-  "intent": "subscription",
-  "action": "show_subscription_offer",
-  "decision": "show_subscription_offer",
-  "allowed": true,
-  "chat_id": 123456,
-  "source": "telegram",
-  "update_id": 987654,
-  "idempotency_key": "telegram:987654",
-  "subscription_active": false,
-  "turns_today": 3,
-  "turn_limit": 15
-}
-```
-
-## Endpoints
-
-### `GET /healthz`
-
-Health probe.
-
-### `POST /v1/router-decision`
-
-Primary endpoint.
-
-### `POST /v1/access-decision`
-
-Backward-compatible alias.
+- `route`
+- `operation`
+- `invoice_token`
+- `reply_markup`
+- `payment_kind`
+- `reason`
 
 ## Repository Layout
 
 ```text
 chat-router-service/
   .env.example
-  .gitignore
   README.md
   package.json
-  tsconfig.json
   src/
     accessDecisionService.ts
     chatAccessRepository.ts
     config.ts
     db.ts
+    internalApiAuth.ts
+    mediaCommerceDecisionService.ts
+    mediaCommerceRepository.ts
+    mediaCommerceTypes.ts
     routerDecisionService.ts
     server.ts
     types.ts
   test/
     accessDecisionService.test.ts
     chatAccessRepository.test.ts
+    internalApiAuth.test.ts
+    mediaCommerceDecisionService.test.ts
 ```
 
 ## Local Development
@@ -133,7 +104,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Other useful commands:
+Useful commands:
 
 ```bash
 npm run check
@@ -144,30 +115,34 @@ npm run start
 
 ## Environment Variables
 
+Core:
+
 - `DATABASE_URL`
 - `PORT`
 - `HOST`
+- `INTERNAL_API_KEY`
+- `INTERNAL_API_KEY_HEADER`
+
+Access / router:
+
 - `TURN_LIMIT`
 - `BUSINESS_TIME_ZONE`
 - `TURN_LIMIT_RESET_TEXT`
+
+Media commerce:
+
+- `MEDIA_PAYMENT_CURRENCY`
+- `MEDIA_STORAGE_BASE_URL`
+- `MEDIA_CATALOG_RELATION`
+- `MEDIA_DEFAULT_BUCKET_NAME`
+- `MEDIA_BUCKET_ALIAS_MAP_JSON`
+- `MEDIA_SUBSCRIPTION_PLANS_JSON`
 
 See [.env.example](./.env.example).
 
 ## Design Notes
 
-- The router is the single owner of routing and access logic.
-- Postgres access-context is loaded in one query for gated flows.
-- Non-gated events can bypass the repository completely.
-- `idempotency_key` is returned for downstream side-effect protection.
-- Returned `action` values are application-defined. This implementation uses actions such as `show_terms_gate`, `show_subscription_offer`, `handle_scene_mode`, and `run_scene_core`.
-
-## Intended Use
-
-This repository contains the routing and access service used by a larger chat application
-
-It fits well when you want:
-
-- a thin HTTP decision layer in front of a workflow engine
-- one place for access and routing policy
-- deterministic routing for normalized inbound events
-- testable entitlement logic outside low-code orchestration
+- The service is decision-only; callers own execution.
+- `/v1/*` is intended for trusted internal callers only.
+- Subscription pricing and plan metadata are environment-driven.
+- Media catalog storage names are configurable so public code stays product-neutral.

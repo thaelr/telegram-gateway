@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AccessContext, AccessDecisionRequest } from "../src/types.js";
 
 process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
+process.env.INTERNAL_API_KEY ??= "test-internal-key";
 process.env.TURN_LIMIT ??= "15";
 process.env.BUSINESS_TIME_ZONE ??= "Europe/Moscow";
 process.env.TURN_LIMIT_RESET_TEXT ??= "00:00 МСК";
@@ -473,7 +474,7 @@ test("preserves additional normalized fields in the response", async () => {
       telegram_payment_charge_id: "tg_charge_1",
       provider_payment_charge_id: "provider_charge_1",
       payment_currency: "XTR",
-      payment_total_amount: 349,
+      payment_total_amount: 200,
       reachability_status: "reachable",
       telegram_chat_status: "member",
       user_message: null,
@@ -488,7 +489,7 @@ test("preserves additional normalized fields in the response", async () => {
   assert.equal(result.telegram_payment_charge_id, "tg_charge_1");
   assert.equal(result.provider_payment_charge_id, "provider_charge_1");
   assert.equal(result.payment_currency, "XTR");
-  assert.equal(result.payment_total_amount, 349);
+  assert.equal(result.payment_total_amount, 200);
   assert.equal(result.reachability_status, "reachable");
   assert.equal(result.telegram_chat_status, "member");
   assert.equal(result.scene_mode, "fast");
