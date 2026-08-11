@@ -1,5 +1,5 @@
 {
-  "name": "chat-router-service",
+  "name": "telegram-gateway",
   "version": "0.1.0",
   "private": true,
   "type": "module",

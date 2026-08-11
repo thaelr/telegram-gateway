@@ -1,4 +1,4 @@
-# chat-router-service
+# telegram-gateway
 
 TypeScript backend for decision-making in chat products.
 
@@ -13,7 +13,7 @@ It keeps routing, access checks, and media-commerce policy outside workflow auto
 
 Typical deployment model:
 
-`event source -> chat-router-service -> workflow/app backend -> external side effects`
+`event source -> telegram-gateway -> workflow/app backend -> external side effects`
 
 ## What Stays In This Service
 
@@ -73,7 +73,7 @@ Media-commerce responses include fields such as:
 ## Repository Layout
 
 ```text
-chat-router-service/
+telegram-gateway/
   .env.example
   README.md
   package.json
