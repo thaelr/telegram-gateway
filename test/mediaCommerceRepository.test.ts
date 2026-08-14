@@ -65,7 +65,6 @@ test("loadOfferStats returns empty catalog for character without configured medi
     scene_turn_no: 2,
     base_price_xtr: 10,
     should_offer: true,
-    storageBaseUrl: "https://media.example.com",
   });
 
   assert.ok(result);
@@ -98,7 +97,6 @@ test("loadMediaContext returns empty catalog for character without configured me
     callback_valid: true,
     panel_text: "panel",
     panel_entities_json: [],
-    storageBaseUrl: "https://media.example.com",
   });
 
   assert.ok(result);
@@ -141,7 +139,6 @@ test("loadOfferStats uses configured catalog for character with media source", a
     scene_turn_no: 2,
     base_price_xtr: 10,
     should_offer: true,
-    storageBaseUrl: "https://media.example.com",
   });
 
   assert.ok(result);
@@ -205,7 +202,6 @@ test("loadMediaContext uses configured catalog for character with media source",
     callback_valid: true,
     panel_text: "panel",
     panel_entities_json: [],
-    storageBaseUrl: "https://media.example.com",
   });
 
   assert.ok(result);

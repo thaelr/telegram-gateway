@@ -987,7 +987,6 @@ export class MediaCommerceDecisionService {
       scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
       base_price_xtr: normalizePositiveInteger(input.base_price_xtr) ?? 10,
       should_offer: normalizeBoolean(input.should_offer),
-      storageBaseUrl: config.MEDIA_STORAGE_BASE_URL,
     });
 
     if (!stats) {
@@ -1297,7 +1296,6 @@ export class MediaCommerceDecisionService {
       callback_valid: true,
       panel_text: panelText,
       panel_entities_json: panelEntities ?? [],
-      storageBaseUrl: config.MEDIA_STORAGE_BASE_URL,
     });
 
     if (!context) {
@@ -1790,7 +1788,6 @@ export class MediaCommerceDecisionService {
       ),
       panel_entities_json:
         parseJsonArray(payload.panel_entities_json) ?? [],
-      storageBaseUrl: config.MEDIA_STORAGE_BASE_URL,
     });
 
     if (!context) {
