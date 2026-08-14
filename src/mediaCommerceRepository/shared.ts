@@ -206,37 +206,3 @@ export function buildMediaFinalizeFallback(
     invoice_rows_updated: 0,
   };
 }
-
-const UTC_TIMESTAMP_MASK = `YYYY-MM-DD"T"HH24:MI:SS.MS"Z"`;
-
-export function sqlJsonObject(expr: string): string {
-  return `COALESCE(${expr}, '{}'::jsonb)`;
-}
-
-export function sqlTrimmedText(expr: string): string {
-  return `NULLIF(BTRIM(${expr}), '')`;
-}
-
-export function sqlTrimmedJsonText(jsonExpr: string, key: string): string {
-  return sqlTrimmedText(`${jsonExpr} ->> '${key}'`);
-}
-
-export function sqlUtcTimestamp(expr: string, alias: string): string {
-  return `CASE
-    WHEN ${expr} IS NULL THEN NULL
-    ELSE to_char(${expr} AT TIME ZONE 'UTC', '${UTC_TIMESTAMP_MASK}')
-  END AS ${alias}`;
-}
-
-export function buildJsonTextRowsCte(paramRef: string): string {
-  return `
-      payload AS (
-        SELECT COALESCE(${paramRef}::jsonb, '[]'::jsonb) AS items
-      ),
-      rows AS (
-        SELECT ${sqlTrimmedText("value")} AS token
-        FROM payload p
-        CROSS JOIN LATERAL jsonb_array_elements_text(p.items) AS value
-      )
-    `;
-}

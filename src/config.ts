@@ -44,8 +44,6 @@ const defaultMediaSubscriptionPlans = [
   },
 ] satisfies Array<z.input<typeof mediaSubscriptionPlanSchema>>;
 
-const defaultMediaCatalogRelationsByCharacter: Record<string, string> = {};
-
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().min(1).default("0.0.0.0"),
@@ -60,29 +58,6 @@ const envSchema = z.object({
     .string()
     .url()
     .default("https://media.example.com"),
-  MEDIA_CATALOG_RELATION: z
-    .string()
-    .regex(/^[A-Za-z0-9_."]+$/u)
-    .default("public.media_catalog"),
-  MEDIA_CHARACTER_CATALOG_RELATIONS_JSON: z
-    .string()
-    .default(JSON.stringify(defaultMediaCatalogRelationsByCharacter))
-    .transform((raw) =>
-      parseJsonEnv(
-        raw,
-        defaultMediaCatalogRelationsByCharacter,
-        z.record(z.string(), z.string().regex(/^[A-Za-z0-9_."]+$/u)),
-      ))
-    .transform((map) =>
-      Object.fromEntries(
-        Object.entries(map).flatMap(([key, value]) => {
-          const normalizedKey = key.trim();
-          const normalizedValue = value.trim();
-          return /^\d+$/u.test(normalizedKey) && normalizedValue.length > 0
-            ? [[normalizedKey, normalizedValue] as const]
-            : [];
-        }),
-      )),
   MEDIA_DEFAULT_BUCKET_NAME: z.string().min(1).default("media_bucket"),
   MEDIA_BUCKET_ALIAS_MAP_JSON: z
     .string()
