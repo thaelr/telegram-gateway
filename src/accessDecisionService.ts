@@ -279,6 +279,20 @@ function classifyRouterInput(input: AccessDecisionRequest): RouterClassification
   };
 }
 
+function formatDaysLabel(days: number): string {
+  const normalizedDays = Math.abs(Math.trunc(days));
+  const mod10 = normalizedDays % 10;
+  const mod100 = normalizedDays % 100;
+
+  if (mod10 === 1 && mod100 !== 11) {
+    return `${normalizedDays} день`;
+  }
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+    return `${normalizedDays} дня`;
+  }
+  return `${normalizedDays} дней`;
+}
+
 function formatSubscriptionStatusText(context: AccessContext): string {
   const sku = String(context.subscription_sku ?? "");
   const rawUntil = context.subscription_until;
@@ -294,11 +308,10 @@ function formatSubscriptionStatusText(context: AccessContext): string {
   const daysLeft = until
     ? Math.max(0, Math.ceil((until.getTime() - Date.now()) / 86_400_000))
     : 0;
-  const label = sku.includes("14")
-    ? "14 дней"
-    : daysLeft <= 5
-      ? "5 дней"
-      : "30 дней";
+  const plan = config.MEDIA_SUBSCRIPTION_PLANS_JSON.find((item) => item.sku === sku);
+  const label = plan
+    ? formatDaysLabel(plan.days)
+    : sku || "неизвестный план";
 
   return [
     "Подписка активна.",

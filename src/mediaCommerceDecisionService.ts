@@ -9,8 +9,10 @@ import {
 import {
   INVOICE_PAYLOAD_KIND,
   hasExpectedPaymentDetails,
+  type ResolvedInvoiceAction,
   resolveInvoiceActionResult,
   toPaidInvoiceToken,
+  validatePrecheckout,
 } from "./mediaCommerce/paymentFlow.js";
 import {
   appendInvoiceButton,
@@ -33,8 +35,8 @@ import {
   parseJsonObject,
 } from "./mediaCommerce/utils.js";
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
+import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema.js";
 import type {
-  MediaCommerceDecisionRequest,
   MediaCommerceDecisionResponse,
   MediaCommerceRoute,
   MediaContext,
@@ -59,6 +61,16 @@ type MediaRepository = Pick<
   | "storeInvoiceLinks"
   | "loadStoredInvoiceTokens"
   | "storeSubscriptionOfferMessageId"
+>;
+
+type SubscriptionPaymentAction = Extract<
+  ResolvedInvoiceAction,
+  { payment_kind: "subscription" }
+>;
+
+type FeaturePaymentAction = Extract<
+  ResolvedInvoiceAction,
+  { payment_kind: "feature" }
 >;
 
 function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute {
@@ -132,10 +144,10 @@ export class MediaCommerceDecisionService {
       return { ...base, reason: "offer_stats_not_found" };
     }
 
-    return this.buildPrepareOfferResponse(base, stats);
+    return this.resolvePrepareOffer(base, stats);
   }
 
-  private async buildPrepareOfferResponse(
+  private async resolvePrepareOffer(
     base: MediaCommerceDecisionResponse,
     stats: MediaOfferStats,
   ): Promise<MediaCommerceDecisionResponse> {
@@ -174,6 +186,19 @@ export class MediaCommerceDecisionService {
     }
 
     if (priceRequired > 0) {
+      const invoicePayload = {
+        action_kind: "photo_payment",
+        chat_id: stats.chat_id,
+        scene_session_id: stats.scene_session_id,
+        turn_no: stats.turn_no,
+        scene_turn_no: stats.scene_turn_no,
+        media_signature: mediaSignature,
+        target_message_id: null,
+        current_uuid: null,
+        base_price_xtr: basePrice,
+        requested_action: "photo_request",
+      } satisfies Record<string, unknown>;
+
       const storedInvoice = await this.repository.upsertInvoiceToken(
         buildPhotoInvoiceInput({
           chat_id: stats.chat_id,
@@ -189,18 +214,7 @@ export class MediaCommerceDecisionService {
           invoice_description: "Открыть фото для этого момента",
           invoice_label: "Фото",
           invoice_button_text: `Получить фото • ${priceRequired} Stars`,
-          payload_json: {
-            action_kind: "photo_payment",
-            chat_id: stats.chat_id,
-            scene_session_id: stats.scene_session_id,
-            turn_no: stats.turn_no,
-            scene_turn_no: stats.scene_turn_no,
-            media_signature: mediaSignature,
-            target_message_id: null,
-            current_uuid: null,
-            base_price_xtr: basePrice,
-            requested_action: "photo_request",
-          },
+          payload_json: invoicePayload,
         }),
       );
 
@@ -234,18 +248,7 @@ export class MediaCommerceDecisionService {
         invoice_label: storedInvoice?.invoice_label ?? "Фото",
         invoice_button_text:
           storedInvoice?.invoice_button_text ?? `Получить фото • ${priceRequired} Stars`,
-        invoice_payload_json: {
-          action_kind: "photo_payment",
-          chat_id: stats.chat_id,
-          scene_session_id: stats.scene_session_id,
-          turn_no: stats.turn_no,
-          scene_turn_no: stats.scene_turn_no,
-          media_signature: mediaSignature,
-          target_message_id: null,
-          current_uuid: null,
-          base_price_xtr: basePrice,
-          requested_action: "photo_request",
-        },
+        invoice_payload_json: invoicePayload,
         invoice_token: storedInvoice?.token ?? null,
         invoice_link: invoiceLink,
         needs_invoice_link: invoiceLink == null,
@@ -457,10 +460,10 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    return this.finalizeMediaActionResponse(callbackBase, context);
+    return this.applyMediaActionDecision(callbackBase, context);
   }
 
-  private async finalizeMediaActionResponse(
+  private async applyMediaActionDecision(
     base: MediaCommerceDecisionResponse,
     context: MediaContext,
   ): Promise<MediaCommerceDecisionResponse> {
@@ -593,53 +596,18 @@ export class MediaCommerceDecisionService {
       invoicePayload,
       chatId,
     );
-    const payload = parseJsonObject(tokenRow?.payload_json) ?? {};
-    const actionResolution = resolveInvoiceActionResult(
-      payload,
-      tokenRow?.action_kind,
+    const validation = validatePrecheckout(
+      tokenRow,
+      normalizeString(input.payment_currency),
+      normalizeNonNegativeInteger(input.payment_total_amount),
     );
-
-    let ok = true;
-    let error = "";
-    let reason = "precheckout_allowed";
-    if (!tokenRow?.found || !tokenRow.token) {
-      ok = false;
-      error = "Счёт больше не актуален.";
-      reason = "invoice_not_found";
-    } else if (normalizeString(tokenRow.kind) !== INVOICE_PAYLOAD_KIND) {
-      ok = false;
-      error = "Счёт больше не актуален.";
-      reason = "invoice_kind_invalid";
-    } else if (actionResolution.reason != null) {
-      ok = false;
-      error = "Этот счёт больше не поддерживается.";
-      reason = actionResolution.reason;
-    } else if (isExpired(tokenRow.expires_at)) {
-      ok = false;
-      error = "Срок оплаты истёк.";
-      reason = "invoice_expired";
-    } else if (normalizeString(tokenRow.status) !== "invoice_sent") {
-      ok = false;
-      error = "Этот счёт уже недоступен.";
-      reason = "invoice_status_invalid";
-    } else if (
-      !hasExpectedPaymentDetails(
-        tokenRow.amount_xtr,
-        normalizeString(input.payment_currency),
-        normalizeNonNegativeInteger(input.payment_total_amount),
-      )
-    ) {
-      ok = false;
-      error = "Сумма счёта больше не совпадает.";
-      reason = "payment_details_mismatch";
-    }
 
     if (tokenRow?.token) {
       await this.repository.storePrecheckoutResult({
         token: tokenRow.token,
         pre_checkout_query_id: normalizeString(input.pre_checkout_query_id),
-        ok,
-        error_message: error || null,
+        ok: validation.ok,
+        error_message: validation.error,
       });
     }
 
@@ -649,11 +617,11 @@ export class MediaCommerceDecisionService {
       chat_id: normalizePositiveInteger(tokenRow?.chat_id) ?? base.chat_id,
       scene_session_id: tokenRow?.scene_session_id ?? base.scene_session_id,
       turn_no: normalizeNonNegativeInteger(tokenRow?.turn_no) ?? base.turn_no,
-      payment_kind: actionResolution.action?.payment_kind ?? null,
-      feature_key: actionResolution.action?.feature_key ?? null,
-      precheckout_ok: ok,
-      precheckout_error: error || null,
-      reason: ok ? "precheckout_allowed" : reason,
+      payment_kind: validation.action?.payment_kind ?? null,
+      feature_key: validation.action?.feature_key ?? null,
+      precheckout_ok: validation.ok,
+      precheckout_error: validation.error,
+      reason: validation.reason,
     };
   }
 
@@ -794,49 +762,54 @@ export class MediaCommerceDecisionService {
     }
 
     if (actionResolution.action.payment_kind === "subscription") {
-      const subscriptionDays = actionResolution.action.subscription_days;
-      const subscriptionSku =
-        actionResolution.action.subscription_sku
-        ?? normalizeString(paidRow.sku);
-      if (subscriptionDays <= 0 || !subscriptionSku) {
-        return {
-          ...base,
-          chat_id: paidRow.chat_id,
-          scene_session_id: paidRow.scene_session_id,
-          turn_no: paidRow.turn_no,
-          payment_kind: "subscription",
-          payment_token: paidRow.token,
-          reason: "invoice_action_kind_invalid",
-        };
-      }
+      return this.fulfillSubscriptionPayment(
+        base,
+        paidRow,
+        actionResolution.action,
+      );
+    }
 
-      const activatedCount = await this.repository.activateSubscription({
-        payment_token: paidRow.token,
-        chat_id: paidRow.chat_id,
-        subscription_sku: subscriptionSku,
-        subscription_days: subscriptionDays,
-      });
+    if (actionResolution.action.payment_kind === "feature") {
+      return this.buildFeatureFulfillmentResponse(
+        base,
+        paidRow,
+        payload,
+        actionResolution.action,
+      );
+    }
 
-      if (activatedCount <= 0) {
-        return {
-          ...base,
-          chat_id: paidRow.chat_id,
-          scene_session_id: paidRow.scene_session_id,
-          turn_no: paidRow.turn_no,
-          payment_kind: "subscription",
-          payment_token: paidRow.token,
-          subscription_days: subscriptionDays,
-          subscription_sku: subscriptionSku,
-          offer_message_id: normalizePositiveInteger(
-            paidRow.telegram_invoice_message_id,
-          ),
-          reason: "subscription_already_activated",
-        };
-      }
+    return this.fulfillPhotoPayment(base, paidRow, payload);
+  }
 
+  private async fulfillSubscriptionPayment(
+    base: MediaCommerceDecisionResponse,
+    paidRow: PaidInvoiceToken,
+    action: SubscriptionPaymentAction,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const subscriptionDays = action.subscription_days;
+    const subscriptionSku = action.subscription_sku ?? normalizeString(paidRow.sku);
+    if (subscriptionDays <= 0 || !subscriptionSku) {
       return {
         ...base,
-        operation: "subscription_activated",
+        chat_id: paidRow.chat_id,
+        scene_session_id: paidRow.scene_session_id,
+        turn_no: paidRow.turn_no,
+        payment_kind: "subscription",
+        payment_token: paidRow.token,
+        reason: "invoice_action_kind_invalid",
+      };
+    }
+
+    const activatedCount = await this.repository.activateSubscription({
+      payment_token: paidRow.token,
+      chat_id: paidRow.chat_id,
+      subscription_sku: subscriptionSku,
+      subscription_days: subscriptionDays,
+    });
+
+    if (activatedCount <= 0) {
+      return {
+        ...base,
         chat_id: paidRow.chat_id,
         scene_session_id: paidRow.scene_session_id,
         turn_no: paidRow.turn_no,
@@ -847,51 +820,83 @@ export class MediaCommerceDecisionService {
         offer_message_id: normalizePositiveInteger(
           paidRow.telegram_invoice_message_id,
         ),
-        stored_count: activatedCount,
-        reason: "subscription_activated",
+        reason: "subscription_already_activated",
       };
     }
 
-    if (actionResolution.action.payment_kind === "feature") {
-      return {
-        ...base,
-        operation: "feature_fulfillment_required",
-        chat_id:
-          normalizePositiveInteger(payload.chat_id)
-          ?? paidRow.chat_id,
-        scene_session_id: normalizeString(
-          typeof payload.scene_session_id === "string"
-            ? payload.scene_session_id
-            : paidRow.scene_session_id,
-        ),
-        turn_no:
-          normalizeNonNegativeInteger(payload.turn_no)
-          ?? normalizeNonNegativeInteger(paidRow.turn_no),
-        scene_turn_no: normalizeNonNegativeInteger(payload.scene_turn_no),
-        character_i: normalizePositiveInteger(payload.character_i),
-        scene_mode: normalizeString(
-          typeof payload.scene_mode === "string"
-            ? payload.scene_mode
-            : null,
-        ),
-        media_signature: normalizeString(
-          typeof payload.media_signature === "string"
-            ? payload.media_signature
-            : null,
-        ),
-        target_message_id: normalizePositiveInteger(payload.target_message_id),
-        payment_kind: "feature",
-        payment_token: paidRow.token,
-        feature_key: actionResolution.action.feature_key,
-        reason: `feature_${actionResolution.action.feature_key}_fulfillment_required`,
-      };
-    }
+    return {
+      ...base,
+      operation: "subscription_activated",
+      chat_id: paidRow.chat_id,
+      scene_session_id: paidRow.scene_session_id,
+      turn_no: paidRow.turn_no,
+      payment_kind: "subscription",
+      payment_token: paidRow.token,
+      subscription_days: subscriptionDays,
+      subscription_sku: subscriptionSku,
+      offer_message_id: normalizePositiveInteger(
+        paidRow.telegram_invoice_message_id,
+      ),
+      stored_count: activatedCount,
+      reason: "subscription_activated",
+    };
+  }
+
+  private buildFeatureFulfillmentResponse(
+    base: MediaCommerceDecisionResponse,
+    paidRow: PaidInvoiceToken,
+    payload: Record<string, unknown>,
+    action: FeaturePaymentAction,
+  ): MediaCommerceDecisionResponse {
+    return {
+      ...base,
+      operation: "feature_fulfillment_required",
+      chat_id:
+        normalizePositiveInteger(payload.chat_id)
+        ?? paidRow.chat_id,
+      scene_session_id: normalizeString(
+        typeof payload.scene_session_id === "string"
+          ? payload.scene_session_id
+          : paidRow.scene_session_id,
+      ),
+      turn_no:
+        normalizeNonNegativeInteger(payload.turn_no)
+        ?? normalizeNonNegativeInteger(paidRow.turn_no),
+      scene_turn_no: normalizeNonNegativeInteger(payload.scene_turn_no),
+      character_i: normalizePositiveInteger(payload.character_i),
+      scene_mode: normalizeString(
+        typeof payload.scene_mode === "string"
+          ? payload.scene_mode
+          : null,
+      ),
+      media_signature: normalizeString(
+        typeof payload.media_signature === "string"
+          ? payload.media_signature
+          : null,
+      ),
+      target_message_id: normalizePositiveInteger(payload.target_message_id),
+      payment_kind: "feature",
+      payment_token: paidRow.token,
+      feature_key: action.feature_key,
+      reason: `feature_${action.feature_key}_fulfillment_required`,
+    };
+  }
+
+  private async fulfillPhotoPayment(
+    base: MediaCommerceDecisionResponse,
+    paidRow: PaidInvoiceToken,
+    payload: Record<string, unknown>,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const requestedAction =
+      normalizeString(
+        typeof payload.requested_action === "string"
+          ? payload.requested_action
+          : null,
+      ) ?? "photo_request";
 
     const context = await this.repository.loadMediaContext({
       chat_id:
-        normalizePositiveInteger(
-          payload.chat_id,
-        )
+        normalizePositiveInteger(payload.chat_id)
         ?? paidRow.chat_id,
       scene_session_id: normalizeString(
         typeof payload.scene_session_id === "string"
@@ -917,18 +922,8 @@ export class MediaCommerceDecisionService {
         normalizePositiveInteger(payload.base_price_xtr)
         ?? normalizePositiveInteger(paidRow.amount_xtr)
         ?? 10,
-      action_kind:
-        normalizeString(
-          typeof payload.requested_action === "string"
-            ? payload.requested_action
-            : null,
-        ) ?? "photo_request",
-      requested_action:
-        normalizeString(
-          typeof payload.requested_action === "string"
-            ? payload.requested_action
-            : null,
-        ) ?? "photo_request",
+      action_kind: requestedAction,
+      requested_action: requestedAction,
       invoice_token: paidRow.token,
       force_deliver_after_payment: true,
       paid_access_mode: "paid",
@@ -952,7 +947,7 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    const response = await this.finalizeMediaActionResponse(
+    const response = await this.applyMediaActionDecision(
       {
         ...base,
         callback_valid: true,

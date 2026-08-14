@@ -1,10 +1,10 @@
 import type {
   MediaButton,
-  MediaCommerceDecisionRequest,
   MediaCommerceDecisionResponse,
   MediaReplyMarkup,
   MediaCommerceRoute,
 } from "../mediaCommerceTypes.js";
+import type { MediaCommerceDecisionRequest } from "./requestSchema.js";
 import { normalizeFeatureKey } from "./paymentFlow.js";
 import {
   normalizeLowerString,
@@ -121,4 +121,3 @@ export function buildBaseResponse(
     panel_entities_json: parseJsonArray(input.panel_entities_json),
   };
 }
-

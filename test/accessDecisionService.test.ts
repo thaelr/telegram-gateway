@@ -223,6 +223,50 @@ test("returns subscription status for /subscription with active subscription", a
   assert.match(result.text ?? "", /Подписка активна/u);
 });
 
+test("formats 30-day subscription plan from sku even when 4 days are left", async () => {
+  const { service } = createService(
+    buildAccessContext({
+      subscription_active: true,
+      subscription_sku: "media_sub_30d",
+      subscription_until: new Date(Date.now() + 4 * 86_400_000).toISOString(),
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/subscription",
+      event_type: "command.received",
+      message_type: "command",
+    }),
+  );
+
+  assert.equal(result.action, "show_subscription_status");
+  assert.match(result.text ?? "", /План: 30 дней\./u);
+  assert.match(result.text ?? "", /Осталось примерно: 4 дн\./u);
+});
+
+test("formats 14-day subscription plan from sku", async () => {
+  const { service } = createService(
+    buildAccessContext({
+      subscription_active: true,
+      subscription_sku: "media_sub_14d",
+      subscription_until: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/subscription",
+      event_type: "command.received",
+      message_type: "command",
+    }),
+  );
+
+  assert.equal(result.action, "show_subscription_status");
+  assert.match(result.text ?? "", /План: 14 дней\./u);
+  assert.match(result.text ?? "", /Осталось примерно: 2 дн\./u);
+});
+
 test("returns subscription offer for /subscription without active subscription", async () => {
   const { service } = createService(buildAccessContext());
 

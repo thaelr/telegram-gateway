@@ -83,64 +83,6 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
   idempotency_key?: string | null;
 }
 
-export interface MediaCommerceDecisionRequest {
-  interaction_mode?: string | null;
-  event_type?: string | null;
-  chat_id?: number | null;
-  scene_session_id?: string | null;
-  turn_no?: number | null;
-  scene_turn_no?: number | null;
-  character_i?: number | null;
-  scene_mode?: string | null;
-  media_signature?: string | null;
-  base_price_xtr?: number | null;
-  should_offer?: boolean | null;
-  panel_message_id?: number | null;
-  price_required?: number | null;
-  has_media_offer?: boolean | null;
-  reply_markup?: unknown;
-  token_rows_prepared?: number | null;
-  callback_data?: string | null;
-  callback_query_id?: string | null;
-  inbound_message_id?: number | null;
-  panel_text?: string | null;
-  panel_entities_json?: unknown;
-  raw_update?: unknown;
-  invoice_payload?: string | null;
-  pre_checkout_query_id?: string | null;
-  telegram_payment_charge_id?: string | null;
-  provider_payment_charge_id?: string | null;
-  payment_currency?: string | null;
-  payment_total_amount?: number | null;
-  feature_key?: string | null;
-  invoice_link?: string | null;
-  invoice_token?: string | null;
-  fulfillment_invoice_token?: string | null;
-  target_message_id?: number | null;
-  current_uuid?: string | null;
-  action_kind?: string | null;
-  requested_action?: string | null;
-  force_deliver_after_payment?: boolean | null;
-  paid_access_mode?: string | null;
-  log_event_type?: string | null;
-  access_mode?: string | null;
-  log_price_xtr?: number | null;
-  photo_url?: string | null;
-  selected_uuid?: string | null;
-  caption_text?: string | null;
-  caption_entities_json?: unknown;
-  subscription_offer_reason?: MediaSubscriptionOfferReason | null;
-  turn_limit?: number | null;
-  turns_today?: number | null;
-  turn_limit_reset_text?: string | null;
-  idempotency_key?: string | null;
-  created_invoice_links?: CreatedInvoiceLink[] | null;
-  offer_message_id?: number | null;
-  subscription_invoice_tokens?: string[] | null;
-  source?: string | null;
-  update_id?: number | null;
-}
-
 export interface MediaCommerceDecisionResponse {
   route: MediaCommerceRoute;
   operation: MediaCommerceOperation;

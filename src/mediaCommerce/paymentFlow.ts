@@ -4,6 +4,7 @@ import type {
   PaidInvoiceToken,
 } from "../mediaCommerceTypes.js";
 import {
+  isExpired,
   normalizeNonNegativeInteger,
   normalizePositiveInteger,
   normalizeString,
@@ -19,6 +20,13 @@ const SUPPORTED_PAYMENT_ACTIONS = new Set([
 const SUPPORTED_FEATURE_KEYS = new Set(["fast_scene_skip"]);
 
 export const INVOICE_PAYLOAD_KIND = "invoice_payload";
+
+export type PrecheckoutValidationResult = {
+  ok: boolean;
+  error: string | null;
+  reason: string;
+  action: ResolvedInvoiceAction | null;
+};
 
 export type ResolvedInvoiceAction =
   | {
@@ -197,5 +205,84 @@ export function toPaidInvoiceToken(
     amount_xtr: normalizeNonNegativeInteger(row.amount_xtr),
     telegram_invoice_message_id:
       normalizePositiveInteger(row.telegram_invoice_message_id) ?? null,
+  };
+}
+
+export function validatePrecheckout(
+  tokenRow: LoadedInvoiceToken | null | undefined,
+  paymentCurrency: string | null | undefined,
+  paymentTotalAmount: number | null | undefined,
+): PrecheckoutValidationResult {
+  const payload = parseJsonObject(tokenRow?.payload_json) ?? {};
+  const actionResolution = resolveInvoiceActionResult(
+    payload,
+    tokenRow?.action_kind,
+  );
+
+  if (!tokenRow?.found || !tokenRow.token) {
+    return {
+      ok: false,
+      error: "Счёт больше не актуален.",
+      reason: "invoice_not_found",
+      action: actionResolution.action,
+    };
+  }
+
+  if (normalizeString(tokenRow.kind) !== INVOICE_PAYLOAD_KIND) {
+    return {
+      ok: false,
+      error: "Счёт больше не актуален.",
+      reason: "invoice_kind_invalid",
+      action: actionResolution.action,
+    };
+  }
+
+  if (actionResolution.reason != null) {
+    return {
+      ok: false,
+      error: "Этот счёт больше не поддерживается.",
+      reason: actionResolution.reason,
+      action: actionResolution.action,
+    };
+  }
+
+  if (isExpired(tokenRow.expires_at)) {
+    return {
+      ok: false,
+      error: "Срок оплаты истёк.",
+      reason: "invoice_expired",
+      action: actionResolution.action,
+    };
+  }
+
+  if (normalizeString(tokenRow.status) !== "invoice_sent") {
+    return {
+      ok: false,
+      error: "Этот счёт уже недоступен.",
+      reason: "invoice_status_invalid",
+      action: actionResolution.action,
+    };
+  }
+
+  if (
+    !hasExpectedPaymentDetails(
+      tokenRow.amount_xtr,
+      normalizeString(paymentCurrency),
+      normalizeNonNegativeInteger(paymentTotalAmount),
+    )
+  ) {
+    return {
+      ok: false,
+      error: "Сумма счёта больше не совпадает.",
+      reason: "payment_details_mismatch",
+      action: actionResolution.action,
+    };
+  }
+
+  return {
+    ok: true,
+    error: null,
+    reason: "precheckout_allowed",
+    action: actionResolution.action,
   };
 }

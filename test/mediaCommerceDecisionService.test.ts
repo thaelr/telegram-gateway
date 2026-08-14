@@ -4,12 +4,12 @@ import type {
   InteractionTokenRow,
   LoadedCallbackToken,
   LoadedInvoiceToken,
-  MediaCommerceDecisionRequest,
   MediaContext,
   MediaOfferStats,
   PaidInvoiceToken,
   StoredInvoiceToken,
 } from "../src/mediaCommerceTypes.js";
+import type { MediaCommerceDecisionRequest } from "../src/mediaCommerce/requestSchema.js";
 
 process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
 process.env.INTERNAL_API_KEY ??= "test-internal-key";
