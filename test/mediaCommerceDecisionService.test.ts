@@ -17,6 +17,90 @@ process.env.TURN_LIMIT ??= "15";
 process.env.BUSINESS_TIME_ZONE ??= "Europe/Moscow";
 process.env.TURN_LIMIT_RESET_TEXT ??= "00:00 МСК";
 process.env.MEDIA_STORAGE_BASE_URL ??= "https://media.example.com";
+process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_plan_1",
+    days: 14,
+    amount_xtr: 100,
+    title: "Payment plan 1",
+    description: "Access plan option 1 for chat and media actions.",
+    label: "Payment plan 1",
+    button_text: "Payment plan 1",
+  },
+  {
+    sku: "payment_plan_2",
+    days: 30,
+    amount_xtr: 200,
+    title: "Payment plan 2",
+    description: "Access plan option 2 for chat and media actions.",
+    label: "Payment plan 2",
+    button_text: "Payment plan 2",
+  },
+  {
+    sku: "payment_plan_3",
+    days: 60,
+    amount_xtr: 300,
+    title: "Payment plan 3",
+    description: "Access plan option 3 for chat and media actions.",
+    label: "Payment plan 3",
+    button_text: "Payment plan 3",
+  },
+]);
+process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_media_1",
+    amount_xtr: 10,
+    title: "Payment media 1",
+    description: "Media payment option 1.",
+    label: "Payment media 1",
+    button_text: "Payment media 1",
+  },
+  {
+    sku: "payment_media_2",
+    amount_xtr: 25,
+    title: "Payment media 2",
+    description: "Media payment option 2.",
+    label: "Payment media 2",
+    button_text: "Payment media 2",
+  },
+  {
+    sku: "payment_media_3",
+    amount_xtr: 50,
+    title: "Payment media 3",
+    description: "Media payment option 3.",
+    label: "Payment media 3",
+    button_text: "Payment media 3",
+  },
+]);
+process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_action_1",
+    feature_key: "fast_scene_skip",
+    amount_xtr: 50,
+    title: "Payment action 1",
+    description: "Feature payment option 1.",
+    label: "Payment action 1",
+    button_text: "Payment action 1",
+  },
+  {
+    sku: "payment_action_2",
+    feature_key: "future_action_2",
+    amount_xtr: 75,
+    title: "Payment action 2",
+    description: "Feature payment option 2.",
+    label: "Payment action 2",
+    button_text: "Payment action 2",
+  },
+  {
+    sku: "payment_action_3",
+    feature_key: "future_action_3",
+    amount_xtr: 100,
+    title: "Payment action 3",
+    description: "Feature payment option 3.",
+    label: "Payment action 3",
+    button_text: "Payment action 3",
+  },
+]);
 
 const { MediaCommerceDecisionService } = await import(
   "../src/mediaCommerceDecisionService.js"
@@ -186,17 +270,17 @@ function buildStoredInvoiceToken(
     turn_no: 5,
     scene_turn_no: 3,
     payload_json: {},
-    sku: "media_photo_10_xtr",
+    sku: "payment_media_1",
     amount_xtr: 10,
     telegram_invoice_payload: "inv_token",
     expires_at: new Date(Date.now() + 60_000).toISOString(),
     telegram_invoice_message_id: null,
     invoice_link: null,
     stored: true,
-    invoice_title: "Фото",
-    invoice_description: "Открыть фото",
-    invoice_label: "Фото",
-    invoice_button_text: "Получить фото • 10 Stars",
+    invoice_title: "Payment media 1",
+    invoice_description: "Media payment option 1.",
+    invoice_label: "Payment media 1",
+    invoice_button_text: "Payment media 1",
     status: "invoice_sent",
     action_kind: "photo_payment",
     ...overrides,
@@ -226,7 +310,7 @@ function buildLoadedInvoiceToken(
     },
     status: "invoice_sent",
     action_kind: "photo_payment",
-    sku: "media_photo_10_xtr",
+    sku: "payment_media_1",
     amount_xtr: 10,
     expires_at: new Date(Date.now() + 60_000).toISOString(),
     telegram_invoice_message_id: null,
@@ -257,7 +341,7 @@ function buildPaidInvoiceToken(
     },
     status: "paid",
     action_kind: "photo_payment",
-    sku: "media_photo_10_xtr",
+    sku: "payment_media_1",
     amount_xtr: 10,
     telegram_invoice_message_id: null,
     ...overrides,
@@ -367,14 +451,18 @@ function createRepository(
       return tokens.map((token, index) =>
         buildStoredInvoiceToken({
           token,
-          sku: index === 0 ? "media_sub_14d" : "media_sub_30d",
-          amount_xtr: index === 0 ? 100 : 200,
-          invoice_title: index === 0 ? "Subscription plan A" : "Subscription plan B",
+          sku:
+            index === 0 ? "payment_plan_1" : index === 1 ? "payment_plan_2" : "payment_plan_3",
+          amount_xtr: index === 0 ? 100 : index === 1 ? 200 : 300,
+          invoice_title:
+            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
           invoice_description: "Subscription access",
-          invoice_label: index === 0 ? "Plan A" : "Plan B",
-          invoice_button_text: index === 0 ? "Plan A" : "Plan B",
+          invoice_label:
+            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
+          invoice_button_text:
+            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
           payload_json: {
-            subscription_days: index === 0 ? 14 : 30,
+            subscription_days: index === 0 ? 14 : index === 1 ? 30 : 60,
             subscription_offer_reason: "subscription_command",
             turn_limit: 15,
             turns_today: 0,
@@ -480,6 +568,8 @@ test("feature_offer is routed in TS and keeps feature execution context", async 
   assert.equal(result.route, "feature_offer");
   assert.equal(result.operation, "feature_offer_required");
   assert.equal(result.chat_id, 101);
+  assert.equal(result.invoice_sku, "payment_action_1");
+  assert.equal(result.invoice_amount, 50);
   assert.equal(result.character_i, 2);
   assert.equal(result.scene_mode, "fast");
   assert.equal(result.target_message_id, 777);
@@ -631,7 +721,7 @@ test("pre_checkout rejects mismatched row and payload action_kind", async () => 
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "media_sub_14d",
+          subscription_sku: "payment_plan_1",
           chat_id: 101,
         },
       });
@@ -736,24 +826,24 @@ test("payment_success activates subscription for subscription invoices", async (
     async loadInvoiceToken() {
       return buildLoadedInvoiceToken({
         action_kind: "subscription_payment",
-        sku: "media_sub_14d",
+        sku: "payment_plan_1",
         amount_xtr: 100,
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "media_sub_14d",
+          subscription_sku: "payment_plan_1",
         },
       });
     },
     async markInvoicePaid() {
       return buildPaidInvoiceToken({
         action_kind: "subscription_payment",
-        sku: "media_sub_14d",
+        sku: "payment_plan_1",
         amount_xtr: 100,
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "media_sub_14d",
+          subscription_sku: "payment_plan_1",
         },
         telegram_invoice_message_id: 777,
       });
@@ -775,7 +865,7 @@ test("payment_success activates subscription for subscription invoices", async (
 
   assert.equal(result.operation, "subscription_activated");
   assert.equal(result.payment_kind, "subscription");
-  assert.equal(result.subscription_sku, "media_sub_14d");
+  assert.equal(result.subscription_sku, "payment_plan_1");
   assert.equal(result.offer_message_id, 777);
   assert.equal(calls.activateSubscription, 1);
 });
@@ -892,7 +982,7 @@ test("payment_success rejects mismatched row and payload action_kind", async () 
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "media_sub_14d",
+          subscription_sku: "payment_plan_1",
           chat_id: 101,
         },
       });
@@ -1067,12 +1157,12 @@ test("payment_success does not re-activate an already processed subscription", a
       calls.loadInvoiceTokenArgs.push({ token, chatId });
       return buildLoadedInvoiceToken({
         action_kind: "subscription_payment",
-        sku: "media_sub_14d",
+        sku: "payment_plan_1",
         amount_xtr: 100,
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "media_sub_14d",
+          subscription_sku: "payment_plan_1",
         },
       });
     },
@@ -1080,12 +1170,12 @@ test("payment_success does not re-activate an already processed subscription", a
       calls.markInvoicePaid += 1;
       return buildPaidInvoiceToken({
         action_kind: "subscription_payment",
-        sku: "media_sub_14d",
+        sku: "payment_plan_1",
         amount_xtr: 100,
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "media_sub_14d",
+          subscription_sku: "payment_plan_1",
         },
       });
     },
@@ -1120,7 +1210,7 @@ test("payment_success returns deferred feature fulfillment for supported feature
       calls.loadInvoiceTokenArgs.push({ token, chatId });
       return buildLoadedInvoiceToken({
         action_kind: "feature_payment",
-        sku: "feature_fast_scene_skip_50_xtr",
+        sku: "payment_action_1",
         amount_xtr: 50,
         payload_json: {
           action_kind: "feature_payment",
@@ -1140,7 +1230,7 @@ test("payment_success returns deferred feature fulfillment for supported feature
       calls.markInvoicePaid += 1;
       return buildPaidInvoiceToken({
         action_kind: "feature_payment",
-        sku: "feature_fast_scene_skip_50_xtr",
+        sku: "payment_action_1",
         amount_xtr: 50,
         payload_json: {
           action_kind: "feature_payment",
@@ -1275,11 +1365,12 @@ test("subscription_offer returns missing invoice links when links are not stored
   );
 
   assert.equal(result.operation, "subscription_offer_links_needed");
-  assert.equal(result.missing_invoice_link_count, 2);
-  assert.equal(result.subscription_invoice_tokens?.length, 2);
+  assert.equal(result.missing_invoice_link_count, 3);
+  assert.equal(result.subscription_invoice_tokens?.length, 3);
   assert.deepEqual(result.subscription_invoice_tokens, [
-    "telegram:1:media_sub_14d",
-    "telegram:1:media_sub_30d",
+    "telegram:1:payment_plan_1",
+    "telegram:1:payment_plan_2",
+    "telegram:1:payment_plan_3",
   ]);
 });
 
@@ -1301,14 +1392,18 @@ test("subscription_offer becomes ready after created links are persisted", async
       return tokens.map((token, index) =>
         buildStoredInvoiceToken({
           token,
-          sku: index === 0 ? "media_sub_14d" : "media_sub_30d",
-          amount_xtr: index === 0 ? 100 : 200,
-          invoice_title: index === 0 ? "Subscription plan A" : "Subscription plan B",
+          sku:
+            index === 0 ? "payment_plan_1" : index === 1 ? "payment_plan_2" : "payment_plan_3",
+          amount_xtr: index === 0 ? 100 : index === 1 ? 200 : 300,
+          invoice_title:
+            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
           invoice_description: "Subscription access",
-          invoice_label: index === 0 ? "Plan A" : "Plan B",
-          invoice_button_text: index === 0 ? "Plan A" : "Plan B",
+          invoice_label:
+            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
+          invoice_button_text:
+            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
           payload_json: {
-            subscription_days: index === 0 ? 14 : 30,
+            subscription_days: index === 0 ? 14 : index === 1 ? 30 : 60,
             subscription_offer_reason: "daily_turn_limit",
             turn_limit: 15,
             turns_today: 15,
@@ -1334,12 +1429,16 @@ test("subscription_offer becomes ready after created links are persisted", async
       turn_limit_reset_text: "00:00 МСК",
       created_invoice_links: [
         {
-          token: "telegram:1:media_sub_14d",
+          token: "telegram:1:payment_plan_1",
           invoice_link: "https://t.me/invoice-1",
         },
         {
-          token: "telegram:1:media_sub_30d",
+          token: "telegram:1:payment_plan_2",
           invoice_link: "https://t.me/invoice-2",
+        },
+        {
+          token: "telegram:1:payment_plan_3",
+          invoice_link: "https://t.me/invoice-3",
         },
       ],
     }),
@@ -1349,7 +1448,7 @@ test("subscription_offer becomes ready after created links are persisted", async
   assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.offer_reused, true);
   assert.match(result.text ?? "", /лимит исчерпан/u);
-  assert.equal(result.reply_markup?.inline_keyboard.length, 2);
+  assert.equal(result.reply_markup?.inline_keyboard.length, 3);
 });
 
 test("prepare_offer uses random unique invoice tokens for photo payments", async () => {

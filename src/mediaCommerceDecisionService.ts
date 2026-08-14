@@ -24,6 +24,10 @@ import {
   mergeStoredRowsWithMetadata,
 } from "./mediaCommerce/subscriptionFlow.js";
 import {
+  resolveActionPlanByFeatureKey,
+  resolvePhotoPlanByAmount,
+} from "./mediaCommerce/plans.js";
+import {
   extractPanelFromRawUpdate,
   isExpired,
   normalizeBoolean,
@@ -186,6 +190,7 @@ export class MediaCommerceDecisionService {
     }
 
     if (priceRequired > 0) {
+      const photoPlan = resolvePhotoPlanByAmount(priceRequired);
       const invoicePayload = {
         action_kind: "photo_payment",
         chat_id: stats.chat_id,
@@ -209,11 +214,12 @@ export class MediaCommerceDecisionService {
           target_message_id: null,
           current_uuid: null,
           base_price_xtr: basePrice,
-          amount_xtr: priceRequired,
-          invoice_title: "Фото",
-          invoice_description: "Открыть фото для этого момента",
-          invoice_label: "Фото",
-          invoice_button_text: `Получить фото • ${priceRequired} Stars`,
+          amount_xtr: photoPlan.amount_xtr,
+          invoice_sku: photoPlan.sku,
+          invoice_title: photoPlan.title,
+          invoice_description: photoPlan.description,
+          invoice_label: photoPlan.label,
+          invoice_button_text: photoPlan.button_text,
           payload_json: invoicePayload,
         }),
       );
@@ -222,7 +228,7 @@ export class MediaCommerceDecisionService {
       const replyMarkup = invoiceLink
         ? appendInvoiceButton(
           { inline_keyboard: [] },
-          String(storedInvoice?.invoice_button_text ?? `Получить фото • ${priceRequired} Stars`),
+          String(storedInvoice?.invoice_button_text ?? photoPlan.button_text),
           invoiceLink,
         )
         : { inline_keyboard: [] };
@@ -240,14 +246,14 @@ export class MediaCommerceDecisionService {
         has_media_offer: true,
         reply_markup: replyMarkup,
         invoice_kind: "photo",
-        invoice_sku: storedInvoice?.sku ?? null,
-        invoice_amount: storedInvoice?.amount_xtr ?? priceRequired,
-        invoice_title: storedInvoice?.invoice_title ?? "Фото",
+        invoice_sku: storedInvoice?.sku ?? photoPlan.sku,
+        invoice_amount: storedInvoice?.amount_xtr ?? photoPlan.amount_xtr,
+        invoice_title: storedInvoice?.invoice_title ?? photoPlan.title,
         invoice_description:
-          storedInvoice?.invoice_description ?? "Открыть фото для этого момента",
-        invoice_label: storedInvoice?.invoice_label ?? "Фото",
+          storedInvoice?.invoice_description ?? photoPlan.description,
+        invoice_label: storedInvoice?.invoice_label ?? photoPlan.label,
         invoice_button_text:
-          storedInvoice?.invoice_button_text ?? `Получить фото • ${priceRequired} Stars`,
+          storedInvoice?.invoice_button_text ?? photoPlan.button_text,
         invoice_payload_json: invoicePayload,
         invoice_token: storedInvoice?.token ?? null,
         invoice_link: invoiceLink,
@@ -339,10 +345,21 @@ export class MediaCommerceDecisionService {
       return { ...base, reason: "chat_id_required" };
     }
 
+    const featureKey = normalizeString(input.feature_key) ?? "fast_scene_skip";
+    const actionPlan = resolveActionPlanByFeatureKey(featureKey);
+
     return {
       ...base,
       operation: "feature_offer_required",
       chat_id: chatId,
+      feature_key: featureKey,
+      invoice_kind: actionPlan ? "feature" : null,
+      invoice_sku: actionPlan?.sku ?? null,
+      invoice_amount: actionPlan?.amount_xtr ?? null,
+      invoice_title: actionPlan?.title ?? null,
+      invoice_description: actionPlan?.description ?? null,
+      invoice_label: actionPlan?.label ?? null,
+      invoice_button_text: actionPlan?.button_text ?? null,
       reason: "feature_offer_required",
     };
   }
@@ -488,6 +505,7 @@ export class MediaCommerceDecisionService {
 
     if (
       decision.invoice_kind === "photo"
+      && decision.invoice_sku
       && decision.invoice_amount
       && decision.invoice_title
       && decision.invoice_description
@@ -507,6 +525,7 @@ export class MediaCommerceDecisionService {
           current_uuid: decision.current_uuid,
           base_price_xtr: Number(context.base_price_xtr ?? 10),
           amount_xtr: decision.invoice_amount,
+          invoice_sku: decision.invoice_sku,
           invoice_title: decision.invoice_title,
           invoice_description: decision.invoice_description,
           invoice_label: decision.invoice_label,

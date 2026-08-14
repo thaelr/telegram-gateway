@@ -4,6 +4,38 @@ import type { AccessContext } from "../src/types.js";
 
 process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
 process.env.INTERNAL_API_KEY ??= "test-internal-key";
+process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_plan_1",
+    days: 14,
+    amount_xtr: 111,
+    title: "Payment plan 1",
+    description: "Access plan option 1 for chat and media actions.",
+    label: "Payment plan 1",
+    button_text: "Payment plan 1",
+  },
+]);
+process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_media_1",
+    amount_xtr: 11,
+    title: "Payment media 1",
+    description: "Media payment option 1.",
+    label: "Payment media 1",
+    button_text: "Payment media 1",
+  },
+]);
+process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_action_1",
+    feature_key: "fast_scene_skip",
+    amount_xtr: 55,
+    title: "Payment action 1",
+    description: "Feature payment option 1.",
+    label: "Payment action 1",
+    button_text: "Payment action 1",
+  },
+]);
 
 const { ChatAccessRepository } = await import("../src/chatAccessRepository.js");
 

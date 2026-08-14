@@ -15,6 +15,7 @@ import {
   parseJsonArray,
   parseJsonObject,
 } from "./utils.js";
+import { resolvePhotoPlanByAmount } from "./plans.js";
 
 export const PHOTO_ACTIONS = new Set([
   "photo_request",
@@ -151,10 +152,6 @@ export function buildCallbackTokenRow(input: {
   };
 }
 
-function resolvePhotoSku(amountXtr: number): "media_photo_10_xtr" | "media_photo_25_xtr" {
-  return amountXtr >= 25 ? "media_photo_25_xtr" : "media_photo_10_xtr";
-}
-
 export function buildPhotoInvoiceInput(input: {
   chat_id: number;
   scene_session_id: string | null;
@@ -165,6 +162,7 @@ export function buildPhotoInvoiceInput(input: {
   current_uuid: string | null;
   base_price_xtr: number;
   amount_xtr: number;
+  invoice_sku: string;
   invoice_title: string;
   invoice_description: string;
   invoice_label: string;
@@ -182,7 +180,7 @@ export function buildPhotoInvoiceInput(input: {
     scene_turn_no: input.scene_turn_no,
     payload_json: input.payload_json,
     action_kind: "photo_payment",
-    sku: resolvePhotoSku(input.amount_xtr),
+    sku: input.invoice_sku,
     amount_xtr: input.amount_xtr,
     telegram_invoice_payload: token,
     expires_at: new Date(Date.now() + INVOICE_TTL_MS).toISOString(),
@@ -383,14 +381,15 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
 
   if (unseenAfter > 0) {
     if (nextPrice > 0) {
+      const photoPlan = resolvePhotoPlanByAmount(nextPrice);
       finalOperation = "edit_photo_with_invoice_link";
       invoiceKind = "photo";
-      invoiceSku = resolvePhotoSku(nextPrice);
-      invoiceAmount = nextPrice;
-      invoiceTitle = "Фото";
-      invoiceDescription = "Открыть ещё один вариант для этого момента";
-      invoiceLabel = "Фото";
-      invoiceButtonText = `Ещё фото • ${nextPrice} Stars`;
+      invoiceSku = photoPlan.sku;
+      invoiceAmount = photoPlan.amount_xtr;
+      invoiceTitle = photoPlan.title;
+      invoiceDescription = photoPlan.description;
+      invoiceLabel = photoPlan.label;
+      invoiceButtonText = photoPlan.button_text;
       invoicePayload = {
         action_kind: "photo_payment",
         chat_id: context.chat_id,

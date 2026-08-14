@@ -4,6 +4,38 @@ import assert from "node:assert/strict";
 process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
 process.env.INTERNAL_API_KEY ??= "test-internal-key";
 process.env.MEDIA_STORAGE_BASE_URL = "https://media.example.com";
+process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_plan_1",
+    days: 14,
+    amount_xtr: 100,
+    title: "Payment plan 1",
+    description: "Access plan option 1 for chat and media actions.",
+    label: "Payment plan 1",
+    button_text: "Payment plan 1",
+  },
+]);
+process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_media_1",
+    amount_xtr: 10,
+    title: "Payment media 1",
+    description: "Media payment option 1.",
+    label: "Payment media 1",
+    button_text: "Payment media 1",
+  },
+]);
+process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_action_1",
+    feature_key: "fast_scene_skip",
+    amount_xtr: 50,
+    title: "Payment action 1",
+    description: "Feature payment option 1.",
+    label: "Payment action 1",
+    button_text: "Payment action 1",
+  },
+]);
 
 const { MediaCommerceRepository } = await import(
   "../src/mediaCommerceRepository.js"
@@ -277,7 +309,7 @@ test("loadInvoiceToken delegates to media_load_interaction_token and preserves i
       status: "invoice_sent",
       action_kind: "photo_payment",
       expires_at: "2026-08-14T10:00:00.000Z",
-      sku: "media_photo_10_xtr",
+      sku: "payment_media_1",
       amount_xtr: 10,
       telegram_invoice_message_id: 777,
       found: true,
@@ -288,7 +320,7 @@ test("loadInvoiceToken delegates to media_load_interaction_token and preserves i
   const result = await repository.loadInvoiceToken("inv-1", 101);
 
   assert.equal(result?.token, "inv-1");
-  assert.equal(result?.sku, "media_photo_10_xtr");
+  assert.equal(result?.sku, "payment_media_1");
   assert.equal(result?.amount_xtr, 10);
   assert.equal(result?.telegram_invoice_message_id, 777);
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_interaction_token\(/u);
@@ -350,7 +382,7 @@ test("loadStoredInvoiceTokens delegates to media_load_stored_invoice_tokens", as
       turn_no: 5,
       scene_turn_no: null,
       payload_json: { invoice_link: "https://example.com/invoice" },
-      sku: "media_photo_10_xtr",
+      sku: "payment_media_1",
       amount_xtr: 10,
       telegram_invoice_payload: "inv-payload",
       expires_at: "2026-08-14T10:00:00.000Z",
@@ -441,7 +473,7 @@ test("upsertInvoiceToken delegates to media_upsert_invoice_token and preserves f
       turn_no: 5,
       scene_turn_no: 2,
       payload_json: {},
-      sku: "media_photo_10_xtr",
+      sku: "payment_media_1",
       amount_xtr: 10,
       telegram_invoice_payload: "inv-payload",
       expires_at: "2026-08-14T10:00:00.000Z",
@@ -465,7 +497,7 @@ test("upsertInvoiceToken delegates to media_upsert_invoice_token and preserves f
     scene_turn_no: 2,
     payload_json: {},
     action_kind: "photo_payment",
-    sku: "media_photo_10_xtr",
+    sku: "payment_media_1",
     amount_xtr: 10,
     telegram_invoice_payload: "inv-payload",
     expires_at: "2026-08-14T10:00:00.000Z",
@@ -490,7 +522,7 @@ test("upsertInvoiceToken preserves idempotent repeat shape through media_upsert_
       turn_no: 5,
       scene_turn_no: 2,
       payload_json: { invoice_link: "https://example.com/invoice" },
-      sku: "media_photo_10_xtr",
+      sku: "payment_media_1",
       amount_xtr: 10,
       telegram_invoice_payload: "inv-payload",
       expires_at: "2026-08-14T10:00:00.000Z",
@@ -514,7 +546,7 @@ test("upsertInvoiceToken preserves idempotent repeat shape through media_upsert_
     scene_turn_no: 2,
     payload_json: {},
     action_kind: "photo_payment",
-    sku: "media_photo_10_xtr",
+    sku: "payment_media_1",
     amount_xtr: 10,
     telegram_invoice_payload: "inv-payload",
     expires_at: "2026-08-14T10:00:00.000Z",
@@ -613,7 +645,7 @@ test("markInvoicePaid delegates to media_mark_invoice_paid function", async () =
       payload_json: {},
       status: "paid",
       action_kind: "photo_payment",
-      sku: "media_photo_10_xtr",
+      sku: "payment_media_1",
       amount_xtr: 10,
       telegram_invoice_message_id: 777,
     },
@@ -642,7 +674,7 @@ test("activateSubscription delegates to media_activate_subscription function", a
   const result = await repository.activateSubscription({
     payment_token: "inv-1",
     chat_id: 101,
-    subscription_sku: "media_sub_14d",
+    subscription_sku: "payment_plan_1",
     subscription_days: 14,
   });
 

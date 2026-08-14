@@ -7,6 +7,56 @@ process.env.INTERNAL_API_KEY ??= "test-internal-key";
 process.env.TURN_LIMIT ??= "15";
 process.env.BUSINESS_TIME_ZONE ??= "Europe/Moscow";
 process.env.TURN_LIMIT_RESET_TEXT ??= "00:00 МСК";
+process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_plan_1",
+    days: 14,
+    amount_xtr: 111,
+    title: "Payment plan 1",
+    description: "Access plan option 1 for chat and media actions.",
+    label: "Payment plan 1",
+    button_text: "Payment plan 1",
+  },
+  {
+    sku: "payment_plan_2",
+    days: 30,
+    amount_xtr: 222,
+    title: "Payment plan 2",
+    description: "Access plan option 2 for chat and media actions.",
+    label: "Payment plan 2",
+    button_text: "Payment plan 2",
+  },
+  {
+    sku: "payment_plan_3",
+    days: 60,
+    amount_xtr: 333,
+    title: "Payment plan 3",
+    description: "Access plan option 3 for chat and media actions.",
+    label: "Payment plan 3",
+    button_text: "Payment plan 3",
+  },
+]);
+process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_media_1",
+    amount_xtr: 11,
+    title: "Payment media 1",
+    description: "Media payment option 1.",
+    label: "Payment media 1",
+    button_text: "Payment media 1",
+  },
+]);
+process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
+  {
+    sku: "payment_action_1",
+    feature_key: "fast_scene_skip",
+    amount_xtr: 55,
+    title: "Payment action 1",
+    description: "Feature payment option 1.",
+    label: "Payment action 1",
+    button_text: "Payment action 1",
+  },
+]);
 
 const { AccessDecisionService } = await import("../src/accessDecisionService.js");
 
@@ -162,7 +212,7 @@ test("returns allow_scene for active subscription", async () => {
   const { service } = createService(
     buildAccessContext({
       subscription_active: true,
-      subscription_sku: "media_sub_30d",
+      subscription_sku: "payment_plan_2",
       subscription_until: "2026-08-20T10:00:00.000Z",
       turns_today: 99,
     }),
@@ -204,7 +254,7 @@ test("returns subscription status for /subscription with active subscription", a
   const { service } = createService(
     buildAccessContext({
       subscription_active: true,
-      subscription_sku: "media_sub_14d",
+      subscription_sku: "payment_plan_1",
       subscription_until: "2026-08-15T10:00:00.000Z",
     }),
   );
@@ -227,7 +277,7 @@ test("formats 30-day subscription plan from sku even when 4 days are left", asyn
   const { service } = createService(
     buildAccessContext({
       subscription_active: true,
-      subscription_sku: "media_sub_30d",
+      subscription_sku: "payment_plan_2",
       subscription_until: new Date(Date.now() + 4 * 86_400_000).toISOString(),
     }),
   );
@@ -249,7 +299,7 @@ test("formats 14-day subscription plan from sku", async () => {
   const { service } = createService(
     buildAccessContext({
       subscription_active: true,
-      subscription_sku: "media_sub_14d",
+      subscription_sku: "payment_plan_1",
       subscription_until: new Date(Date.now() + 2 * 86_400_000).toISOString(),
     }),
   );
