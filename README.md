@@ -138,6 +138,7 @@ Media commerce:
 - `MEDIA_SUBSCRIPTION_PLANS_JSON`
 - `MEDIA_PHOTO_PLANS_JSON`
 - `MEDIA_ACTION_PLANS_JSON`
+- `MEDIA_PROMOTIONS_JSON`
 
 See [.env.example](./.env.example).
 
@@ -146,4 +147,5 @@ See [.env.example](./.env.example).
 - The service is decision-only; callers own execution.
 - `/v1/*` is intended for trusted internal callers only.
 - Subscription pricing and plan metadata are environment-driven.
+- Time-based promotions are environment-driven and can override exact price per payment `sku`.
 - Media catalog storage names are configurable so public code stays product-neutral.

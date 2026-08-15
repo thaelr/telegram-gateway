@@ -17,6 +17,7 @@ process.env.TURN_LIMIT ??= "15";
 process.env.BUSINESS_TIME_ZONE ??= "Europe/Moscow";
 process.env.TURN_LIMIT_RESET_TEXT ??= "00:00 МСК";
 process.env.MEDIA_STORAGE_BASE_URL ??= "https://media.example.com";
+process.env.MEDIA_PROMOTIONS_JSON ??= "[]";
 process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
   {
     sku: "payment_plan_1",
@@ -105,6 +106,7 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
 const { MediaCommerceDecisionService } = await import(
   "../src/mediaCommerceDecisionService.js"
 );
+const { config } = await import("../src/config.js");
 
 type MockRepository = {
   loadOfferStats: (
@@ -487,6 +489,19 @@ function createRepository(
   };
 }
 
+async function withPromotions<T>(
+  promotions: typeof config.MEDIA_PROMOTIONS_JSON,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = config.MEDIA_PROMOTIONS_JSON;
+  config.MEDIA_PROMOTIONS_JSON = promotions;
+  try {
+    return await run();
+  } finally {
+    config.MEDIA_PROMOTIONS_JSON = previous;
+  }
+}
+
 test("prepare_offer preserves zero turn counters", async () => {
   let capturedInput: Record<string, unknown> | null = null;
   const { service } = createRepository({
@@ -553,6 +568,74 @@ test("prepare_offer reuses stored invoice link for paid media", async () => {
   assert.equal(result.reply_markup?.inline_keyboard.at(-1)?.[0]?.url, "https://t.me/invoice-link");
 });
 
+test("prepare_offer applies active sku promotion to photo invoice pricing", async () => {
+  await withPromotions([
+    {
+      promo_key: "media_sale",
+      items: [{ sku: "payment_media_1", promo_amount_xtr: 7 }],
+      starts_at: "2026-08-01T00:00:00+03:00",
+      ends_at: "2026-08-31T23:59:59+03:00",
+    },
+  ], async () => {
+    const { service } = createRepository({
+      async loadOfferStats() {
+        return buildOfferStats({
+          delivered_in_scene: 3,
+          unseen_available: 2,
+        });
+      },
+      async upsertInvoiceToken(input) {
+        const row = input as {
+          token: string;
+          kind: string;
+          chat_id: number;
+          scene_session_id: string | null;
+          turn_no: number | null;
+          scene_turn_no: number | null;
+          payload_json: Record<string, unknown>;
+          sku: string;
+          amount_xtr: number;
+          telegram_invoice_payload: string;
+          expires_at: string | null;
+          invoice_title: string;
+          invoice_description: string;
+          invoice_label: string;
+          invoice_button_text: string;
+        };
+
+        return buildStoredInvoiceToken({
+          token: row.token,
+          kind: row.kind,
+          chat_id: row.chat_id,
+          scene_session_id: row.scene_session_id,
+          turn_no: row.turn_no,
+          scene_turn_no: row.scene_turn_no,
+          payload_json: row.payload_json,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          telegram_invoice_payload: row.telegram_invoice_payload,
+          expires_at: row.expires_at,
+          invoice_title: row.invoice_title,
+          invoice_description: row.invoice_description,
+          invoice_label: row.invoice_label,
+          invoice_button_text: row.invoice_button_text,
+          invoice_link: null,
+        });
+      },
+    });
+
+    const result = await service.evaluate(buildRequest());
+
+    assert.equal(result.operation, "prepare_offer_invoice_link");
+    assert.equal(result.invoice_sku, "payment_media_1");
+    assert.equal(result.invoice_amount, 7);
+    assert.equal(result.original_invoice_amount, 10);
+    assert.equal(result.promo_key, "media_sale");
+    assert.equal(result.invoice_payload_json?.original_amount_xtr, 10);
+    assert.equal(result.invoice_payload_json?.promo_key, "media_sale");
+  });
+});
+
 test("feature_offer is routed in TS and keeps feature execution context", async () => {
   const { service } = createRepository();
 
@@ -573,6 +656,33 @@ test("feature_offer is routed in TS and keeps feature execution context", async 
   assert.equal(result.character_i, 2);
   assert.equal(result.scene_mode, "fast");
   assert.equal(result.target_message_id, 777);
+});
+
+test("feature_offer applies active sku promotion to action pricing", async () => {
+  await withPromotions([
+    {
+      promo_key: "action_sale",
+      items: [{ sku: "payment_action_1", promo_amount_xtr: 35 }],
+      starts_at: "2026-08-01T00:00:00+03:00",
+      ends_at: "2026-08-31T23:59:59+03:00",
+    },
+  ], async () => {
+    const { service } = createRepository();
+
+    const result = await service.evaluate(
+      buildRequest({
+        interaction_mode: "feature_offer",
+        chat_id: 101,
+        feature_key: "fast_scene_skip",
+      }),
+    );
+
+    assert.equal(result.operation, "feature_offer_required");
+    assert.equal(result.invoice_sku, "payment_action_1");
+    assert.equal(result.invoice_amount, 35);
+    assert.equal(result.original_invoice_amount, 50);
+    assert.equal(result.promo_key, "action_sale");
+  });
 });
 
 test("invalid callback returns noop without media context query", async () => {
@@ -1372,6 +1482,100 @@ test("subscription_offer returns missing invoice links when links are not stored
     "telegram:1:payment_plan_2",
     "telegram:1:payment_plan_3",
   ]);
+});
+
+test("subscription_offer applies promotions by sku and last active match wins", async () => {
+  await withPromotions([
+    {
+      promo_key: "all_sale",
+      items: [
+        { sku: "payment_plan_1", promo_amount_xtr: 90 },
+        { sku: "payment_plan_2", promo_amount_xtr: 150 },
+        { sku: "payment_plan_3", promo_amount_xtr: 180 },
+      ],
+      starts_at: "2026-08-01T00:00:00+03:00",
+      ends_at: "2026-08-31T23:59:59+03:00",
+    },
+    {
+      promo_key: "plan_2_override",
+      items: [{ sku: "payment_plan_2", promo_amount_xtr: 140 }],
+      starts_at: "2026-08-01T00:00:00+03:00",
+      ends_at: "2026-08-31T23:59:59+03:00",
+    },
+  ], async () => {
+    const capturedRows: StoredInvoiceToken[] = [];
+    const { service } = createRepository({
+      async upsertInvoiceToken(input) {
+        const row = input as {
+          token: string;
+          kind: string;
+          chat_id: number;
+          payload_json: Record<string, unknown>;
+          sku: string;
+          amount_xtr: number;
+          telegram_invoice_payload: string;
+          expires_at: string | null;
+          invoice_title: string;
+          invoice_description: string;
+          invoice_label: string;
+          invoice_button_text: string;
+        };
+
+        const storedRow = buildStoredInvoiceToken({
+          token: row.token,
+          kind: row.kind,
+          chat_id: row.chat_id,
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+          payload_json: row.payload_json,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          telegram_invoice_payload: row.telegram_invoice_payload,
+          expires_at: row.expires_at,
+          invoice_title: row.invoice_title,
+          invoice_description: row.invoice_description,
+          invoice_label: row.invoice_label,
+          invoice_button_text: row.invoice_button_text,
+          invoice_link: null,
+        });
+        capturedRows.push(storedRow);
+        return storedRow;
+      },
+      async loadStoredInvoiceTokens() {
+        return capturedRows;
+      },
+    });
+
+    const result = await service.evaluate(
+      buildRequest({
+        interaction_mode: "subscription_offer",
+        idempotency_key: "telegram:1",
+        subscription_offer_reason: "subscription_command",
+        turns_today: 0,
+        turn_limit: 15,
+        turn_limit_reset_text: "00:00 МСК",
+      }),
+    );
+
+    assert.equal(result.operation, "subscription_offer_links_needed");
+    assert.deepEqual(
+      result.missing_invoice_items?.map((item) => item.amount_xtr),
+      [90, 140, 180],
+    );
+    assert.deepEqual(
+      result.missing_invoice_items?.map((item) => item.original_amount_xtr),
+      [100, 200, 300],
+    );
+    assert.deepEqual(
+      result.missing_invoice_items?.map((item) => item.promo_key),
+      ["all_sale", "plan_2_override", "all_sale"],
+    );
+    assert.deepEqual(
+      result.subscription_offer_items?.map((item) => item.amount_xtr),
+      [90, 140, 180],
+    );
+  });
 });
 
 test("subscription_offer becomes ready after created links are persisted", async () => {

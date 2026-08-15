@@ -24,6 +24,7 @@ import {
   mergeStoredRowsWithMetadata,
 } from "./mediaCommerce/subscriptionFlow.js";
 import {
+  resolveSubscriptionPlans,
   resolveActionPlanByFeatureKey,
   resolvePhotoPlanByAmount,
 } from "./mediaCommerce/plans.js";
@@ -202,6 +203,8 @@ export class MediaCommerceDecisionService {
         current_uuid: null,
         base_price_xtr: basePrice,
         requested_action: "photo_request",
+        original_amount_xtr: photoPlan.original_amount_xtr,
+        promo_key: photoPlan.promo_key,
       } satisfies Record<string, unknown>;
 
       const storedInvoice = await this.repository.upsertInvoiceToken(
@@ -215,6 +218,8 @@ export class MediaCommerceDecisionService {
           current_uuid: null,
           base_price_xtr: basePrice,
           amount_xtr: photoPlan.amount_xtr,
+          original_amount_xtr: photoPlan.original_amount_xtr,
+          promo_key: photoPlan.promo_key,
           invoice_sku: photoPlan.sku,
           invoice_title: photoPlan.title,
           invoice_description: photoPlan.description,
@@ -248,6 +253,16 @@ export class MediaCommerceDecisionService {
         invoice_kind: "photo",
         invoice_sku: storedInvoice?.sku ?? photoPlan.sku,
         invoice_amount: storedInvoice?.amount_xtr ?? photoPlan.amount_xtr,
+        original_invoice_amount:
+          normalizePositiveInteger(storedInvoice?.payload_json.original_amount_xtr)
+          ?? photoPlan.original_amount_xtr,
+        promo_key:
+          normalizeString(
+            typeof storedInvoice?.payload_json.promo_key === "string"
+              ? storedInvoice.payload_json.promo_key
+              : null,
+          )
+          ?? photoPlan.promo_key,
         invoice_title: storedInvoice?.invoice_title ?? photoPlan.title,
         invoice_description:
           storedInvoice?.invoice_description ?? photoPlan.description,
@@ -356,6 +371,8 @@ export class MediaCommerceDecisionService {
       invoice_kind: actionPlan ? "feature" : null,
       invoice_sku: actionPlan?.sku ?? null,
       invoice_amount: actionPlan?.amount_xtr ?? null,
+      original_invoice_amount: actionPlan?.original_amount_xtr ?? null,
+      promo_key: actionPlan?.promo_key ?? null,
       invoice_title: actionPlan?.title ?? null,
       invoice_description: actionPlan?.description ?? null,
       invoice_label: actionPlan?.label ?? null,
@@ -507,6 +524,7 @@ export class MediaCommerceDecisionService {
       decision.invoice_kind === "photo"
       && decision.invoice_sku
       && decision.invoice_amount
+      && decision.original_invoice_amount
       && decision.invoice_title
       && decision.invoice_description
       && decision.invoice_label
@@ -525,6 +543,8 @@ export class MediaCommerceDecisionService {
           current_uuid: decision.current_uuid,
           base_price_xtr: Number(context.base_price_xtr ?? 10),
           amount_xtr: decision.invoice_amount,
+          original_amount_xtr: decision.original_invoice_amount,
+          promo_key: decision.promo_key,
           invoice_sku: decision.invoice_sku,
           invoice_title: decision.invoice_title,
           invoice_description: decision.invoice_description,
@@ -572,6 +592,16 @@ export class MediaCommerceDecisionService {
       invoice_kind: decision.invoice_kind,
       invoice_sku: invoiceToken?.sku ?? decision.invoice_sku,
       invoice_amount: invoiceToken?.amount_xtr ?? decision.invoice_amount,
+      original_invoice_amount:
+        normalizePositiveInteger(invoiceToken?.payload_json.original_amount_xtr)
+        ?? decision.original_invoice_amount,
+      promo_key:
+        normalizeString(
+          typeof invoiceToken?.payload_json.promo_key === "string"
+            ? invoiceToken.payload_json.promo_key
+            : null,
+        )
+        ?? decision.promo_key,
       invoice_title: invoiceToken?.invoice_title ?? decision.invoice_title,
       invoice_description:
         invoiceToken?.invoice_description ?? decision.invoice_description,
@@ -1017,7 +1047,7 @@ export class MediaCommerceDecisionService {
       normalizeString(input.turn_limit_reset_text) ?? config.TURN_LIMIT_RESET_TEXT;
 
     const upsertedRows: StoredInvoiceToken[] = [];
-    for (const plan of config.MEDIA_SUBSCRIPTION_PLANS_JSON) {
+    for (const plan of resolveSubscriptionPlans()) {
       const row = await this.repository.upsertInvoiceToken(
         buildSubscriptionInvoiceInput({
           chat_id: chatId,
@@ -1088,6 +1118,14 @@ export class MediaCommerceDecisionService {
           token: row.token,
           telegram_invoice_payload: String(row.telegram_invoice_payload ?? row.token),
           amount_xtr: Number(row.amount_xtr ?? 0),
+          original_amount_xtr:
+            normalizePositiveInteger(row.payload_json.original_amount_xtr) ?? null,
+          promo_key:
+            normalizeString(
+              typeof row.payload_json.promo_key === "string"
+                ? row.payload_json.promo_key
+                : null,
+            ) ?? null,
           invoice_title: row.invoice_title,
           invoice_description: row.invoice_description,
           invoice_label: row.invoice_label,
@@ -1098,6 +1136,26 @@ export class MediaCommerceDecisionService {
         turn_limit: turnLimit,
         turns_today: turnsToday,
         turn_limit_reset_text: turnLimitResetText,
+        subscription_offer_items: rows.map((row) => ({
+          token: row.token,
+          sku: row.sku,
+          subscription_days:
+            normalizePositiveInteger(row.payload_json.subscription_days) ?? null,
+          invoice_link: normalizeString(row.invoice_link),
+          amount_xtr: Number(row.amount_xtr ?? 0),
+          original_amount_xtr:
+            normalizePositiveInteger(row.payload_json.original_amount_xtr) ?? null,
+          promo_key:
+            normalizeString(
+              typeof row.payload_json.promo_key === "string"
+                ? row.payload_json.promo_key
+                : null,
+            ) ?? null,
+          invoice_title: row.invoice_title,
+          invoice_description: row.invoice_description,
+          invoice_label: row.invoice_label,
+          invoice_button_text: row.invoice_button_text,
+        })),
         reason: "subscription_invoice_links_required",
       };
     }
@@ -1116,6 +1174,7 @@ export class MediaCommerceDecisionService {
       turn_limit: message.turn_limit,
       turns_today: message.turns_today,
       turn_limit_reset_text: message.turn_limit_reset_text,
+      subscription_offer_items: message.offer_items,
       subscription_invoice_tokens: message.subscription_invoice_tokens,
       missing_invoice_links: false,
       missing_invoice_link_count: 0,

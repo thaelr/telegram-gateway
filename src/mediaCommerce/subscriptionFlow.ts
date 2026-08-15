@@ -29,6 +29,19 @@ export function buildSubscriptionOfferMessage(rows: StoredInvoiceToken[]): {
   turn_limit: number;
   turns_today: number;
   turn_limit_reset_text: string;
+  offer_items: Array<{
+    token: string;
+    sku: string | null;
+    subscription_days: number | null;
+    invoice_link: string | null;
+    amount_xtr: number;
+    original_amount_xtr: number | null;
+    promo_key: string | null;
+    invoice_title: string;
+    invoice_description: string;
+    invoice_label: string;
+    invoice_button_text: string;
+  }>;
 } {
   const sortedRows = rows
     .slice()
@@ -62,6 +75,25 @@ export function buildSubscriptionOfferMessage(rows: StoredInvoiceToken[]): {
       return url ? [{ text, url }] : [];
     })
     .filter((row) => row.length > 0);
+  const offerItems = sortedRows.map((row) => ({
+    token: row.token,
+    sku: row.sku,
+    subscription_days: Number(row.payload_json.subscription_days ?? 0) || null,
+    invoice_link: normalizeString(row.invoice_link),
+    amount_xtr: Number(row.amount_xtr ?? 0),
+    original_amount_xtr:
+      normalizePositiveInteger(row.payload_json.original_amount_xtr) ?? null,
+    promo_key:
+      normalizeString(
+        typeof row.payload_json.promo_key === "string"
+          ? row.payload_json.promo_key
+          : null,
+      ) ?? null,
+    invoice_title: row.invoice_title,
+    invoice_description: row.invoice_description,
+    invoice_label: row.invoice_label,
+    invoice_button_text: row.invoice_button_text,
+  }));
 
   return {
     text: buildSubscriptionOfferText(
@@ -77,6 +109,7 @@ export function buildSubscriptionOfferMessage(rows: StoredInvoiceToken[]): {
     turn_limit: turnLimit,
     turns_today: turnsToday,
     turn_limit_reset_text: turnLimitResetText,
+    offer_items: offerItems,
   };
 }
 
@@ -119,6 +152,8 @@ export function buildSubscriptionInvoiceInput(input: {
     description: string;
     label: string;
     button_text: string;
+    original_amount_xtr?: number | null;
+    promo_key?: string | null;
   };
 }) {
   const payloadJson: InvoiceTokenPayload = {
@@ -139,6 +174,8 @@ export function buildSubscriptionInvoiceInput(input: {
     idempotency_key: input.idempotency_key,
     subscription_days: input.plan.days,
     subscription_sku: input.plan.sku,
+    original_amount_xtr: input.plan.original_amount_xtr ?? input.plan.amount_xtr,
+    promo_key: input.plan.promo_key ?? null,
   };
   const token = `${input.idempotency_key}:${input.plan.sku}`;
 

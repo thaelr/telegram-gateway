@@ -81,6 +81,8 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
   turns_today?: number | null;
   turn_limit_reset_text?: string | null;
   idempotency_key?: string | null;
+  original_amount_xtr?: number | null;
+  promo_key?: string | null;
 }
 
 export interface MediaCommerceDecisionResponse {
@@ -105,6 +107,8 @@ export interface MediaCommerceDecisionResponse {
   invoice_kind?: "photo" | "subscription" | "feature" | null;
   invoice_sku?: string | null;
   invoice_amount?: number | null;
+  original_invoice_amount?: number | null;
+  promo_key?: string | null;
   invoice_title?: string | null;
   invoice_description?: string | null;
   invoice_label?: string | null;
@@ -150,6 +154,21 @@ export interface MediaCommerceDecisionResponse {
     token: string;
     telegram_invoice_payload: string;
     amount_xtr: number;
+    original_amount_xtr?: number | null;
+    promo_key?: string | null;
+    invoice_title: string;
+    invoice_description: string;
+    invoice_label: string;
+    invoice_button_text: string;
+  }>;
+  subscription_offer_items?: Array<{
+    token: string;
+    sku: string | null;
+    subscription_days: number | null;
+    invoice_link: string | null;
+    amount_xtr: number;
+    original_amount_xtr?: number | null;
+    promo_key?: string | null;
     invoice_title: string;
     invoice_description: string;
     invoice_label: string;

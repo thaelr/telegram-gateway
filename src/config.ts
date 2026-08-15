@@ -19,9 +19,30 @@ const mediaActionPlanSchema = invoicePlanSchema.extend({
   feature_key: z.string().min(1),
 });
 
+const mediaPromotionItemSchema = z.object({
+  sku: z.string().min(1),
+  promo_amount_xtr: z.coerce.number().int().positive(),
+});
+
+const mediaPromotionSchema = z.object({
+  promo_key: z.string().min(1),
+  items: z.array(mediaPromotionItemSchema).min(1),
+  starts_at: z.string().datetime({ offset: true }),
+  ends_at: z.string().datetime({ offset: true }),
+}).superRefine((value, ctx) => {
+  if (Date.parse(value.starts_at) > Date.parse(value.ends_at)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "starts_at must be before or equal to ends_at",
+      path: ["starts_at"],
+    });
+  }
+});
+
 export type MediaSubscriptionPlan = z.infer<typeof mediaSubscriptionPlanSchema>;
 export type MediaPhotoPlan = z.infer<typeof mediaPhotoPlanSchema>;
 export type MediaActionPlan = z.infer<typeof mediaActionPlanSchema>;
+export type MediaPromotion = z.infer<typeof mediaPromotionSchema>;
 
 function parseJsonEnv<T>(
   raw: string,
@@ -84,6 +105,14 @@ const envSchema = z.object({
       parseJsonEnv(
         raw,
         z.array(mediaActionPlanSchema).min(1),
+      )),
+  MEDIA_PROMOTIONS_JSON: z
+    .string()
+    .default("[]")
+    .transform((raw) =>
+      parseJsonEnv(
+        raw,
+        z.array(mediaPromotionSchema),
       )),
 });
 

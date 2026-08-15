@@ -38,6 +38,8 @@ export type MediaActionDecision = {
   invoice_kind: "photo" | null;
   invoice_sku: string | null;
   invoice_amount: number | null;
+  original_invoice_amount: number | null;
+  promo_key: string | null;
   invoice_title: string | null;
   invoice_description: string | null;
   invoice_label: string | null;
@@ -162,6 +164,8 @@ export function buildPhotoInvoiceInput(input: {
   current_uuid: string | null;
   base_price_xtr: number;
   amount_xtr: number;
+  original_amount_xtr?: number | null;
+  promo_key?: string | null;
   invoice_sku: string;
   invoice_title: string;
   invoice_description: string;
@@ -178,7 +182,11 @@ export function buildPhotoInvoiceInput(input: {
     scene_session_id: input.scene_session_id,
     turn_no: input.turn_no,
     scene_turn_no: input.scene_turn_no,
-    payload_json: input.payload_json,
+    payload_json: {
+      ...input.payload_json,
+      original_amount_xtr: input.original_amount_xtr ?? input.amount_xtr,
+      promo_key: input.promo_key ?? null,
+    },
     action_kind: "photo_payment",
     sku: input.invoice_sku,
     amount_xtr: input.amount_xtr,
@@ -232,6 +240,8 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
     invoice_kind: null,
     invoice_sku: null,
     invoice_amount: null,
+    original_invoice_amount: null,
+    promo_key: null,
     invoice_title: null,
     invoice_description: null,
     invoice_label: null,
@@ -373,6 +383,8 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   let invoiceKind: "photo" | null = null;
   let invoiceSku: string | null = null;
   let invoiceAmount: number | null = null;
+  let originalInvoiceAmount: number | null = null;
+  let promoKey: string | null = null;
   let invoiceTitle: string | null = null;
   let invoiceDescription: string | null = null;
   let invoiceLabel: string | null = null;
@@ -386,6 +398,8 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
       invoiceKind = "photo";
       invoiceSku = photoPlan.sku;
       invoiceAmount = photoPlan.amount_xtr;
+      originalInvoiceAmount = photoPlan.original_amount_xtr;
+      promoKey = photoPlan.promo_key;
       invoiceTitle = photoPlan.title;
       invoiceDescription = photoPlan.description;
       invoiceLabel = photoPlan.label;
@@ -403,6 +417,8 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
         requested_action: "photo_regen",
         panel_text: captionText,
         panel_entities_json: captionEntities,
+        original_amount_xtr: photoPlan.original_amount_xtr,
+        promo_key: photoPlan.promo_key,
       };
     } else {
       addCallbackRow([{ text: "Ещё фото", action: "photo_regen" }]);
@@ -423,6 +439,8 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
     invoice_kind: invoiceKind,
     invoice_sku: invoiceSku,
     invoice_amount: invoiceAmount,
+    original_invoice_amount: originalInvoiceAmount,
+    promo_key: promoKey,
     invoice_title: invoiceTitle,
     invoice_description: invoiceDescription,
     invoice_label: invoiceLabel,
