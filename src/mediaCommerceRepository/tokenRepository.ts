@@ -6,6 +6,7 @@ import type {
 } from "../mediaCommerceTypes.js";
 import {
   type QueryClient,
+  parseJsonObject,
   type UpsertInvoiceTokenInput,
 } from "./shared.js";
 
@@ -25,6 +26,8 @@ export class MediaInteractionTokenRepository {
   async upsertInvoiceToken(
     input: UpsertInvoiceTokenInput,
   ): Promise<StoredInvoiceToken | null> {
+    const payloadJson = parseJsonObject(input.payload_json) ?? {};
+
     const rows = await this.query<StoredInvoiceToken[]>`
       SELECT *
       FROM public.media_upsert_invoice_token(
@@ -34,7 +37,7 @@ export class MediaInteractionTokenRepository {
         ${input.scene_session_id}::text,
         ${input.turn_no}::bigint,
         ${input.scene_turn_no}::smallint,
-        ${JSON.stringify(input.payload_json)}::jsonb,
+        ${JSON.stringify(payloadJson)}::jsonb,
         ${input.action_kind}::text,
         ${input.sku}::text,
         ${input.amount_xtr}::integer,

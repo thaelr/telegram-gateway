@@ -89,6 +89,7 @@ function buildAccessContext(
     subscription_until: null,
     subscription_active: false,
     turns_today: 0,
+    scene_turn_no: -1,
     selected_character_i: 1,
     active_menu_screen: null,
     active_menu_message_id: null,
@@ -205,6 +206,30 @@ test("returns show_character_gallery for /menu after terms are accepted", async 
   assert.equal(result.intent, "menu");
   assert.equal(result.action, "show_character_gallery");
   assert.equal(result.allowed, true);
+  assert.equal(calls.length, 1);
+});
+
+test("returns show_newscene_confirm for /menu when a scene is active", async () => {
+  const { service, calls } = createService(
+    buildAccessContext({
+      scene_turn_no: 3,
+      active_menu_screen: null,
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/menu",
+      event_type: "command.received",
+      message_type: "command",
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.intent, "menu");
+  assert.equal(result.action, "show_newscene_confirm");
+  assert.equal(result.allowed, true);
+  assert.equal(result.reason, "menu_requires_scene_reset");
   assert.equal(calls.length, 1);
 });
 

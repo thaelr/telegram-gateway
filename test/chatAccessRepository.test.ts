@@ -54,6 +54,7 @@ function buildAccessContext(overrides: Partial<AccessContext> = {}): AccessConte
     subscription_until: null,
     subscription_active: false,
     turns_today: 0,
+    scene_turn_no: -1,
     selected_character_i: null,
     active_menu_screen: null,
     active_menu_message_id: null,

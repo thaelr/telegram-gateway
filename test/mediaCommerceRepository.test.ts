@@ -561,6 +561,54 @@ test("upsertInvoiceToken preserves idempotent repeat shape through media_upsert_
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_upsert_invoice_token\(/u);
 });
 
+test("upsertInvoiceToken normalizes string payload_json into an object before calling media_upsert_invoice_token", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      token: "inv-1",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: null,
+      turn_no: null,
+      scene_turn_no: null,
+      payload_json: { subscription_days: 14 },
+      sku: "payment_plan_1",
+      amount_xtr: 100,
+      telegram_invoice_payload: "inv-1",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      telegram_invoice_message_id: null,
+      invoice_link: null,
+      stored: true,
+      invoice_title: "Plan",
+      invoice_description: "Desc",
+      invoice_label: "Label",
+      invoice_button_text: "Button",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  await repository.upsertInvoiceToken({
+    token: "inv-1",
+    kind: "invoice_payload",
+    chat_id: 101,
+    scene_session_id: null,
+    turn_no: null,
+    scene_turn_no: null,
+    payload_json: "{\"subscription_days\":14}" as never,
+    action_kind: "subscription_payment",
+    sku: "payment_plan_1",
+    amount_xtr: 100,
+    telegram_invoice_payload: "inv-1",
+    expires_at: "2026-08-14T10:00:00.000Z",
+    invoice_title: "Plan",
+    invoice_description: "Desc",
+    invoice_label: "Label",
+    invoice_button_text: "Button",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.values[6], "{\"subscription_days\":14}");
+});
+
 test("storePanel delegates to media_store_panel function and preserves result shape", async () => {
   const { query, calls } = createTaggedQueryStub([[
     {

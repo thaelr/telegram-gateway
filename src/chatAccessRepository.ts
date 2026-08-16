@@ -10,6 +10,7 @@ type AccessContextRow = {
   subscription_until: string | null;
   subscription_active: boolean;
   turns_today: number;
+  scene_turn_no: number;
   selected_character_i: number | null;
   active_menu_screen: string | null;
   active_menu_message_id: number | null;
@@ -68,6 +69,7 @@ export class ChatAccessRepository {
           cs.terms_accepted_at,
           cs.subscription_sku,
           cs.subscription_until,
+          COALESCE(cs.scene_turn_no, -1) AS scene_turn_no,
           cs.selected_character_i,
           cs.active_menu_screen,
           cs.active_menu_message_id,
@@ -98,6 +100,7 @@ export class ChatAccessRepository {
         END AS subscription_until,
         u.subscription_active,
         COALESCE(usage.turns_today, 0) AS turns_today,
+        u.scene_turn_no,
         u.selected_character_i,
         u.active_menu_screen,
         u.active_menu_message_id

@@ -409,8 +409,7 @@ export class AccessDecisionService {
     }
 
     if (
-      classification.intent === "scene_start" ||
-      classification.intent === "menu"
+      classification.intent === "scene_start"
     ) {
       return {
         ...passthrough,
@@ -419,6 +418,19 @@ export class AccessDecisionService {
         action: "show_character_gallery",
         allowed: true,
         reason: classification.intent,
+      };
+    }
+
+    if (classification.intent === "menu") {
+      const hasActiveScene = accessContext.scene_turn_no >= 0;
+
+      return {
+        ...passthrough,
+        ...contextFields,
+        decision: "noop",
+        action: hasActiveScene ? "show_newscene_confirm" : "show_character_gallery",
+        allowed: true,
+        reason: hasActiveScene ? "menu_requires_scene_reset" : "menu",
       };
     }
 

@@ -129,6 +129,7 @@ export interface AccessContext {
   subscription_until: string | null;
   subscription_active: boolean;
   turns_today: number;
+  scene_turn_no: number;
   selected_character_i: number | null;
   active_menu_screen: string | null;
   active_menu_message_id: number | null;
