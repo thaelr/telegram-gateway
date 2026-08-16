@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { sql } from "../db.js";
 import type { MediaContext, MediaOfferStats } from "../mediaCommerceTypes.js";
 import {
   buildEmptyMediaContext,
@@ -100,7 +101,7 @@ export class MediaCatalogRepository {
         ${input.paid_access_mode}::text,
         ${input.callback_valid}::boolean,
         ${input.panel_text}::text,
-        ${JSON.stringify(input.panel_entities_json ?? [])}::jsonb
+        ${sql.json(input.panel_entities_json ?? [])}
       )
     `;
 

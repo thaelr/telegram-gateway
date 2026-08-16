@@ -1,4 +1,5 @@
 import type { MediaFinalizeResult } from "../mediaCommerceTypes.js";
+import { sql } from "../db.js";
 import {
   buildMediaFinalizeFallback,
   type QueryClient,
@@ -23,7 +24,7 @@ export class MediaEventRepository {
         ${input.invoice_token}::text,
         ${input.invoice_link}::text,
         ${input.panel_text}::text,
-        ${JSON.stringify(input.panel_entities_json)}::jsonb
+        ${sql.json(input.panel_entities_json)}
       )
     `;
 

@@ -46,6 +46,11 @@ type TaggedCall = {
   values: unknown[];
 };
 
+type JsonParameter = {
+  value: unknown;
+  type: number;
+};
+
 function createTaggedQueryStub(responses: unknown[][] = []) {
   const calls: TaggedCall[] = [];
   const query = (
@@ -64,6 +69,14 @@ function createTaggedQueryStub(responses: unknown[][] = []) {
     calls,
     query,
   };
+}
+
+function assertJsonbParameter(value: unknown, expectedValue: unknown) {
+  assert.equal(typeof value, "object");
+  assert.ok(value != null);
+  assert.equal((value as JsonParameter).type, 3802);
+  assert.notEqual(typeof (value as JsonParameter).value, "string");
+  assert.deepEqual((value as JsonParameter).value, expectedValue);
 }
 
 test("loadOfferStats delegates to media_load_offer_stats and preserves empty-catalog result", async () => {
@@ -357,6 +370,30 @@ test("upsertCallbackTokens delegates to media_upsert_callback_tokens", async () 
 
   assert.equal(result, 2);
   assert.match(calls[0]?.sql ?? "", /public\.media_upsert_callback_tokens/u);
+  assertJsonbParameter(calls[0]?.values[0], [
+    {
+      token: "cb-1",
+      kind: "button_callback",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      payload_json: { current_uuid: "u-1" },
+      status: "active",
+      action_kind: "photo_request",
+      expires_at: "2026-08-14T10:00:00.000Z",
+    },
+    {
+      token: "cb-2",
+      kind: "button_callback",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      payload_json: { current_uuid: "u-2" },
+      status: "active",
+      action_kind: "photo_request",
+      expires_at: "2026-08-14T10:05:00.000Z",
+    },
+  ]);
 });
 
 test("storeInvoiceLinks delegates to media_store_invoice_links", async () => {
@@ -370,6 +407,10 @@ test("storeInvoiceLinks delegates to media_store_invoice_links", async () => {
 
   assert.equal(result, 2);
   assert.match(calls[0]?.sql ?? "", /public\.media_store_invoice_links/u);
+  assertJsonbParameter(calls[0]?.values[0], [
+    { token: "inv-1", chat_id: 101, invoice_link: "https://example.com/1" },
+    { token: "inv-2", chat_id: 101, invoice_link: "https://example.com/2" },
+  ]);
 });
 
 test("loadStoredInvoiceTokens delegates to media_load_stored_invoice_tokens", async () => {
@@ -402,6 +443,7 @@ test("loadStoredInvoiceTokens delegates to media_load_stored_invoice_tokens", as
   assert.equal(result.length, 1);
   assert.equal(result[0]?.invoice_link, "https://example.com/invoice");
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_stored_invoice_tokens\(/u);
+  assertJsonbParameter(calls[0]?.values[0], ["inv-1"]);
 });
 
 test("storeSubscriptionOfferMessageId delegates to media_store_subscription_offer_message_id", async () => {
@@ -416,6 +458,7 @@ test("storeSubscriptionOfferMessageId delegates to media_store_subscription_offe
 
   assert.equal(result, 2);
   assert.match(calls[0]?.sql ?? "", /public\.media_store_subscription_offer_message_id/u);
+  assertJsonbParameter(calls[0]?.values[0], ["inv-1", "inv-2"]);
 });
 
 test("storePrecheckoutResult marks rejected invoice_sent token as failed in atomic SQL", async () => {
@@ -510,6 +553,7 @@ test("upsertInvoiceToken delegates to media_upsert_invoice_token and preserves f
   assert.equal(result?.stored, true);
   assert.equal(result?.token, "inv-1");
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_upsert_invoice_token\(/u);
+  assertJsonbParameter(calls[0]?.values[6], {});
 });
 
 test("upsertInvoiceToken preserves idempotent repeat shape through media_upsert_invoice_token", async () => {
@@ -559,6 +603,7 @@ test("upsertInvoiceToken preserves idempotent repeat shape through media_upsert_
   assert.equal(result?.stored, false);
   assert.equal(result?.invoice_link, "https://example.com/invoice");
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_upsert_invoice_token\(/u);
+  assertJsonbParameter(calls[0]?.values[6], {});
 });
 
 test("upsertInvoiceToken normalizes string payload_json into an object before calling media_upsert_invoice_token", async () => {
@@ -606,7 +651,7 @@ test("upsertInvoiceToken normalizes string payload_json into an object before ca
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.values[6], "{\"subscription_days\":14}");
+  assertJsonbParameter(calls[0]?.values[6], { subscription_days: 14 });
 });
 
 test("storePanel delegates to media_store_panel function and preserves result shape", async () => {
@@ -642,6 +687,62 @@ test("storePanel delegates to media_store_panel function and preserves result sh
   assert.equal(result.stored_count, 1);
   assert.equal(result.invoice_rows_updated, 1);
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_store_panel\(/u);
+  assertJsonbParameter(calls[0]?.values[10], []);
+});
+
+test("loadMediaContext sends panel_entities_json as jsonb array parameter", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      chat_id: 101,
+      scene_session_id: "scene-yufi",
+      turn_no: 5,
+      scene_turn_no: 2,
+      media_signature: "villa_hall_close",
+      current_uuid: null,
+      target_message_id: 777,
+      base_price_xtr: 10,
+      action_kind: "photo_request",
+      requested_action: "photo_request",
+      invoice_token: null,
+      force_deliver_after_payment: false,
+      paid_access_mode: null,
+      callback_valid: true,
+      panel_text: "panel",
+      panel_entities_json: [],
+      subscription_active: false,
+      subscription_sku: null,
+      subscription_until: null,
+      delivered_in_scene: 0,
+      total_available: 0,
+      unseen_available: 0,
+      unlocked_items_json: [],
+      next_unseen_json: null,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  await repository.loadMediaContext({
+    chat_id: 101,
+    scene_session_id: "scene-yufi",
+    turn_no: 5,
+    scene_turn_no: 2,
+    media_signature: "villa_hall_close",
+    current_uuid: null,
+    target_message_id: 777,
+    base_price_xtr: 10,
+    action_kind: "photo_request",
+    requested_action: "photo_request",
+    invoice_token: null,
+    force_deliver_after_payment: false,
+    paid_access_mode: null,
+    callback_valid: true,
+    panel_text: "panel",
+    panel_entities_json: [{ type: "italic", offset: 0, length: 5 }],
+  });
+
+  assertJsonbParameter(calls[0]?.values[15], [
+    { type: "italic", offset: 0, length: 5 },
+  ]);
 });
 
 test("storePhotoEvent delegates to media_store_photo_event function", async () => {

@@ -4,6 +4,7 @@ import type {
   LoadedInvoiceToken,
   StoredInvoiceToken,
 } from "../mediaCommerceTypes.js";
+import { sql } from "../db.js";
 import {
   type QueryClient,
   parseJsonObject,
@@ -16,7 +17,7 @@ export class MediaInteractionTokenRepository {
   async upsertCallbackTokens(tokenRows: InteractionTokenRow[]): Promise<number> {
     const rows = await this.query<Array<{ inserted_count: number }>>`
       SELECT public.media_upsert_callback_tokens(
-        ${JSON.stringify(tokenRows)}::jsonb
+        ${sql.json(tokenRows)}
       ) AS inserted_count
     `;
 
@@ -37,7 +38,7 @@ export class MediaInteractionTokenRepository {
         ${input.scene_session_id}::text,
         ${input.turn_no}::bigint,
         ${input.scene_turn_no}::smallint,
-        ${JSON.stringify(payloadJson)}::jsonb,
+        ${sql.json(payloadJson)},
         ${input.action_kind}::text,
         ${input.sku}::text,
         ${input.amount_xtr}::integer,
@@ -120,7 +121,7 @@ export class MediaInteractionTokenRepository {
   ): Promise<number> {
     const rows = await this.query<Array<{ updated_count: number }>>`
       SELECT public.media_store_invoice_links(
-        ${JSON.stringify(items)}::jsonb
+        ${sql.json(items)}
       ) AS updated_count
     `;
 
@@ -135,7 +136,7 @@ export class MediaInteractionTokenRepository {
     return this.query<StoredInvoiceToken[]>`
       SELECT *
       FROM public.media_load_stored_invoice_tokens(
-        ${JSON.stringify(tokens)}::jsonb
+        ${sql.json(tokens)}
       )
     `;
   }
@@ -151,7 +152,7 @@ export class MediaInteractionTokenRepository {
 
     const rows = await this.query<Array<{ updated_count: number }>>`
       SELECT public.media_store_subscription_offer_message_id(
-        ${JSON.stringify(tokens)}::jsonb,
+        ${sql.json(tokens)},
         ${chatId}::bigint,
         ${offerMessageId}::bigint
       ) AS updated_count

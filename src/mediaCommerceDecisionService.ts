@@ -40,7 +40,6 @@ import {
   parseJsonObject,
 } from "./mediaCommerce/utils.js";
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
-import { sql } from "./db.js";
 import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema.js";
 import { getRequestContext } from "./requestContext.js";
 import type {
@@ -1244,9 +1243,6 @@ export class MediaCommerceDecisionService {
         );
 
       if (linkRows.length > 0) {
-        const storeInvoiceLinksProbe = await sql<Array<{ input_type: string | null }>>`
-          SELECT jsonb_typeof(${JSON.stringify(linkRows)}::jsonb) AS input_type
-        `;
         await this.runRepositoryOperation(
           "subscription.storeInvoiceLinks",
           {
@@ -1254,24 +1250,12 @@ export class MediaCommerceDecisionService {
             input_is_array: Array.isArray(linkRows),
             input_length: linkRows.length,
           },
-          async () => {
-            console.info("[subscription_offer] storeInvoiceLinks input_type", {
-              request_id: getRequestContext()?.requestId ?? null,
-              operation: "subscription.storeInvoiceLinks",
-              status: "probe",
-              chat_id: chatId,
-              input_type: storeInvoiceLinksProbe[0]?.input_type ?? null,
-            });
-            return this.repository.storeInvoiceLinks(linkRows);
-          },
+          () => this.repository.storeInvoiceLinks(linkRows),
         );
       }
     }
 
     const tokenList = upsertedRows.map((row) => row.token);
-    const loadStoredInvoiceTokensProbe = await sql<Array<{ input_type: string | null }>>`
-      SELECT jsonb_typeof(${JSON.stringify(tokenList)}::jsonb) AS input_type
-    `;
     const storedRows = tokenList.length > 0
       ? mergeStoredRowsWithMetadata(
         await this.runRepositoryOperation(
@@ -1281,16 +1265,7 @@ export class MediaCommerceDecisionService {
             input_is_array: Array.isArray(tokenList),
             input_length: tokenList.length,
           },
-          async () => {
-            console.info("[subscription_offer] loadStoredInvoiceTokens input_type", {
-              request_id: getRequestContext()?.requestId ?? null,
-              operation: "subscription.loadStoredInvoiceTokens",
-              status: "probe",
-              chat_id: chatId,
-              input_type: loadStoredInvoiceTokensProbe[0]?.input_type ?? null,
-            });
-            return this.repository.loadStoredInvoiceTokens(tokenList);
-          },
+          () => this.repository.loadStoredInvoiceTokens(tokenList),
         ),
         upsertedRows,
       )
