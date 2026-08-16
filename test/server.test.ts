@@ -46,6 +46,9 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
 ]);
 
 const { buildApp } = await import("../src/server.js");
+const { MediaCommerceOperationError } = await import(
+  "../src/mediaCommerceDecisionService.js"
+);
 
 test("media-commerce endpoint rejects missing internal api key", async (t) => {
   let called = false;
@@ -147,6 +150,46 @@ test("media-commerce endpoint returns 400 invalid_request for invalid body", asy
   assert.equal(response.statusCode, 400);
   assert.equal(response.json().error, "invalid_request");
   assert.equal(called, false);
+});
+
+test("media-commerce endpoint returns safe diagnostics for internal errors", async (t) => {
+  const app = buildApp({
+    logger: false,
+    mediaCommerceDecisionService: {
+      async evaluate() {
+        throw new MediaCommerceOperationError(
+          "MediaCommerce operation failed",
+          "payment.success.markInvoicePaid",
+          "22023",
+        );
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/media-commerce-decision",
+    headers: {
+      "x-internal-api-key": "test-internal-key",
+    },
+    payload: {
+      chat_id: "123",
+      turn_no: "0",
+      scene_turn_no: "0",
+    },
+  });
+
+  const body = response.json();
+  assert.equal(response.statusCode, 500);
+  assert.equal(body.statusCode, 500);
+  assert.equal(body.error, "Internal Server Error");
+  assert.equal(body.message, "MediaCommerce operation failed");
+  assert.equal(body.operation, "payment.success.markInvoicePaid");
+  assert.equal(body.code, "22023");
+  assert.equal(typeof body.request_id, "string");
+  assert.ok(body.request_id.length > 0);
+  assert.equal("stack" in body, false);
 });
 
 test("access endpoint is registered and uses the same auth and validation wiring", async (t) => {

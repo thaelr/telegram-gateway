@@ -40,7 +40,9 @@ import {
   parseJsonObject,
 } from "./mediaCommerce/utils.js";
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
+import { sql } from "./db.js";
 import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema.js";
+import { getRequestContext } from "./requestContext.js";
 import type {
   MediaCommerceDecisionResponse,
   MediaCommerceRoute,
@@ -78,6 +80,54 @@ type FeaturePaymentAction = Extract<
   { payment_kind: "feature" }
 >;
 
+export class MediaCommerceOperationError extends Error {
+  constructor(
+    message: string,
+    readonly operation: string,
+    readonly code: string | null,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "MediaCommerceOperationError";
+  }
+}
+
+function extractErrorCode(error: unknown): string | null {
+  if (
+    typeof error === "object"
+    && error != null
+    && "code" in error
+    && typeof error.code === "string"
+    && error.code.trim().length > 0
+  ) {
+    return error.code.trim();
+  }
+
+  return null;
+}
+
+function toOperationError(operation: string, error: unknown): MediaCommerceOperationError {
+  if (error instanceof MediaCommerceOperationError) {
+    return error;
+  }
+
+  return new MediaCommerceOperationError(
+    "MediaCommerce operation failed",
+    operation,
+    extractErrorCode(error),
+    { cause: error instanceof Error ? error : undefined },
+  );
+}
+
+type RepositoryOperationLogContext = {
+  chat_id?: number | null;
+  payment_kind?: string | null;
+  sku?: string | null;
+  invoice_status?: string | null;
+  input_is_array?: boolean;
+  input_length?: number | null;
+};
+
 function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute {
   const mode = normalizeString(input.interaction_mode);
   const eventType = normalizeString(input.event_type);
@@ -96,6 +146,46 @@ function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute 
 
 export class MediaCommerceDecisionService {
   constructor(private readonly repository: MediaRepository) {}
+
+  private async runRepositoryOperation<T>(
+    operation: string,
+    context: RepositoryOperationLogContext,
+    execute: () => Promise<T>,
+  ): Promise<T> {
+    const requestId = getRequestContext()?.requestId ?? null;
+    const startedAt = Date.now();
+
+    console.info(`[media_commerce] ${operation}`, {
+      request_id: requestId,
+      operation,
+      status: "start",
+      ...context,
+    });
+
+    try {
+      const result = await execute();
+      console.info(`[media_commerce] ${operation}`, {
+        request_id: requestId,
+        operation,
+        status: "success",
+        duration_ms: Date.now() - startedAt,
+        ...context,
+      });
+      return result;
+    } catch (error) {
+      const operationError = toOperationError(operation, error);
+      console.error(`[media_commerce] ${operation}`, {
+        request_id: requestId,
+        operation,
+        status: "error",
+        duration_ms: Date.now() - startedAt,
+        ...context,
+        code: operationError.code,
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+      throw operationError;
+    }
+  }
 
   async evaluate(
     input: MediaCommerceDecisionRequest,
@@ -641,9 +731,15 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    const tokenRow = await this.repository.loadInvoiceToken(
-      invoicePayload,
-      chatId,
+    const tokenRow = await this.runRepositoryOperation(
+      "payment.precheckout.loadInvoiceToken",
+      {
+        chat_id: chatId,
+        payment_kind: null,
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.loadInvoiceToken(invoicePayload, chatId),
     );
     const validation = validatePrecheckout(
       tokenRow,
@@ -651,13 +747,23 @@ export class MediaCommerceDecisionService {
       normalizeNonNegativeInteger(input.payment_total_amount),
     );
 
-    if (tokenRow?.token) {
-      await this.repository.storePrecheckoutResult({
-        token: tokenRow.token,
-        pre_checkout_query_id: normalizeString(input.pre_checkout_query_id),
-        ok: validation.ok,
-        error_message: validation.error,
-      });
+    if (tokenRow?.token != null) {
+      const token = tokenRow.token;
+      await this.runRepositoryOperation(
+        "payment.precheckout.storePrecheckoutResult",
+        {
+          chat_id: normalizePositiveInteger(tokenRow.chat_id) ?? chatId,
+          payment_kind: validation.action?.payment_kind ?? null,
+          sku: normalizeString(tokenRow.sku),
+          invoice_status: normalizeString(tokenRow.status),
+        },
+        () => this.repository.storePrecheckoutResult({
+          token,
+          pre_checkout_query_id: normalizeString(input.pre_checkout_query_id),
+          ok: validation.ok,
+          error_message: validation.error,
+        }),
+      );
     }
 
     return {
@@ -687,7 +793,16 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    const loaded = await this.repository.loadInvoiceToken(invoicePayload, chatId);
+    const loaded = await this.runRepositoryOperation(
+      "payment.success.loadInvoiceToken",
+      {
+        chat_id: chatId,
+        payment_kind: null,
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.loadInvoiceToken(invoicePayload, chatId),
+    );
     if (!loaded?.found || !loaded.token) {
       return { ...base, reason: "invoice_not_found" };
     }
@@ -713,6 +828,7 @@ export class MediaCommerceDecisionService {
         reason: actionResolution.reason ?? "invoice_action_kind_invalid",
       };
     }
+    const resolvedAction = actionResolution.action;
 
     const existingStatus = normalizeString(loaded.status);
     if (
@@ -727,8 +843,8 @@ export class MediaCommerceDecisionService {
         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
         scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
         turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
-        payment_kind: actionResolution.action.payment_kind,
-        feature_key: actionResolution.action.feature_key,
+        payment_kind: resolvedAction.payment_kind,
+        feature_key: resolvedAction.feature_key,
         reason: "payment_details_mismatch",
       };
     }
@@ -739,9 +855,9 @@ export class MediaCommerceDecisionService {
         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
         scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
         turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
-        payment_kind: actionResolution.action.payment_kind,
+        payment_kind: resolvedAction.payment_kind,
         payment_token: loaded.token,
-        feature_key: actionResolution.action.feature_key,
+        feature_key: resolvedAction.feature_key,
         reason: "payment_already_fulfilled",
       };
     }
@@ -750,25 +866,44 @@ export class MediaCommerceDecisionService {
     if (existingStatus === "paid") {
       paidRow = toPaidInvoiceToken(loaded);
     } else if (existingStatus === "invoice_sent") {
-      paidRow = await this.repository.markInvoicePaid({
-        token: loaded.token,
-        chat_id: chatId,
-        expected_kind: INVOICE_PAYLOAD_KIND,
-        expected_action_kind: actionResolution.action.action_kind,
-        telegram_payment_charge_id: normalizeString(
-          input.telegram_payment_charge_id,
-        ),
-        provider_payment_charge_id: normalizeString(
-          input.provider_payment_charge_id,
-        ),
-        payment_currency: normalizeString(input.payment_currency),
-        payment_total_amount: normalizeNonNegativeInteger(
-          input.payment_total_amount,
-        ),
-      });
+      const loadedToken = loaded.token;
+      paidRow = await this.runRepositoryOperation(
+        "payment.success.markInvoicePaid",
+        {
+          chat_id: chatId,
+          payment_kind: resolvedAction.payment_kind,
+          sku: normalizeString(loaded.sku),
+          invoice_status: existingStatus,
+        },
+        () => this.repository.markInvoicePaid({
+          token: loadedToken,
+          chat_id: chatId,
+          expected_kind: INVOICE_PAYLOAD_KIND,
+          expected_action_kind: resolvedAction.action_kind,
+          telegram_payment_charge_id: normalizeString(
+            input.telegram_payment_charge_id,
+          ),
+          provider_payment_charge_id: normalizeString(
+            input.provider_payment_charge_id,
+          ),
+          payment_currency: normalizeString(input.payment_currency),
+          payment_total_amount: normalizeNonNegativeInteger(
+            input.payment_total_amount,
+          ),
+        }),
+      );
 
       if (!paidRow) {
-        const reloaded = await this.repository.loadInvoiceToken(invoicePayload, chatId);
+        const reloaded = await this.runRepositoryOperation(
+          "payment.success.reloadInvoiceToken",
+          {
+            chat_id: chatId,
+            payment_kind: actionResolution.action.payment_kind,
+            sku: normalizeString(loaded.sku),
+            invoice_status: existingStatus,
+          },
+          () => this.repository.loadInvoiceToken(invoicePayload, chatId),
+        );
         const reloadedStatus = normalizeString(reloaded?.status);
         if (reloadedStatus === "fulfilled") {
           return {
@@ -776,9 +911,9 @@ export class MediaCommerceDecisionService {
             chat_id: normalizePositiveInteger(reloaded?.chat_id) ?? base.chat_id,
             scene_session_id: reloaded?.scene_session_id ?? base.scene_session_id,
             turn_no: normalizeNonNegativeInteger(reloaded?.turn_no) ?? base.turn_no,
-            payment_kind: actionResolution.action.payment_kind,
+            payment_kind: resolvedAction.payment_kind,
             payment_token: normalizeString(reloaded?.token),
-            feature_key: actionResolution.action.feature_key,
+            feature_key: resolvedAction.feature_key,
             reason: "payment_already_fulfilled",
           };
         }
@@ -792,8 +927,8 @@ export class MediaCommerceDecisionService {
         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
         scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
         turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
-        payment_kind: actionResolution.action.payment_kind,
-        feature_key: actionResolution.action.feature_key,
+        payment_kind: resolvedAction.payment_kind,
+        feature_key: resolvedAction.feature_key,
         reason: "invoice_status_invalid",
       };
     }
@@ -804,26 +939,26 @@ export class MediaCommerceDecisionService {
         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
         scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
         turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
-        payment_kind: actionResolution.action.payment_kind,
-        feature_key: actionResolution.action.feature_key,
+        payment_kind: resolvedAction.payment_kind,
+        feature_key: resolvedAction.feature_key,
         reason: "payment_not_claimed",
       };
     }
 
-    if (actionResolution.action.payment_kind === "subscription") {
+    if (resolvedAction.payment_kind === "subscription") {
       return this.fulfillSubscriptionPayment(
         base,
         paidRow,
-        actionResolution.action,
+        resolvedAction,
       );
     }
 
-    if (actionResolution.action.payment_kind === "feature") {
+    if (resolvedAction.payment_kind === "feature") {
       return this.buildFeatureFulfillmentResponse(
         base,
         paidRow,
         payload,
-        actionResolution.action,
+        resolvedAction,
       );
     }
 
@@ -849,12 +984,21 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    const activatedCount = await this.repository.activateSubscription({
-      payment_token: paidRow.token,
-      chat_id: paidRow.chat_id,
-      subscription_sku: subscriptionSku,
-      subscription_days: subscriptionDays,
-    });
+    const activatedCount = await this.runRepositoryOperation(
+      "payment.subscription.activateSubscription",
+      {
+        chat_id: paidRow.chat_id,
+        payment_kind: "subscription",
+        sku: subscriptionSku,
+        invoice_status: paidRow.status,
+      },
+      () => this.repository.activateSubscription({
+        payment_token: paidRow.token,
+        chat_id: paidRow.chat_id,
+        subscription_sku: subscriptionSku,
+        subscription_days: subscriptionDays,
+      }),
+    );
 
     if (activatedCount <= 0) {
       return {
@@ -943,7 +1087,7 @@ export class MediaCommerceDecisionService {
           : null,
       ) ?? "photo_request";
 
-    const context = await this.repository.loadMediaContext({
+    const mediaContextInput = {
       chat_id:
         normalizePositiveInteger(payload.chat_id)
         ?? paidRow.chat_id,
@@ -975,14 +1119,24 @@ export class MediaCommerceDecisionService {
       requested_action: requestedAction,
       invoice_token: paidRow.token,
       force_deliver_after_payment: true,
-      paid_access_mode: "paid",
+      paid_access_mode: "paid" as const,
       callback_valid: true,
       panel_text: normalizeString(
         typeof payload.panel_text === "string" ? payload.panel_text : null,
       ),
       panel_entities_json:
         parseJsonArray(payload.panel_entities_json) ?? [],
-    });
+    };
+    const context = await this.runRepositoryOperation(
+      "payment.photo.loadMediaContext",
+      {
+        chat_id: mediaContextInput.chat_id,
+        payment_kind: "photo",
+        sku: normalizeString(paidRow.sku),
+        invoice_status: paidRow.status,
+      },
+      () => this.repository.loadMediaContext(mediaContextInput),
+    );
 
     if (!context) {
       return {
@@ -1090,14 +1244,54 @@ export class MediaCommerceDecisionService {
         );
 
       if (linkRows.length > 0) {
-        await this.repository.storeInvoiceLinks(linkRows);
+        const storeInvoiceLinksProbe = await sql<Array<{ input_type: string | null }>>`
+          SELECT jsonb_typeof(${JSON.stringify(linkRows)}::jsonb) AS input_type
+        `;
+        await this.runRepositoryOperation(
+          "subscription.storeInvoiceLinks",
+          {
+            chat_id: chatId,
+            input_is_array: Array.isArray(linkRows),
+            input_length: linkRows.length,
+          },
+          async () => {
+            console.info("[subscription_offer] storeInvoiceLinks input_type", {
+              request_id: getRequestContext()?.requestId ?? null,
+              operation: "subscription.storeInvoiceLinks",
+              status: "probe",
+              chat_id: chatId,
+              input_type: storeInvoiceLinksProbe[0]?.input_type ?? null,
+            });
+            return this.repository.storeInvoiceLinks(linkRows);
+          },
+        );
       }
     }
 
     const tokenList = upsertedRows.map((row) => row.token);
+    const loadStoredInvoiceTokensProbe = await sql<Array<{ input_type: string | null }>>`
+      SELECT jsonb_typeof(${JSON.stringify(tokenList)}::jsonb) AS input_type
+    `;
     const storedRows = tokenList.length > 0
       ? mergeStoredRowsWithMetadata(
-        await this.repository.loadStoredInvoiceTokens(tokenList),
+        await this.runRepositoryOperation(
+          "subscription.loadStoredInvoiceTokens",
+          {
+            chat_id: chatId,
+            input_is_array: Array.isArray(tokenList),
+            input_length: tokenList.length,
+          },
+          async () => {
+            console.info("[subscription_offer] loadStoredInvoiceTokens input_type", {
+              request_id: getRequestContext()?.requestId ?? null,
+              operation: "subscription.loadStoredInvoiceTokens",
+              status: "probe",
+              chat_id: chatId,
+              input_type: loadStoredInvoiceTokensProbe[0]?.input_type ?? null,
+            });
+            return this.repository.loadStoredInvoiceTokens(tokenList);
+          },
+        ),
         upsertedRows,
       )
       : upsertedRows;
@@ -1244,10 +1438,18 @@ export class MediaCommerceDecisionService {
       return { ...base, reason: "finalize_subscription_offer_input_invalid" };
     }
 
-    const updatedCount = await this.repository.storeSubscriptionOfferMessageId(
-      tokens,
-      chatId,
-      offerMessageId,
+    const updatedCount = await this.runRepositoryOperation(
+      "subscription.storeOfferMessageId",
+      {
+        chat_id: chatId,
+        input_is_array: Array.isArray(tokens),
+        input_length: tokens.length,
+      },
+      () => this.repository.storeSubscriptionOfferMessageId(
+        tokens,
+        chatId,
+        offerMessageId,
+      ),
     );
 
     return {

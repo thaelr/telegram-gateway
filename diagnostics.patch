@@ -1,0 +1,650 @@
+commit 0f1f0100865163b904eeadbc6b19140de70d50ba
+Author: thaelr <shenko.nik@gmail.com>
+Date:   Mon Aug 17 00:12:53 2026 +0700
+
+    Add MediaCommerce request diagnostics
+
+diff --git a/src/mediaCommerceDecisionService.ts b/src/mediaCommerceDecisionService.ts
+index 285db1d..d55a105 100644
+--- a/src/mediaCommerceDecisionService.ts
++++ b/src/mediaCommerceDecisionService.ts
+@@ -40,7 +40,9 @@ import {
+   parseJsonObject,
+ } from "./mediaCommerce/utils.js";
+ import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
++import { sql } from "./db.js";
+ import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema.js";
++import { getRequestContext } from "./requestContext.js";
+ import type {
+   MediaCommerceDecisionResponse,
+   MediaCommerceRoute,
+@@ -78,6 +80,54 @@ type FeaturePaymentAction = Extract<
+   { payment_kind: "feature" }
+ >;
+ 
++export class MediaCommerceOperationError extends Error {
++  constructor(
++    message: string,
++    readonly operation: string,
++    readonly code: string | null,
++    options?: ErrorOptions,
++  ) {
++    super(message, options);
++    this.name = "MediaCommerceOperationError";
++  }
++}
++
++function extractErrorCode(error: unknown): string | null {
++  if (
++    typeof error === "object"
++    && error != null
++    && "code" in error
++    && typeof error.code === "string"
++    && error.code.trim().length > 0
++  ) {
++    return error.code.trim();
++  }
++
++  return null;
++}
++
++function toOperationError(operation: string, error: unknown): MediaCommerceOperationError {
++  if (error instanceof MediaCommerceOperationError) {
++    return error;
++  }
++
++  return new MediaCommerceOperationError(
++    "MediaCommerce operation failed",
++    operation,
++    extractErrorCode(error),
++    { cause: error instanceof Error ? error : undefined },
++  );
++}
++
++type RepositoryOperationLogContext = {
++  chat_id?: number | null;
++  payment_kind?: string | null;
++  sku?: string | null;
++  invoice_status?: string | null;
++  input_is_array?: boolean;
++  input_length?: number | null;
++};
++
+ function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute {
+   const mode = normalizeString(input.interaction_mode);
+   const eventType = normalizeString(input.event_type);
+@@ -97,6 +147,46 @@ function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute
+ export class MediaCommerceDecisionService {
+   constructor(private readonly repository: MediaRepository) {}
+ 
++  private async runRepositoryOperation<T>(
++    operation: string,
++    context: RepositoryOperationLogContext,
++    execute: () => Promise<T>,
++  ): Promise<T> {
++    const requestId = getRequestContext()?.requestId ?? null;
++    const startedAt = Date.now();
++
++    console.info(`[media_commerce] ${operation}`, {
++      request_id: requestId,
++      operation,
++      status: "start",
++      ...context,
++    });
++
++    try {
++      const result = await execute();
++      console.info(`[media_commerce] ${operation}`, {
++        request_id: requestId,
++        operation,
++        status: "success",
++        duration_ms: Date.now() - startedAt,
++        ...context,
++      });
++      return result;
++    } catch (error) {
++      const operationError = toOperationError(operation, error);
++      console.error(`[media_commerce] ${operation}`, {
++        request_id: requestId,
++        operation,
++        status: "error",
++        duration_ms: Date.now() - startedAt,
++        ...context,
++        code: operationError.code,
++        message: error instanceof Error ? error.message : "Unknown error",
++      });
++      throw operationError;
++    }
++  }
++
+   async evaluate(
+     input: MediaCommerceDecisionRequest,
+   ): Promise<MediaCommerceDecisionResponse> {
+@@ -641,9 +731,15 @@ export class MediaCommerceDecisionService {
+       };
+     }
+ 
+-    const tokenRow = await this.repository.loadInvoiceToken(
+-      invoicePayload,
+-      chatId,
++    const tokenRow = await this.runRepositoryOperation(
++      "payment.precheckout.loadInvoiceToken",
++      {
++        chat_id: chatId,
++        payment_kind: null,
++        sku: null,
++        invoice_status: null,
++      },
++      () => this.repository.loadInvoiceToken(invoicePayload, chatId),
+     );
+     const validation = validatePrecheckout(
+       tokenRow,
+@@ -651,13 +747,23 @@ export class MediaCommerceDecisionService {
+       normalizeNonNegativeInteger(input.payment_total_amount),
+     );
+ 
+-    if (tokenRow?.token) {
+-      await this.repository.storePrecheckoutResult({
+-        token: tokenRow.token,
+-        pre_checkout_query_id: normalizeString(input.pre_checkout_query_id),
+-        ok: validation.ok,
+-        error_message: validation.error,
+-      });
++    if (tokenRow?.token != null) {
++      const token = tokenRow.token;
++      await this.runRepositoryOperation(
++        "payment.precheckout.storePrecheckoutResult",
++        {
++          chat_id: normalizePositiveInteger(tokenRow.chat_id) ?? chatId,
++          payment_kind: validation.action?.payment_kind ?? null,
++          sku: normalizeString(tokenRow.sku),
++          invoice_status: normalizeString(tokenRow.status),
++        },
++        () => this.repository.storePrecheckoutResult({
++          token,
++          pre_checkout_query_id: normalizeString(input.pre_checkout_query_id),
++          ok: validation.ok,
++          error_message: validation.error,
++        }),
++      );
+     }
+ 
+     return {
+@@ -687,7 +793,16 @@ export class MediaCommerceDecisionService {
+       };
+     }
+ 
+-    const loaded = await this.repository.loadInvoiceToken(invoicePayload, chatId);
++    const loaded = await this.runRepositoryOperation(
++      "payment.success.loadInvoiceToken",
++      {
++        chat_id: chatId,
++        payment_kind: null,
++        sku: null,
++        invoice_status: null,
++      },
++      () => this.repository.loadInvoiceToken(invoicePayload, chatId),
++    );
+     if (!loaded?.found || !loaded.token) {
+       return { ...base, reason: "invoice_not_found" };
+     }
+@@ -713,6 +828,7 @@ export class MediaCommerceDecisionService {
+         reason: actionResolution.reason ?? "invoice_action_kind_invalid",
+       };
+     }
++    const resolvedAction = actionResolution.action;
+ 
+     const existingStatus = normalizeString(loaded.status);
+     if (
+@@ -727,8 +843,8 @@ export class MediaCommerceDecisionService {
+         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+         scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+         turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+-        payment_kind: actionResolution.action.payment_kind,
+-        feature_key: actionResolution.action.feature_key,
++        payment_kind: resolvedAction.payment_kind,
++        feature_key: resolvedAction.feature_key,
+         reason: "payment_details_mismatch",
+       };
+     }
+@@ -739,9 +855,9 @@ export class MediaCommerceDecisionService {
+         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+         scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+         turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+-        payment_kind: actionResolution.action.payment_kind,
++        payment_kind: resolvedAction.payment_kind,
+         payment_token: loaded.token,
+-        feature_key: actionResolution.action.feature_key,
++        feature_key: resolvedAction.feature_key,
+         reason: "payment_already_fulfilled",
+       };
+     }
+@@ -750,25 +866,44 @@ export class MediaCommerceDecisionService {
+     if (existingStatus === "paid") {
+       paidRow = toPaidInvoiceToken(loaded);
+     } else if (existingStatus === "invoice_sent") {
+-      paidRow = await this.repository.markInvoicePaid({
+-        token: loaded.token,
+-        chat_id: chatId,
+-        expected_kind: INVOICE_PAYLOAD_KIND,
+-        expected_action_kind: actionResolution.action.action_kind,
+-        telegram_payment_charge_id: normalizeString(
+-          input.telegram_payment_charge_id,
+-        ),
+-        provider_payment_charge_id: normalizeString(
+-          input.provider_payment_charge_id,
+-        ),
+-        payment_currency: normalizeString(input.payment_currency),
+-        payment_total_amount: normalizeNonNegativeInteger(
+-          input.payment_total_amount,
+-        ),
+-      });
++      const loadedToken = loaded.token;
++      paidRow = await this.runRepositoryOperation(
++        "payment.success.markInvoicePaid",
++        {
++          chat_id: chatId,
++          payment_kind: resolvedAction.payment_kind,
++          sku: normalizeString(loaded.sku),
++          invoice_status: existingStatus,
++        },
++        () => this.repository.markInvoicePaid({
++          token: loadedToken,
++          chat_id: chatId,
++          expected_kind: INVOICE_PAYLOAD_KIND,
++          expected_action_kind: resolvedAction.action_kind,
++          telegram_payment_charge_id: normalizeString(
++            input.telegram_payment_charge_id,
++          ),
++          provider_payment_charge_id: normalizeString(
++            input.provider_payment_charge_id,
++          ),
++          payment_currency: normalizeString(input.payment_currency),
++          payment_total_amount: normalizeNonNegativeInteger(
++            input.payment_total_amount,
++          ),
++        }),
++      );
+ 
+       if (!paidRow) {
+-        const reloaded = await this.repository.loadInvoiceToken(invoicePayload, chatId);
++        const reloaded = await this.runRepositoryOperation(
++          "payment.success.reloadInvoiceToken",
++          {
++            chat_id: chatId,
++            payment_kind: actionResolution.action.payment_kind,
++            sku: normalizeString(loaded.sku),
++            invoice_status: existingStatus,
++          },
++          () => this.repository.loadInvoiceToken(invoicePayload, chatId),
++        );
+         const reloadedStatus = normalizeString(reloaded?.status);
+         if (reloadedStatus === "fulfilled") {
+           return {
+@@ -776,9 +911,9 @@ export class MediaCommerceDecisionService {
+             chat_id: normalizePositiveInteger(reloaded?.chat_id) ?? base.chat_id,
+             scene_session_id: reloaded?.scene_session_id ?? base.scene_session_id,
+             turn_no: normalizeNonNegativeInteger(reloaded?.turn_no) ?? base.turn_no,
+-            payment_kind: actionResolution.action.payment_kind,
++            payment_kind: resolvedAction.payment_kind,
+             payment_token: normalizeString(reloaded?.token),
+-            feature_key: actionResolution.action.feature_key,
++            feature_key: resolvedAction.feature_key,
+             reason: "payment_already_fulfilled",
+           };
+         }
+@@ -792,8 +927,8 @@ export class MediaCommerceDecisionService {
+         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+         scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+         turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+-        payment_kind: actionResolution.action.payment_kind,
+-        feature_key: actionResolution.action.feature_key,
++        payment_kind: resolvedAction.payment_kind,
++        feature_key: resolvedAction.feature_key,
+         reason: "invoice_status_invalid",
+       };
+     }
+@@ -804,26 +939,26 @@ export class MediaCommerceDecisionService {
+         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+         scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+         turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+-        payment_kind: actionResolution.action.payment_kind,
+-        feature_key: actionResolution.action.feature_key,
++        payment_kind: resolvedAction.payment_kind,
++        feature_key: resolvedAction.feature_key,
+         reason: "payment_not_claimed",
+       };
+     }
+ 
+-    if (actionResolution.action.payment_kind === "subscription") {
++    if (resolvedAction.payment_kind === "subscription") {
+       return this.fulfillSubscriptionPayment(
+         base,
+         paidRow,
+-        actionResolution.action,
++        resolvedAction,
+       );
+     }
+ 
+-    if (actionResolution.action.payment_kind === "feature") {
++    if (resolvedAction.payment_kind === "feature") {
+       return this.buildFeatureFulfillmentResponse(
+         base,
+         paidRow,
+         payload,
+-        actionResolution.action,
++        resolvedAction,
+       );
+     }
+ 
+@@ -849,12 +984,21 @@ export class MediaCommerceDecisionService {
+       };
+     }
+ 
+-    const activatedCount = await this.repository.activateSubscription({
+-      payment_token: paidRow.token,
+-      chat_id: paidRow.chat_id,
+-      subscription_sku: subscriptionSku,
+-      subscription_days: subscriptionDays,
+-    });
++    const activatedCount = await this.runRepositoryOperation(
++      "payment.subscription.activateSubscription",
++      {
++        chat_id: paidRow.chat_id,
++        payment_kind: "subscription",
++        sku: subscriptionSku,
++        invoice_status: paidRow.status,
++      },
++      () => this.repository.activateSubscription({
++        payment_token: paidRow.token,
++        chat_id: paidRow.chat_id,
++        subscription_sku: subscriptionSku,
++        subscription_days: subscriptionDays,
++      }),
++    );
+ 
+     if (activatedCount <= 0) {
+       return {
+@@ -943,7 +1087,7 @@ export class MediaCommerceDecisionService {
+           : null,
+       ) ?? "photo_request";
+ 
+-    const context = await this.repository.loadMediaContext({
++    const mediaContextInput = {
+       chat_id:
+         normalizePositiveInteger(payload.chat_id)
+         ?? paidRow.chat_id,
+@@ -975,14 +1119,24 @@ export class MediaCommerceDecisionService {
+       requested_action: requestedAction,
+       invoice_token: paidRow.token,
+       force_deliver_after_payment: true,
+-      paid_access_mode: "paid",
++      paid_access_mode: "paid" as const,
+       callback_valid: true,
+       panel_text: normalizeString(
+         typeof payload.panel_text === "string" ? payload.panel_text : null,
+       ),
+       panel_entities_json:
+         parseJsonArray(payload.panel_entities_json) ?? [],
+-    });
++    };
++    const context = await this.runRepositoryOperation(
++      "payment.photo.loadMediaContext",
++      {
++        chat_id: mediaContextInput.chat_id,
++        payment_kind: "photo",
++        sku: normalizeString(paidRow.sku),
++        invoice_status: paidRow.status,
++      },
++      () => this.repository.loadMediaContext(mediaContextInput),
++    );
+ 
+     if (!context) {
+       return {
+@@ -1090,14 +1244,54 @@ export class MediaCommerceDecisionService {
+         );
+ 
+       if (linkRows.length > 0) {
+-        await this.repository.storeInvoiceLinks(linkRows);
++        const storeInvoiceLinksProbe = await sql<Array<{ input_type: string | null }>>`
++          SELECT jsonb_typeof(${JSON.stringify(linkRows)}::jsonb) AS input_type
++        `;
++        await this.runRepositoryOperation(
++          "subscription.storeInvoiceLinks",
++          {
++            chat_id: chatId,
++            input_is_array: Array.isArray(linkRows),
++            input_length: linkRows.length,
++          },
++          async () => {
++            console.info("[subscription_offer] storeInvoiceLinks input_type", {
++              request_id: getRequestContext()?.requestId ?? null,
++              operation: "subscription.storeInvoiceLinks",
++              status: "probe",
++              chat_id: chatId,
++              input_type: storeInvoiceLinksProbe[0]?.input_type ?? null,
++            });
++            return this.repository.storeInvoiceLinks(linkRows);
++          },
++        );
+       }
+     }
+ 
+     const tokenList = upsertedRows.map((row) => row.token);
++    const loadStoredInvoiceTokensProbe = await sql<Array<{ input_type: string | null }>>`
++      SELECT jsonb_typeof(${JSON.stringify(tokenList)}::jsonb) AS input_type
++    `;
+     const storedRows = tokenList.length > 0
+       ? mergeStoredRowsWithMetadata(
+-        await this.repository.loadStoredInvoiceTokens(tokenList),
++        await this.runRepositoryOperation(
++          "subscription.loadStoredInvoiceTokens",
++          {
++            chat_id: chatId,
++            input_is_array: Array.isArray(tokenList),
++            input_length: tokenList.length,
++          },
++          async () => {
++            console.info("[subscription_offer] loadStoredInvoiceTokens input_type", {
++              request_id: getRequestContext()?.requestId ?? null,
++              operation: "subscription.loadStoredInvoiceTokens",
++              status: "probe",
++              chat_id: chatId,
++              input_type: loadStoredInvoiceTokensProbe[0]?.input_type ?? null,
++            });
++            return this.repository.loadStoredInvoiceTokens(tokenList);
++          },
++        ),
+         upsertedRows,
+       )
+       : upsertedRows;
+@@ -1244,10 +1438,18 @@ export class MediaCommerceDecisionService {
+       return { ...base, reason: "finalize_subscription_offer_input_invalid" };
+     }
+ 
+-    const updatedCount = await this.repository.storeSubscriptionOfferMessageId(
+-      tokens,
+-      chatId,
+-      offerMessageId,
++    const updatedCount = await this.runRepositoryOperation(
++      "subscription.storeOfferMessageId",
++      {
++        chat_id: chatId,
++        input_is_array: Array.isArray(tokens),
++        input_length: tokens.length,
++      },
++      () => this.repository.storeSubscriptionOfferMessageId(
++        tokens,
++        chatId,
++        offerMessageId,
++      ),
+     );
+ 
+     return {
+diff --git a/src/requestContext.ts b/src/requestContext.ts
+new file mode 100644
+index 0000000..3a89327
+--- /dev/null
++++ b/src/requestContext.ts
+@@ -0,0 +1,18 @@
++import { AsyncLocalStorage } from "node:async_hooks";
++
++type RequestContext = {
++  requestId: string;
++};
++
++const storage = new AsyncLocalStorage<RequestContext>();
++
++export function runWithRequestContext<T>(
++  context: RequestContext,
++  callback: () => T,
++): T {
++  return storage.run(context, callback);
++}
++
++export function getRequestContext(): RequestContext | undefined {
++  return storage.getStore();
++}
+diff --git a/src/server.ts b/src/server.ts
+index 62a6372..4541582 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -7,9 +7,13 @@ import { sql } from "./db.js";
+ import { ChatAccessRepository } from "./chatAccessRepository.js";
+ import { AccessDecisionService } from "./accessDecisionService.js";
+ import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
+-import { MediaCommerceDecisionService } from "./mediaCommerceDecisionService.js";
++import {
++  MediaCommerceDecisionService,
++  MediaCommerceOperationError,
++} from "./mediaCommerceDecisionService.js";
+ import { mediaCommerceRequestSchema } from "./mediaCommerce/requestSchema.js";
+ import { isInternalApiAuthorized } from "./internalApiAuth.js";
++import { runWithRequestContext } from "./requestContext.js";
+ 
+ const routerRequestSchema = z.object({
+   chat_id: z.coerce.number().int().positive(),
+@@ -45,6 +49,20 @@ type BuildAppOptions = {
+   logger?: boolean;
+ };
+ 
++function extractPostgresCode(error: unknown): string | null {
++  if (
++    typeof error === "object"
++    && error != null
++    && "code" in error
++    && typeof error.code === "string"
++    && error.code.trim().length > 0
++  ) {
++    return error.code.trim();
++  }
++
++  return null;
++}
++
+ export function buildApp(options: BuildAppOptions = {}) {
+   const app = Fastify({
+     logger: options.logger ?? true,
+@@ -101,8 +119,39 @@ export function buildApp(options: BuildAppOptions = {}) {
+       });
+     }
+ 
+-    const result = await mediaCommerceDecisionService.evaluate(parsed.data);
+-    return reply.send(result);
++    try {
++      const result = await runWithRequestContext(
++        { requestId: request.id },
++        () => mediaCommerceDecisionService.evaluate(parsed.data),
++      );
++      return reply.send(result);
++    } catch (error) {
++      const operation = error instanceof MediaCommerceOperationError
++        ? error.operation
++        : "unknown";
++      const code = error instanceof MediaCommerceOperationError
++        ? error.code
++        : extractPostgresCode(error);
++
++      request.log.error(
++        {
++          request_id: request.id,
++          operation,
++          code,
++          err: error,
++        },
++        "MediaCommerce operation failed",
++      );
++
++      return reply.status(500).send({
++        statusCode: 500,
++        error: "Internal Server Error",
++        message: "MediaCommerce operation failed",
++        request_id: request.id,
++        operation,
++        code,
++      });
++    }
+   };
+ 
+   app.post("/v1/access-decision", handleRouterDecision);
+diff --git a/test/server.test.ts b/test/server.test.ts
+index 32ff692..ac6360f 100644
+--- a/test/server.test.ts
++++ b/test/server.test.ts
+@@ -46,6 +46,9 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
+ ]);
+ 
+ const { buildApp } = await import("../src/server.js");
++const { MediaCommerceOperationError } = await import(
++  "../src/mediaCommerceDecisionService.js"
++);
+ 
+ test("media-commerce endpoint rejects missing internal api key", async (t) => {
+   let called = false;
+@@ -149,6 +152,46 @@ test("media-commerce endpoint returns 400 invalid_request for invalid body", asy
+   assert.equal(called, false);
+ });
+ 
++test("media-commerce endpoint returns safe diagnostics for internal errors", async (t) => {
++  const app = buildApp({
++    logger: false,
++    mediaCommerceDecisionService: {
++      async evaluate() {
++        throw new MediaCommerceOperationError(
++          "MediaCommerce operation failed",
++          "payment.success.markInvoicePaid",
++          "22023",
++        );
++      },
++    },
++  });
++  t.after(() => app.close());
++
++  const response = await app.inject({
++    method: "POST",
++    url: "/v1/media-commerce-decision",
++    headers: {
++      "x-internal-api-key": "test-internal-key",
++    },
++    payload: {
++      chat_id: "123",
++      turn_no: "0",
++      scene_turn_no: "0",
++    },
++  });
++
++  const body = response.json();
++  assert.equal(response.statusCode, 500);
++  assert.equal(body.statusCode, 500);
++  assert.equal(body.error, "Internal Server Error");
++  assert.equal(body.message, "MediaCommerce operation failed");
++  assert.equal(body.operation, "payment.success.markInvoicePaid");
++  assert.equal(body.code, "22023");
++  assert.equal(typeof body.request_id, "string");
++  assert.ok(body.request_id.length > 0);
++  assert.equal("stack" in body, false);
++});
++
+ test("access endpoint is registered and uses the same auth and validation wiring", async (t) => {
+   let receivedChatId: number | null = null;
+   const app = buildApp({

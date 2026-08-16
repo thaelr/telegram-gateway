@@ -7,9 +7,13 @@ import { sql } from "./db.js";
 import { ChatAccessRepository } from "./chatAccessRepository.js";
 import { AccessDecisionService } from "./accessDecisionService.js";
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
-import { MediaCommerceDecisionService } from "./mediaCommerceDecisionService.js";
+import {
+  MediaCommerceDecisionService,
+  MediaCommerceOperationError,
+} from "./mediaCommerceDecisionService.js";
 import { mediaCommerceRequestSchema } from "./mediaCommerce/requestSchema.js";
 import { isInternalApiAuthorized } from "./internalApiAuth.js";
+import { runWithRequestContext } from "./requestContext.js";
 
 const routerRequestSchema = z.object({
   chat_id: z.coerce.number().int().positive(),
@@ -44,6 +48,20 @@ type BuildAppOptions = {
   mediaCommerceDecisionService?: MediaCommerceDecisionEvaluator;
   logger?: boolean;
 };
+
+function extractPostgresCode(error: unknown): string | null {
+  if (
+    typeof error === "object"
+    && error != null
+    && "code" in error
+    && typeof error.code === "string"
+    && error.code.trim().length > 0
+  ) {
+    return error.code.trim();
+  }
+
+  return null;
+}
 
 export function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
@@ -101,8 +119,39 @@ export function buildApp(options: BuildAppOptions = {}) {
       });
     }
 
-    const result = await mediaCommerceDecisionService.evaluate(parsed.data);
-    return reply.send(result);
+    try {
+      const result = await runWithRequestContext(
+        { requestId: request.id },
+        () => mediaCommerceDecisionService.evaluate(parsed.data),
+      );
+      return reply.send(result);
+    } catch (error) {
+      const operation = error instanceof MediaCommerceOperationError
+        ? error.operation
+        : "unknown";
+      const code = error instanceof MediaCommerceOperationError
+        ? error.code
+        : extractPostgresCode(error);
+
+      request.log.error(
+        {
+          request_id: request.id,
+          operation,
+          code,
+          err: error,
+        },
+        "MediaCommerce operation failed",
+      );
+
+      return reply.status(500).send({
+        statusCode: 500,
+        error: "Internal Server Error",
+        message: "MediaCommerce operation failed",
+        request_id: request.id,
+        operation,
+        code,
+      });
+    }
   };
 
   app.post("/v1/access-decision", handleRouterDecision);
