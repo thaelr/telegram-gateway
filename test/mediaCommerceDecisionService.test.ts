@@ -118,6 +118,9 @@ type MockRepository = {
   upsertInvoiceToken: (
     input: unknown,
   ) => Promise<StoredInvoiceToken | null>;
+  upsertInvoiceTokens: (
+    inputs: unknown,
+  ) => Promise<StoredInvoiceToken[]>;
   loadCallbackToken: (
     token: string | null,
     chatId: number | null,
@@ -374,6 +377,7 @@ function createRepository(
     loadMediaContext: 0,
     storePrecheckoutResult: 0,
     storeInvoiceLinks: 0,
+    loadStoredInvoiceTokens: 0,
     loadCallbackTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
     loadInvoiceTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
     markInvoicePaid: 0,
@@ -389,6 +393,44 @@ function createRepository(
     },
     async upsertInvoiceToken() {
       return buildStoredInvoiceToken();
+    },
+    async upsertInvoiceTokens(inputs) {
+      const rows = Array.isArray(inputs) ? inputs : [];
+      return rows.map((input, index) => {
+        const row = input as {
+          token?: string;
+          kind?: string;
+          chat_id?: number;
+          payload_json?: Record<string, unknown>;
+          sku?: string;
+          amount_xtr?: number;
+          telegram_invoice_payload?: string;
+          expires_at?: string | null;
+          invoice_title?: string;
+          invoice_description?: string;
+          invoice_label?: string;
+          invoice_button_text?: string;
+        };
+        return buildStoredInvoiceToken({
+          token: row.token ?? `token-${index + 1}`,
+          kind: row.kind ?? "invoice_payload",
+          chat_id: row.chat_id ?? 101,
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+          payload_json: row.payload_json ?? {},
+          sku: row.sku ?? `payment_plan_${index + 1}`,
+          amount_xtr: row.amount_xtr ?? (index + 1) * 100,
+          telegram_invoice_payload:
+            row.telegram_invoice_payload ?? row.token ?? `token-${index + 1}`,
+          expires_at: row.expires_at ?? new Date(Date.now() + 60_000).toISOString(),
+          invoice_title: row.invoice_title ?? `Payment plan ${index + 1}`,
+          invoice_description: row.invoice_description ?? "Subscription access",
+          invoice_label: row.invoice_label ?? `Payment plan ${index + 1}`,
+          invoice_button_text: row.invoice_button_text ?? `Payment plan ${index + 1}`,
+          invoice_link: null,
+        });
+      });
     },
     async loadCallbackToken(token, chatId) {
       calls.loadCallbackTokenArgs.push({ token, chatId });
@@ -450,6 +492,7 @@ function createRepository(
       return 2;
     },
     async loadStoredInvoiceTokens(tokens) {
+      calls.loadStoredInvoiceTokens += 1;
       return tokens.map((token, index) =>
         buildStoredInvoiceToken({
           token,
@@ -1448,17 +1491,19 @@ test("payment_success rejects unknown action kinds", async () => {
 });
 
 test("subscription_offer returns missing invoice links when links are not stored yet", async () => {
-  const { service } = createRepository({
-    async upsertInvoiceToken(input) {
-      const row = input as { token: string; sku: string; amount_xtr: number };
-      return buildStoredInvoiceToken({
-        token: row.token,
-        sku: row.sku,
-        amount_xtr: row.amount_xtr,
-        invoice_link: null,
-        scene_session_id: null,
-        turn_no: null,
-        scene_turn_no: null,
+  const { service, calls } = createRepository({
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input) => {
+        const row = input as { token: string; sku: string; amount_xtr: number };
+        return buildStoredInvoiceToken({
+          token: row.token,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          invoice_link: null,
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+        });
       });
     },
   });
@@ -1482,6 +1527,7 @@ test("subscription_offer returns missing invoice links when links are not stored
     "telegram:1:payment_plan_2",
     "telegram:1:payment_plan_3",
   ]);
+  assert.equal(calls.loadStoredInvoiceTokens, 0);
 });
 
 test("subscription_offer applies promotions by sku and last active match wins", async () => {
@@ -1505,42 +1551,44 @@ test("subscription_offer applies promotions by sku and last active match wins", 
   ], async () => {
     const capturedRows: StoredInvoiceToken[] = [];
     const { service } = createRepository({
-      async upsertInvoiceToken(input) {
-        const row = input as {
-          token: string;
-          kind: string;
-          chat_id: number;
-          payload_json: Record<string, unknown>;
-          sku: string;
-          amount_xtr: number;
-          telegram_invoice_payload: string;
-          expires_at: string | null;
-          invoice_title: string;
-          invoice_description: string;
-          invoice_label: string;
-          invoice_button_text: string;
-        };
+      async upsertInvoiceTokens(inputs) {
+        const rows = (Array.isArray(inputs) ? inputs : []).map((input) => {
+          const row = input as {
+            token: string;
+            kind: string;
+            chat_id: number;
+            payload_json: Record<string, unknown>;
+            sku: string;
+            amount_xtr: number;
+            telegram_invoice_payload: string;
+            expires_at: string | null;
+            invoice_title: string;
+            invoice_description: string;
+            invoice_label: string;
+            invoice_button_text: string;
+          };
 
-        const storedRow = buildStoredInvoiceToken({
-          token: row.token,
-          kind: row.kind,
-          chat_id: row.chat_id,
-          scene_session_id: null,
-          turn_no: null,
-          scene_turn_no: null,
-          payload_json: row.payload_json,
-          sku: row.sku,
-          amount_xtr: row.amount_xtr,
-          telegram_invoice_payload: row.telegram_invoice_payload,
-          expires_at: row.expires_at,
-          invoice_title: row.invoice_title,
-          invoice_description: row.invoice_description,
-          invoice_label: row.invoice_label,
-          invoice_button_text: row.invoice_button_text,
-          invoice_link: null,
+          return buildStoredInvoiceToken({
+            token: row.token,
+            kind: row.kind,
+            chat_id: row.chat_id,
+            scene_session_id: null,
+            turn_no: null,
+            scene_turn_no: null,
+            payload_json: row.payload_json,
+            sku: row.sku,
+            amount_xtr: row.amount_xtr,
+            telegram_invoice_payload: row.telegram_invoice_payload,
+            expires_at: row.expires_at,
+            invoice_title: row.invoice_title,
+            invoice_description: row.invoice_description,
+            invoice_label: row.invoice_label,
+            invoice_button_text: row.invoice_button_text,
+            invoice_link: null,
+          });
         });
-        capturedRows.push(storedRow);
-        return storedRow;
+        capturedRows.push(...rows);
+        return rows;
       },
       async loadStoredInvoiceTokens() {
         return capturedRows;
@@ -1580,19 +1628,22 @@ test("subscription_offer applies promotions by sku and last active match wins", 
 
 test("subscription_offer becomes ready after created links are persisted", async () => {
   const { service, calls } = createRepository({
-    async upsertInvoiceToken(input) {
-      const row = input as { token: string; sku: string; amount_xtr: number };
-      return buildStoredInvoiceToken({
-        token: row.token,
-        sku: row.sku,
-        amount_xtr: row.amount_xtr,
-        invoice_link: null,
-        scene_session_id: null,
-        turn_no: null,
-        scene_turn_no: null,
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input) => {
+        const row = input as { token: string; sku: string; amount_xtr: number };
+        return buildStoredInvoiceToken({
+          token: row.token,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          invoice_link: null,
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+        });
       });
     },
     async loadStoredInvoiceTokens(tokens) {
+      calls.loadStoredInvoiceTokens += 1;
       return tokens.map((token, index) =>
         buildStoredInvoiceToken({
           token,
@@ -1649,10 +1700,74 @@ test("subscription_offer becomes ready after created links are persisted", async
   );
 
   assert.equal(calls.storeInvoiceLinks, 1);
+  assert.equal(calls.loadStoredInvoiceTokens, 1);
   assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.offer_reused, true);
   assert.match(result.text ?? "", /лимит исчерпан/u);
   assert.equal(result.reply_markup?.inline_keyboard.length, 3);
+});
+
+test("subscription_offer reuses stored invoice links from batch upsert without reload", async () => {
+  const { service, calls } = createRepository({
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input, index) => {
+        const row = input as {
+          token: string;
+          kind: string;
+          chat_id: number;
+          payload_json: Record<string, unknown>;
+          sku: string;
+          amount_xtr: number;
+          telegram_invoice_payload: string;
+          expires_at: string | null;
+          invoice_title: string;
+          invoice_description: string;
+          invoice_label: string;
+          invoice_button_text: string;
+        };
+        return buildStoredInvoiceToken({
+          token: row.token,
+          kind: row.kind,
+          chat_id: row.chat_id,
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+          payload_json: row.payload_json,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          telegram_invoice_payload: row.telegram_invoice_payload,
+          expires_at: row.expires_at,
+          invoice_title: row.invoice_title,
+          invoice_description: row.invoice_description,
+          invoice_label: row.invoice_label,
+          invoice_button_text: row.invoice_button_text,
+          invoice_link: `https://t.me/reused-${index + 1}`,
+          telegram_invoice_message_id: 901,
+          stored: false,
+        });
+      });
+    },
+    async loadStoredInvoiceTokens() {
+      throw new Error("loadStoredInvoiceTokens should not run when batch upsert already has links");
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      idempotency_key: "telegram:reuse",
+      subscription_offer_reason: "subscription_command",
+      turns_today: 1,
+      turn_limit: 20,
+      turn_limit_reset_text: "00:00 МСК",
+    }),
+  );
+
+  assert.equal(calls.storeInvoiceLinks, 0);
+  assert.equal(calls.loadStoredInvoiceTokens, 0);
+  assert.equal(result.operation, "subscription_offer_ready");
+  assert.equal(result.reply_markup?.inline_keyboard.length, 3);
+  assert.equal(result.offer_reused, true);
 });
 
 test("prepare_offer uses random unique invoice tokens for photo payments", async () => {

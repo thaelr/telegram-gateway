@@ -56,6 +56,7 @@ type MediaRepository = Pick<
   | "loadOfferStats"
   | "upsertCallbackTokens"
   | "upsertInvoiceToken"
+  | "upsertInvoiceTokens"
   | "loadCallbackToken"
   | "loadMediaContext"
   | "storePanel"
@@ -154,23 +155,8 @@ export class MediaCommerceDecisionService {
     const requestId = getRequestContext()?.requestId ?? null;
     const startedAt = Date.now();
 
-    console.info(`[media_commerce] ${operation}`, {
-      request_id: requestId,
-      operation,
-      status: "start",
-      ...context,
-    });
-
     try {
-      const result = await execute();
-      console.info(`[media_commerce] ${operation}`, {
-        request_id: requestId,
-        operation,
-        status: "success",
-        duration_ms: Date.now() - startedAt,
-        ...context,
-      });
-      return result;
+      return await execute();
     } catch (error) {
       const operationError = toOperationError(operation, error);
       console.error(`[media_commerce] ${operation}`, {
@@ -601,15 +587,11 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    const tokenRowsInserted = decision.token_rows.length > 0
-      ? await this.repository.upsertCallbackTokens(decision.token_rows)
-      : 0;
-
     let invoiceToken: StoredInvoiceToken | null = null;
     let replyMarkup = decision.reply_markup;
     let operation = decision.operation;
-
-    if (
+    let tokenRowsInserted = 0;
+    const shouldUpsertPhotoInvoice =
       decision.invoice_kind === "photo"
       && decision.invoice_sku
       && decision.invoice_amount
@@ -619,31 +601,51 @@ export class MediaCommerceDecisionService {
       && decision.invoice_label
       && decision.invoice_button_text
       && decision.invoice_payload_json
-      && base.chat_id
-    ) {
-      invoiceToken = await this.repository.upsertInvoiceToken(
-        buildPhotoInvoiceInput({
-          chat_id: base.chat_id,
-          scene_session_id: context.scene_session_id,
-          turn_no: context.turn_no,
-          scene_turn_no: context.scene_turn_no,
-          media_signature: context.media_signature,
-          target_message_id: context.target_message_id,
-          current_uuid: decision.current_uuid,
-          base_price_xtr: Number(context.base_price_xtr ?? 10),
-          amount_xtr: decision.invoice_amount,
-          original_amount_xtr: decision.original_invoice_amount,
-          promo_key: decision.promo_key,
-          invoice_sku: decision.invoice_sku,
-          invoice_title: decision.invoice_title,
-          invoice_description: decision.invoice_description,
-          invoice_label: decision.invoice_label,
-          invoice_button_text: decision.invoice_button_text,
-          payload_json: decision.invoice_payload_json,
-        }),
-      );
+      && base.chat_id;
+    const photoInvoiceInput = shouldUpsertPhotoInvoice
+      ? buildPhotoInvoiceInput({
+        chat_id: base.chat_id as number,
+        scene_session_id: context.scene_session_id,
+        turn_no: context.turn_no,
+        scene_turn_no: context.scene_turn_no,
+        media_signature: context.media_signature,
+        target_message_id: context.target_message_id,
+        current_uuid: decision.current_uuid,
+        base_price_xtr: Number(context.base_price_xtr ?? 10),
+        amount_xtr: decision.invoice_amount as number,
+        original_amount_xtr: decision.original_invoice_amount as number,
+        promo_key: decision.promo_key,
+        invoice_sku: decision.invoice_sku as string,
+        invoice_title: decision.invoice_title as string,
+        invoice_description: decision.invoice_description as string,
+        invoice_label: decision.invoice_label as string,
+        invoice_button_text: decision.invoice_button_text as string,
+        payload_json:
+          decision.invoice_payload_json as NonNullable<typeof decision.invoice_payload_json>,
+      })
+      : null;
 
-      const invoiceLink = normalizeString(invoiceToken?.invoice_link);
+    if (decision.token_rows.length > 0 && shouldUpsertPhotoInvoice) {
+      const [insertedCount, storedInvoice] = await Promise.all([
+        this.repository.upsertCallbackTokens(decision.token_rows),
+        this.repository.upsertInvoiceToken(photoInvoiceInput as NonNullable<typeof photoInvoiceInput>),
+      ]);
+      tokenRowsInserted = insertedCount;
+      invoiceToken = storedInvoice;
+    } else {
+      tokenRowsInserted = decision.token_rows.length > 0
+        ? await this.repository.upsertCallbackTokens(decision.token_rows)
+        : 0;
+
+      if (shouldUpsertPhotoInvoice) {
+        invoiceToken = await this.repository.upsertInvoiceToken(
+          photoInvoiceInput as NonNullable<typeof photoInvoiceInput>,
+        );
+      }
+    }
+
+    if (invoiceToken) {
+      const invoiceLink = normalizeString(invoiceToken.invoice_link);
       if (invoiceLink) {
         replyMarkup = appendInvoiceButton(
           replyMarkup,
@@ -1199,9 +1201,8 @@ export class MediaCommerceDecisionService {
     const turnLimitResetText =
       normalizeString(input.turn_limit_reset_text) ?? config.TURN_LIMIT_RESET_TEXT;
 
-    const upsertedRows: StoredInvoiceToken[] = [];
-    for (const plan of resolveSubscriptionPlans()) {
-      const row = await this.repository.upsertInvoiceToken(
+    const upsertedRows = await this.repository.upsertInvoiceTokens(
+      resolveSubscriptionPlans().map((plan) =>
         buildSubscriptionInvoiceInput({
           chat_id: chatId,
           idempotency_key: idempotencyKey,
@@ -1210,14 +1211,13 @@ export class MediaCommerceDecisionService {
           turns_today: turnsToday,
           turn_limit_reset_text: turnLimitResetText,
           plan,
-        }),
-      );
-      if (row) {
-        upsertedRows.push(row);
-      }
-    }
+        })),
+    );
 
     const createdLinks = input.created_invoice_links ?? [];
+    const tokenList = upsertedRows.map((row) => row.token);
+    let rows = upsertedRows;
+
     if (createdLinks.length > 0) {
       const linkRows = createdLinks
         .map((item) => {
@@ -1252,26 +1252,23 @@ export class MediaCommerceDecisionService {
           },
           () => this.repository.storeInvoiceLinks(linkRows),
         );
+        rows = tokenList.length > 0
+          ? mergeStoredRowsWithMetadata(
+            await this.runRepositoryOperation(
+              "subscription.loadStoredInvoiceTokens",
+              {
+                chat_id: chatId,
+                input_is_array: Array.isArray(tokenList),
+                input_length: tokenList.length,
+              },
+              () => this.repository.loadStoredInvoiceTokens(tokenList),
+            ),
+            upsertedRows,
+          )
+          : upsertedRows;
       }
     }
 
-    const tokenList = upsertedRows.map((row) => row.token);
-    const storedRows = tokenList.length > 0
-      ? mergeStoredRowsWithMetadata(
-        await this.runRepositoryOperation(
-          "subscription.loadStoredInvoiceTokens",
-          {
-            chat_id: chatId,
-            input_is_array: Array.isArray(tokenList),
-            input_length: tokenList.length,
-          },
-          () => this.repository.loadStoredInvoiceTokens(tokenList),
-        ),
-        upsertedRows,
-      )
-      : upsertedRows;
-
-    const rows = storedRows.length > 0 ? storedRows : upsertedRows;
     const missingRows = rows.filter(
       (row) => normalizeString(row.invoice_link) == null,
     );

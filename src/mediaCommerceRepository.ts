@@ -21,6 +21,7 @@ import {
   type StorePanelInput,
   type StorePhotoEventInput,
   type StorePrecheckoutResultInput,
+  type UpsertInvoiceTokenBatchInput,
   type UpsertInvoiceTokenInput,
 } from "./mediaCommerceRepository/shared.js";
 import { MediaInteractionTokenRepository } from "./mediaCommerceRepository/tokenRepository.js";
@@ -53,6 +54,12 @@ export class MediaCommerceRepository {
     input: UpsertInvoiceTokenInput,
   ): Promise<StoredInvoiceToken | null> {
     return this.tokenRepository.upsertInvoiceToken(input);
+  }
+
+  async upsertInvoiceTokens(
+    inputs: UpsertInvoiceTokenBatchInput,
+  ): Promise<StoredInvoiceToken[]> {
+    return this.tokenRepository.upsertInvoiceTokens(inputs);
   }
 
   async loadCallbackToken(

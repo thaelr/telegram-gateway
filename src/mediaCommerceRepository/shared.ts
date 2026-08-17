@@ -43,6 +43,8 @@ export type UpsertInvoiceTokenInput = SceneTurnRef & {
   invoice_button_text: string;
 };
 
+export type UpsertInvoiceTokenBatchInput = UpsertInvoiceTokenInput[];
+
 export type StorePanelInput = SceneTurnRef & {
   media_signature: string | null;
   panel_message_id: number | null;

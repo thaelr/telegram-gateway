@@ -654,6 +654,134 @@ test("upsertInvoiceToken normalizes string payload_json into an object before ca
   assertJsonbParameter(calls[0]?.values[6], { subscription_days: 14 });
 });
 
+test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      token: "inv-1",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: null,
+      turn_no: null,
+      scene_turn_no: null,
+      payload_json: { subscription_days: 14 },
+      sku: "payment_plan_1",
+      amount_xtr: 100,
+      telegram_invoice_payload: "inv-1",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      telegram_invoice_message_id: null,
+      invoice_link: null,
+      stored: true,
+      invoice_title: "Plan 1",
+      invoice_description: "Desc 1",
+      invoice_label: "Label 1",
+      invoice_button_text: "Button 1",
+    },
+    {
+      token: "inv-2",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: null,
+      turn_no: null,
+      scene_turn_no: null,
+      payload_json: { subscription_days: 30 },
+      sku: "payment_plan_2",
+      amount_xtr: 200,
+      telegram_invoice_payload: "inv-2",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      telegram_invoice_message_id: null,
+      invoice_link: null,
+      stored: false,
+      invoice_title: "Plan 2",
+      invoice_description: "Desc 2",
+      invoice_label: "Label 2",
+      invoice_button_text: "Button 2",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.upsertInvoiceTokens([
+    {
+      token: "inv-1",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: null,
+      turn_no: null,
+      scene_turn_no: null,
+      payload_json: { subscription_days: 14 },
+      action_kind: "subscription_payment",
+      sku: "payment_plan_1",
+      amount_xtr: 100,
+      telegram_invoice_payload: "inv-1",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      invoice_title: "Plan 1",
+      invoice_description: "Desc 1",
+      invoice_label: "Label 1",
+      invoice_button_text: "Button 1",
+    },
+    {
+      token: "inv-2",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: null,
+      turn_no: null,
+      scene_turn_no: null,
+      payload_json: "{\"subscription_days\":30}" as never,
+      action_kind: "subscription_payment",
+      sku: "payment_plan_2",
+      amount_xtr: 200,
+      telegram_invoice_payload: "inv-2",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      invoice_title: "Plan 2",
+      invoice_description: "Desc 2",
+      invoice_label: "Label 2",
+      invoice_button_text: "Button 2",
+    },
+  ]);
+
+  assert.equal(result.length, 2);
+  assert.equal(result[0]?.token, "inv-1");
+  assert.equal(result[1]?.token, "inv-2");
+  assert.match(calls[0]?.sql ?? "", /FROM public\.media_upsert_invoice_tokens\(/u);
+  assertJsonbParameter(calls[0]?.values[0], [
+    {
+      token: "inv-1",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: null,
+      turn_no: null,
+      scene_turn_no: null,
+      payload_json: { subscription_days: 14 },
+      action_kind: "subscription_payment",
+      sku: "payment_plan_1",
+      amount_xtr: 100,
+      telegram_invoice_payload: "inv-1",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      invoice_title: "Plan 1",
+      invoice_description: "Desc 1",
+      invoice_label: "Label 1",
+      invoice_button_text: "Button 1",
+    },
+    {
+      token: "inv-2",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: null,
+      turn_no: null,
+      scene_turn_no: null,
+      payload_json: { subscription_days: 30 },
+      action_kind: "subscription_payment",
+      sku: "payment_plan_2",
+      amount_xtr: 200,
+      telegram_invoice_payload: "inv-2",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      invoice_title: "Plan 2",
+      invoice_description: "Desc 2",
+      invoice_label: "Label 2",
+      invoice_button_text: "Button 2",
+    },
+  ]);
+});
+
 test("storePanel delegates to media_store_panel function and preserves result shape", async () => {
   const { query, calls } = createTaggedQueryStub([[
     {
