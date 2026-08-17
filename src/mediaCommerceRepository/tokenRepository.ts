@@ -6,6 +6,7 @@ import type {
 } from "../mediaCommerceTypes.js";
 import { sql } from "../db.js";
 import {
+  asJsonValue,
   type QueryClient,
   parseJsonObject,
   type UpsertInvoiceTokenInput,
@@ -17,7 +18,7 @@ export class MediaInteractionTokenRepository {
   async upsertCallbackTokens(tokenRows: InteractionTokenRow[]): Promise<number> {
     const rows = await this.query<Array<{ inserted_count: number }>>`
       SELECT public.media_upsert_callback_tokens(
-        ${sql.json(tokenRows)}
+        ${sql.json(asJsonValue(tokenRows))}
       ) AS inserted_count
     `;
 
@@ -38,7 +39,7 @@ export class MediaInteractionTokenRepository {
         ${input.scene_session_id}::text,
         ${input.turn_no}::bigint,
         ${input.scene_turn_no}::smallint,
-        ${sql.json(payloadJson)},
+        ${sql.json(asJsonValue(payloadJson))},
         ${input.action_kind}::text,
         ${input.sku}::text,
         ${input.amount_xtr}::integer,
@@ -119,9 +120,62 @@ export class MediaInteractionTokenRepository {
   async storeInvoiceLinks(
     items: Array<{ token: string; chat_id: number; invoice_link: string }>,
   ): Promise<number> {
+    if (process.env.MEDIA_JSONB_DEBUG === "1") {
+      try {
+        const probeRows = await this.query<
+          Array<{ input_type: string | null; input_count: number | null }>
+        >`
+          WITH input AS (
+            SELECT ${sql.json(asJsonValue(items))} AS value
+          )
+          SELECT
+            jsonb_typeof(value) AS input_type,
+            CASE
+              WHEN jsonb_typeof(value) = 'array'
+              THEN jsonb_array_length(value)
+              ELSE NULL
+            END AS input_count
+          FROM input
+        `;
+
+        const probe = probeRows[0] ?? { input_type: null, input_count: null };
+        console.info("[storeInvoiceLinks] jsonb type probe", {
+          input_is_array: Array.isArray(items),
+          input_length: items.length,
+          input_type: probe.input_type,
+          input_count: probe.input_count,
+        });
+      } catch (error) {
+        const postgresError = error as { code?: string; message?: string };
+        console.warn("[storeInvoiceLinks] probe failed", {
+          probe: "jsonb_type",
+          code: postgresError.code ?? null,
+          message: postgresError.message ?? "Unknown error",
+        });
+      }
+
+      try {
+        const probeRows = await this.query<Array<{ expanded_count: number }>>`
+          SELECT COUNT(*)::integer AS expanded_count
+          FROM jsonb_array_elements(${sql.json(asJsonValue(items))}) AS item
+        `;
+
+        console.info("[storeInvoiceLinks] jsonb expand probe", {
+          expanded_count: probeRows[0]?.expanded_count ?? 0,
+        });
+      } catch (error) {
+        const postgresError = error as { code?: string; message?: string };
+        console.warn("[storeInvoiceLinks] probe failed", {
+          probe: "jsonb_expand",
+          code: postgresError.code ?? null,
+          message: postgresError.message ?? "Unknown error",
+        });
+      }
+    }
+
     const rows = await this.query<Array<{ updated_count: number }>>`
       SELECT public.media_store_invoice_links(
-        ${sql.json(items)}
+        ${sql.json(asJsonValue(items))}
       ) AS updated_count
     `;
 
@@ -136,7 +190,7 @@ export class MediaInteractionTokenRepository {
     return this.query<StoredInvoiceToken[]>`
       SELECT *
       FROM public.media_load_stored_invoice_tokens(
-        ${sql.json(tokens)}
+        ${sql.json(asJsonValue(tokens))}
       )
     `;
   }
@@ -152,7 +206,7 @@ export class MediaInteractionTokenRepository {
 
     const rows = await this.query<Array<{ updated_count: number }>>`
       SELECT public.media_store_subscription_offer_message_id(
-        ${sql.json(tokens)},
+        ${sql.json(asJsonValue(tokens))},
         ${chatId}::bigint,
         ${offerMessageId}::bigint
       ) AS updated_count

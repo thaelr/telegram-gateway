@@ -1,6 +1,7 @@
 import type { MediaFinalizeResult } from "../mediaCommerceTypes.js";
 import { sql } from "../db.js";
 import {
+  asJsonValue,
   buildMediaFinalizeFallback,
   type QueryClient,
   type StorePanelInput,
@@ -24,7 +25,7 @@ export class MediaEventRepository {
         ${input.invoice_token}::text,
         ${input.invoice_link}::text,
         ${input.panel_text}::text,
-        ${sql.json(input.panel_entities_json)}
+        ${sql.json(asJsonValue(input.panel_entities_json))}
       )
     `;
 

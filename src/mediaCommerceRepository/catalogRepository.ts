@@ -2,6 +2,7 @@ import { config } from "../config.js";
 import { sql } from "../db.js";
 import type { MediaContext, MediaOfferStats } from "../mediaCommerceTypes.js";
 import {
+  asJsonValue,
   buildEmptyMediaContext,
   buildEmptyOfferStats,
   type CatalogRow,
@@ -101,7 +102,7 @@ export class MediaCatalogRepository {
         ${input.paid_access_mode}::text,
         ${input.callback_valid}::boolean,
         ${input.panel_text}::text,
-        ${sql.json(input.panel_entities_json ?? [])}
+        ${sql.json(asJsonValue(input.panel_entities_json ?? []))}
       )
     `;
 

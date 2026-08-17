@@ -1,3 +1,4 @@
+import type { JSONValue } from "postgres";
 import { sql } from "../db.js";
 import type { MediaContext, MediaFinalizeResult, MediaOfferStats } from "../mediaCommerceTypes.js";
 
@@ -138,6 +139,10 @@ export function parseJsonObject(value: unknown): Record<string, unknown> | null 
   }
 
   return null;
+}
+
+export function asJsonValue(value: unknown): JSONValue {
+  return value as JSONValue;
 }
 
 export function buildEmptyOfferStats(input: LoadOfferStatsInput): MediaOfferStats {
