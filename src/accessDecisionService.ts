@@ -11,14 +11,12 @@ import type {
 
 const START_COMMAND = "/start";
 const MENU_COMMAND = "/menu";
-const NEW_SCENE_COMMAND = "/newscene";
 const SUBSCRIPTION_COMMAND = "/subscription";
 const PAYSUPPORT_COMMAND = "/paysupport";
 
 const ACCESS_CONTEXT_INTENTS = new Set<RouterIntent>([
   "scene_start",
   "menu",
-  "new_scene",
   "subscription",
   "paysupport",
   "scene_mode",
@@ -39,7 +37,6 @@ function isAllowedClassification(classification: RouterClassification): boolean 
   switch (classification.intent) {
     case "scene_start":
     case "menu":
-    case "new_scene":
     case "subscription":
     case "paysupport":
     case "terms_accept":
@@ -183,14 +180,6 @@ function classifyRouterInput(input: AccessDecisionRequest): RouterClassification
       domain: "command",
       intent: "menu",
       action: "show_character_gallery",
-    };
-  }
-
-  if (command === NEW_SCENE_COMMAND) {
-    return {
-      domain: "command",
-      intent: "new_scene",
-      action: "show_newscene_confirm",
     };
   }
 

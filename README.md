@@ -46,7 +46,6 @@ All `/v1/*` endpoints require an internal API key header.
 Endpoints:
 
 - `POST /v1/router-decision`
-- `POST /v1/access-decision`
 - `POST /v1/media-commerce-decision`
 
 ## Request / Response Shape
@@ -86,7 +85,6 @@ telegram-gateway/
     mediaCommerceDecisionService.ts
     mediaCommerceRepository.ts
     mediaCommerceTypes.ts
-    routerDecisionService.ts
     server.ts
     types.ts
   test/

@@ -233,6 +233,27 @@ test("returns show_newscene_confirm for /menu when a scene is active", async () 
   assert.equal(calls.length, 1);
 });
 
+test("treats /newscene as unknown command", async () => {
+  const { service, calls } = createService(buildAccessContext(), {
+    throwOnCall: true,
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/newscene",
+      event_type: "command.received",
+      message_type: "command",
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.intent, "unknown_command");
+  assert.equal(result.action, "ignore");
+  assert.equal(result.allowed, false);
+  assert.equal(result.decision, "noop");
+  assert.equal(calls.length, 0);
+});
+
 test("returns allow_scene for active subscription", async () => {
   const { service } = createService(
     buildAccessContext({
@@ -535,12 +556,6 @@ test("access-controlled intents call repository exactly once", async () => {
     }),
     buildRequest({
       command: "/menu",
-      event_type: "command.received",
-      message_type: "command",
-      user_message: null,
-    }),
-    buildRequest({
-      command: "/newscene",
       event_type: "command.received",
       message_type: "command",
       user_message: null,

@@ -652,7 +652,7 @@ export class MediaCommerceDecisionService {
           String(
             invoiceToken?.invoice_button_text
               ?? decision.invoice_button_text
-              ?? `Ещё фото • ${decision.invoice_amount} Stars`,
+              ?? `Ещё фото • ${decision.invoice_amount} ⭐`,
           ),
           invoiceLink,
         );

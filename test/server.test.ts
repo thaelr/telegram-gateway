@@ -192,7 +192,7 @@ test("media-commerce endpoint returns safe diagnostics for internal errors", asy
   assert.equal("stack" in body, false);
 });
 
-test("access endpoint is registered and uses the same auth and validation wiring", async (t) => {
+test("router endpoint is registered and uses the same auth and validation wiring", async (t) => {
   let receivedChatId: number | null = null;
   const app = buildApp({
     logger: false,
@@ -217,7 +217,7 @@ test("access endpoint is registered and uses the same auth and validation wiring
 
   const unauthorized = await app.inject({
     method: "POST",
-    url: "/v1/access-decision",
+    url: "/v1/router-decision",
     payload: {
       chat_id: 42,
     },
@@ -226,7 +226,7 @@ test("access endpoint is registered and uses the same auth and validation wiring
 
   const response = await app.inject({
     method: "POST",
-    url: "/v1/access-decision",
+    url: "/v1/router-decision",
     headers: {
       "x-internal-api-key": "test-internal-key",
     },

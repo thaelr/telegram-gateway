@@ -154,7 +154,6 @@ export function buildApp(options: BuildAppOptions = {}) {
     }
   };
 
-  app.post("/v1/access-decision", handleRouterDecision);
   app.post("/v1/router-decision", handleRouterDecision);
   app.post("/v1/media-commerce-decision", handleMediaCommerceDecision);
 

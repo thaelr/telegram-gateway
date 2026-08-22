@@ -586,7 +586,6 @@ index 62a6372..4541582 100644
 +    }
    };
  
-   app.post("/v1/access-decision", handleRouterDecision);
 diff --git a/test/server.test.ts b/test/server.test.ts
 index 32ff692..ac6360f 100644
 --- a/test/server.test.ts

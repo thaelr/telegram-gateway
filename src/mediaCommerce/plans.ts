@@ -104,7 +104,7 @@ export function resolvePhotoPlanByAmount(
     title: "Payment media",
     description: "Media payment option.",
     label: "Payment media",
-    button_text: `Payment media • ${normalizedAmount} Stars`,
+    button_text: `Получить фото • ${normalizedAmount} ⭐`,
   };
 
   return applyPromotionToPlan(plan);

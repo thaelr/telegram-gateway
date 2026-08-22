@@ -16,7 +16,6 @@ export type RouterIntent =
   | "scene_message"
   | "scene_start"
   | "menu"
-  | "new_scene"
   | "subscription"
   | "paysupport"
   | "terms_accept"
