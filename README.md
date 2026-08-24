@@ -1,149 +1,40 @@
-# telegram-gateway
+# Telegram Gateway
 
-TypeScript backend for decision-making in chat products.
+This service was created for a conversational AI product and handles access control and routing of incoming events.
 
-It keeps routing, access checks, and media-commerce policy outside workflow automation, while leaving side effects to the caller.
+Works as the Telegram backend and contains the logic for a small companion-selection app, including business rules and transaction-related scenarios. The service makes decisions and stores state, while the actual actions in production are performed in n8n, where workflows handle UX and commercial flows.
 
-## Bounded Contexts
+## Endpoints
 
-- `router-decision`
-  Classifies normalized inbound events and returns a single executable `action`.
-- `media-commerce-decision`
-  Decides media offer, callback, invoice, pre-checkout, payment, and fulfillment behavior for a media add-on flow.
+### `/v1/router-decision`
 
-Typical deployment model:
+Classifies messages, commands, and callbacks, decides whether the user can access the chat, checks the daily limit, and returns the next action for the workflow.
 
-`event source -> telegram-gateway -> workflow/app backend -> external side effects`
+### `/v1/media-commerce-decision`
 
-## What Stays In This Service
+Handles decisions related to paid actions: media delivery, callback actions, subscriptions, and Telegram Stars payments. It uses the current database state to process commercial actions and build the offers available to the user.
 
-- routing and intent classification
-- terms / subscription / usage-limit checks
-- idempotency key generation for downstream mutations
-- media offer and payment decision logic
-- token ownership and payment lifecycle validation
+## Implementation
 
-## What Stays Outside
+The service is written in TypeScript using Fastify. State is stored in PostgreSQL, while input data and configuration are validated with Zod.
 
-- Telegram API calls
-- message send/edit/delete operations
-- invoice link creation
-- workflow orchestration
+Simple data operations are handled in the backend code, while more complex operations, especially those sensitive to concurrent processing, are moved to PostgreSQL functions.
 
-## API
+Callback and payment flows use server-side tokens and separate payment states to protect against duplicate event processing.
 
-### Public
+Pricing plans, paid actions, and temporary promotions are configured through environment settings.
 
-- `GET /healthz`
+The main scenarios are covered by automated tests, and requests and errors are logged with a request ID.
 
-### Internal
+## Workflows used in production
 
-All `/v1/*` endpoints require an internal API key header.
+The screenshot shows the two main n8n workflows that use the gateway.
 
-- Header name: `INTERNAL_API_KEY_HEADER`
-- Header value: `INTERNAL_API_KEY`
+On the left is the main Telegram router workflow. It receives and normalizes incoming events, calls `/v1/router-decision`, and routes the user to the correct product flow.
 
-Endpoints:
+On the right is the media / payment workflow. It calls `/v1/media-commerce-decision` and handles flows related to media, callback actions, subscriptions, and Telegram Stars payments.
 
-- `POST /v1/router-decision`
-- `POST /v1/media-commerce-decision`
+<img width="1460" height="700" alt="image" src="https://github.com/user-attachments/assets/2a963e36-decd-482e-a77f-16a9d1836523" />
 
-## Request / Response Shape
 
-The service accepts normalized events and returns decision objects that preserve the context required by downstream execution.
 
-Router responses include fields such as:
-
-- `action`
-- `allowed`
-- `idempotency_key`
-- passthrough event metadata
-- access-context fields when relevant
-
-Media-commerce responses include fields such as:
-
-- `route`
-- `operation`
-- `invoice_token`
-- `reply_markup`
-- `payment_kind`
-- `reason`
-
-## Repository Layout
-
-```text
-telegram-gateway/
-  .env.example
-  README.md
-  package.json
-  src/
-    accessDecisionService.ts
-    chatAccessRepository.ts
-    config.ts
-    db.ts
-    internalApiAuth.ts
-    mediaCommerceDecisionService.ts
-    mediaCommerceRepository.ts
-    mediaCommerceTypes.ts
-    server.ts
-    types.ts
-  test/
-    accessDecisionService.test.ts
-    chatAccessRepository.test.ts
-    internalApiAuth.test.ts
-    mediaCommerceDecisionService.test.ts
-```
-
-## Local Development
-
-```bash
-npm install
-cp .env.example .env
-npm run dev
-```
-
-Useful commands:
-
-```bash
-npm run check
-npm run test
-npm run build
-npm run start
-```
-
-## Environment Variables
-
-Core:
-
-- `DATABASE_URL`
-- `PORT`
-- `HOST`
-- `INTERNAL_API_KEY`
-- `INTERNAL_API_KEY_HEADER`
-
-Access / router:
-
-- `TURN_LIMIT`
-- `BUSINESS_TIME_ZONE`
-- `TURN_LIMIT_RESET_TEXT`
-
-Media commerce:
-
-- `MEDIA_PAYMENT_CURRENCY`
-- `MEDIA_STORAGE_BASE_URL`
-- `MEDIA_DEFAULT_BUCKET_NAME`
-- `MEDIA_BUCKET_ALIAS_MAP_JSON`
-- `MEDIA_SUBSCRIPTION_PLANS_JSON`
-- `MEDIA_PHOTO_PLANS_JSON`
-- `MEDIA_ACTION_PLANS_JSON`
-- `MEDIA_PROMOTIONS_JSON`
-
-See [.env.example](./.env.example).
-
-## Design Notes
-
-- The service is decision-only; callers own execution.
-- `/v1/*` is intended for trusted internal callers only.
-- Subscription pricing and plan metadata are environment-driven.
-- Time-based promotions are environment-driven and can override exact price per payment `sku`.
-- Media catalog storage names are configurable so public code stays product-neutral.
