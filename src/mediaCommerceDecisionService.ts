@@ -4,7 +4,6 @@ import {
   buildMediaAction,
   buildPhotoInvoiceInput,
   calculateMediaPriceRequired,
-  PHOTO_ACTIONS,
 } from "./mediaCommerce/mediaAction.js";
 import {
   INVOICE_PAYLOAD_KIND,
@@ -483,7 +482,7 @@ export class MediaCommerceDecisionService {
       && normalizeString(callbackRow?.status) === "active";
     const answerText = !valid
       ? "Кнопка устарела."
-      : PHOTO_ACTIONS.has(String(actionKind))
+      : (actionKind === "photo_request" || actionKind === "photo_regen")
         ? "Секунду, генерируем фото"
         : "";
 

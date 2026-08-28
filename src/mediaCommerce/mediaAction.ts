@@ -266,9 +266,11 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
     if (unlockedItems.length > 0) {
       let index = unlockedItems.findIndex((item) => item.uuid === currentUuid);
       if (index < 0) index = 0;
-      if (actionKind === "photo_prev") index = Math.max(0, index - 1);
+      if (actionKind === "photo_prev") {
+        index = index <= 0 ? unlockedItems.length - 1 : index - 1;
+      }
       if (actionKind === "photo_next") {
-        index = Math.min(unlockedItems.length - 1, index + 1);
+        index = index >= unlockedItems.length - 1 ? 0 : index + 1;
       }
       selected = unlockedItems[index] ?? null;
       if (selected) {
