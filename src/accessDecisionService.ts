@@ -341,6 +341,8 @@ export class AccessDecisionService {
       inbound_message_id: input.inbound_message_id ?? null,
       callback_data: input.callback_data ?? null,
       callback_query_id: input.callback_query_id ?? null,
+      panel_text: input.panel_text ?? null,
+      panel_entities_json: input.panel_entities_json ?? null,
       pre_checkout_query_id: input.pre_checkout_query_id ?? null,
       invoice_payload: input.invoice_payload ?? null,
       telegram_payment_charge_id: input.telegram_payment_charge_id ?? null,

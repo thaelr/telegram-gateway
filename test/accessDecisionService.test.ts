@@ -473,6 +473,30 @@ test("payment is classified by event_type without route_target", async () => {
   assert.equal(calls.length, 0);
 });
 
+test("commerce callback preserves panel text and entities passthrough", async () => {
+  const { service, calls } = createService(buildAccessContext(), {
+    throwOnCall: true,
+  });
+
+  const entities = [{ type: "bold", offset: 0, length: 4 }];
+  const result = await service.evaluate(
+    buildRequest({
+      route_target: null,
+      event_type: "callback_query.received",
+      callback_data: "btn_token",
+      panel_text: "Панель сцены",
+      panel_entities_json: entities,
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.action, "handle_commerce_interaction");
+  assert.equal(result.decision, "noop");
+  assert.equal(result.panel_text, "Панель сцены");
+  assert.deepEqual(result.panel_entities_json, entities);
+  assert.equal(calls.length, 0);
+});
+
 test("reachability is classified by event_type without route_target", async () => {
   const { service, calls } = createService(buildAccessContext(), {
     throwOnCall: true,

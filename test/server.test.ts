@@ -194,11 +194,15 @@ test("media-commerce endpoint returns safe diagnostics for internal errors", asy
 
 test("router endpoint is registered and uses the same auth and validation wiring", async (t) => {
   let receivedChatId: number | null = null;
+  let receivedPanelText: string | null = null;
+  let receivedPanelEntities: unknown = null;
   const app = buildApp({
     logger: false,
     accessDecisionService: {
       async evaluate(input) {
         receivedChatId = input.chat_id;
+        receivedPanelText = input.panel_text ?? null;
+        receivedPanelEntities = input.panel_entities_json ?? null;
         return {
           decision: "noop",
           action: "ignore",
@@ -209,6 +213,8 @@ test("router endpoint is registered and uses the same auth and validation wiring
           source: input.source ?? "telegram",
           update_id: input.update_id ?? null,
           idempotency_key: null,
+          panel_text: input.panel_text ?? null,
+          panel_entities_json: input.panel_entities_json ?? null,
         };
       },
     },
@@ -233,10 +239,15 @@ test("router endpoint is registered and uses the same auth and validation wiring
     payload: {
       chat_id: "42",
       command: "/menu",
+      panel_text: "panel caption",
+      panel_entities_json: [{ type: "italic", offset: 0, length: 5 }],
     },
   });
 
   assert.equal(response.statusCode, 200);
   assert.equal(receivedChatId, 42);
+  assert.equal(receivedPanelText, "panel caption");
+  assert.deepEqual(receivedPanelEntities, [{ type: "italic", offset: 0, length: 5 }]);
   assert.equal(response.json().chat_id, 42);
+  assert.equal(response.json().panel_text, "panel caption");
 });

@@ -30,6 +30,8 @@ const routerRequestSchema = z.object({
   scene_mode: z.string().trim().nullable().optional(),
   callback_data: z.string().trim().nullable().optional(),
   callback_query_id: z.string().trim().nullable().optional(),
+  panel_text: z.string().nullable().optional(),
+  panel_entities_json: z.unknown().nullable().optional(),
   pre_checkout_query_id: z.string().trim().nullable().optional(),
   invoice_payload: z.string().trim().nullable().optional(),
   telegram_payment_charge_id: z.string().trim().nullable().optional(),

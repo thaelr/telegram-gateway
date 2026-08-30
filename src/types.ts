@@ -62,6 +62,8 @@ export interface AccessDecisionRequest {
   scene_mode?: string | null;
   callback_data?: string | null;
   callback_query_id?: string | null;
+  panel_text?: string | null;
+  panel_entities_json?: unknown | null;
   pre_checkout_query_id?: string | null;
   invoice_payload?: string | null;
   telegram_payment_charge_id?: string | null;
@@ -91,6 +93,8 @@ export interface AccessDecisionResponse {
   inbound_message_id?: number | null;
   callback_data?: string | null;
   callback_query_id?: string | null;
+  panel_text?: string | null;
+  panel_entities_json?: unknown | null;
   pre_checkout_query_id?: string | null;
   invoice_payload?: string | null;
   telegram_payment_charge_id?: string | null;
