@@ -862,8 +862,20 @@ test("callback photo request can require invoice link for next media step", asyn
         },
       });
     },
-    async upsertInvoiceToken() {
+    async upsertInvoiceToken(input) {
+      const row = input as {
+        token: string;
+        payload_json: Record<string, unknown>;
+        sku: string;
+        amount_xtr: number;
+        action_kind: string;
+      };
       return buildStoredInvoiceToken({
+        token: row.token,
+        payload_json: row.payload_json,
+        sku: row.sku,
+        amount_xtr: row.amount_xtr,
+        action_kind: row.action_kind,
         invoice_link: null,
       });
     },
@@ -880,8 +892,12 @@ test("callback photo request can require invoice link for next media step", asyn
 
   assert.equal(result.operation, "edit_photo_with_invoice_link");
   assert.equal(result.needs_invoice_link, true);
-  assert.equal(result.invoice_token, "inv_token");
+  assert.match(String(result.invoice_token ?? ""), /^inv_/u);
   assert.equal(result.photo_url, "https://cdn.test/u1.jpg");
+  assert.deepEqual(
+    result.missing_invoice_items?.map((item) => item.feature_key),
+    ["scene_unlock"],
+  );
 });
 
 test("callback photo request unlocks through scene pass with zero price", async () => {
