@@ -6,6 +6,7 @@ import type {
   MediaReplyMarkup,
   MediaUnlockedItem,
 } from "../mediaCommerceTypes.js";
+import { config } from "../config.js";
 import {
   buildRandomToken,
   INVOICE_TTL_MS,
@@ -52,10 +53,11 @@ export type MediaActionDecision = {
 
 export function calculateMediaPriceRequired(input: {
   subscription_active: boolean;
+  scene_access_active?: boolean;
   delivered_in_scene: number;
   base_price_xtr: number;
 }): number {
-  return input.subscription_active
+  return input.subscription_active || input.scene_access_active === true
     ? 0
     : input.delivered_in_scene < 3
       ? 0
@@ -205,11 +207,13 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   const actionKind = normalizeString(context.action_kind) ?? "";
   const callbackValid = context.callback_valid !== false;
   const subscriptionActive = context.subscription_active === true;
+  const sceneAccessActive = context.scene_access_active === true;
   const deliveredInScene = Number(context.delivered_in_scene ?? 0);
   const basePrice = Number(context.base_price_xtr ?? 10);
   const forceDeliver = context.force_deliver_after_payment === true;
   const priceRequired = calculateMediaPriceRequired({
     subscription_active: subscriptionActive,
+    scene_access_active: sceneAccessActive,
     delivered_in_scene: deliveredInScene,
     base_price_xtr: basePrice,
   });
@@ -304,12 +308,16 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
           normalizeString(context.paid_access_mode)
           ?? (subscriptionActive
             ? "subscription"
+            : sceneAccessActive
+              ? "scene_pass"
             : deliveredInScene < 3
               ? "free"
               : "paid");
         logEventType =
           accessMode === "subscription"
             ? "media.photo.unlocked.subscription"
+            : accessMode === "scene_pass"
+              ? "media.photo.unlocked.scene_pass"
             : accessMode === "paid"
               ? "media.photo.unlocked.paid"
               : "media.photo.unlocked.free";
@@ -338,6 +346,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   );
   const nextPrice = calculateMediaPriceRequired({
     subscription_active: subscriptionActive,
+    scene_access_active: sceneAccessActive,
     delivered_in_scene: deliveredAfter,
     base_price_xtr: basePrice,
   });
@@ -376,8 +385,8 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
 
   if (unlockedAfter.length > 1) {
     addCallbackRow([
-      { text: "◀", action: "photo_prev" },
-      { text: "▶", action: "photo_next" },
+      { text: config.TELEGRAM_UX_COPY_JSON.media.prev_button, action: "photo_prev" },
+      { text: config.TELEGRAM_UX_COPY_JSON.media.next_button, action: "photo_next" },
     ]);
   }
 
@@ -423,7 +432,10 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
         promo_key: photoPlan.promo_key,
       };
     } else {
-      addCallbackRow([{ text: "Ещё фото", action: "photo_regen" }]);
+      addCallbackRow([{
+        text: config.TELEGRAM_UX_COPY_JSON.media.more_photo_button,
+        action: "photo_regen",
+      }]);
     }
   }
 

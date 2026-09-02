@@ -5,6 +5,7 @@ export const mediaCommerceRequestSchema = z.object({
   event_type: z.string().trim().nullable().optional(),
   chat_id: z.coerce.number().int().positive().nullable().optional(),
   scene_session_id: z.string().trim().nullable().optional(),
+  active_scene_session_id: z.string().trim().nullable().optional(),
   turn_no: z.coerce.number().int().nonnegative().nullable().optional(),
   scene_turn_no: z.coerce.number().int().nonnegative().nullable().optional(),
   character_i: z.coerce.number().int().positive().nullable().optional(),
@@ -50,6 +51,8 @@ export const mediaCommerceRequestSchema = z.object({
     .enum(["subscription_command", "daily_turn_limit"])
     .nullable()
     .optional(),
+  subscription_active: z.boolean().nullable().optional(),
+  scene_access_active: z.boolean().nullable().optional(),
   turn_limit: z.coerce.number().int().positive().nullable().optional(),
   turns_today: z.coerce.number().int().nonnegative().nullable().optional(),
   turn_limit_reset_text: z.string().trim().nullable().optional(),

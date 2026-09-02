@@ -10,67 +10,58 @@ import type {
   StoredInvoiceToken,
 } from "../src/mediaCommerceTypes.js";
 import type { MediaCommerceDecisionRequest } from "../src/mediaCommerce/requestSchema.js";
+import { installTestEnv } from "./testEnv.js";
 
-process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
-process.env.INTERNAL_API_KEY ??= "test-internal-key";
-process.env.TURN_LIMIT ??= "15";
+installTestEnv();
+process.env.TURN_LIMIT ??= "20";
 process.env.BUSINESS_TIME_ZONE ??= "Europe/Moscow";
 process.env.TURN_LIMIT_RESET_TEXT ??= "00:00 МСК";
 process.env.MEDIA_STORAGE_BASE_URL ??= "https://media.example.com";
 process.env.MEDIA_PROMOTIONS_JSON ??= "[]";
 process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
   {
-    sku: "payment_plan_1",
-    days: 14,
-    amount_xtr: 100,
-    title: "Payment plan 1",
-    description: "Access plan option 1 for chat and media actions.",
-    label: "Payment plan 1",
-    button_text: "Payment plan 1",
-  },
-  {
     sku: "payment_plan_2",
-    days: 30,
+    days: 14,
     amount_xtr: 200,
-    title: "Payment plan 2",
-    description: "Access plan option 2 for chat and media actions.",
-    label: "Payment plan 2",
-    button_text: "Payment plan 2",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
   {
     sku: "payment_plan_3",
-    days: 60,
+    days: 30,
     amount_xtr: 300,
-    title: "Payment plan 3",
-    description: "Access plan option 3 for chat and media actions.",
-    label: "Payment plan 3",
-    button_text: "Payment plan 3",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
   {
     sku: "payment_media_1",
     amount_xtr: 10,
-    title: "Payment media 1",
-    description: "Media payment option 1.",
-    label: "Payment media 1",
-    button_text: "Payment media 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
   {
     sku: "payment_media_2",
     amount_xtr: 25,
-    title: "Payment media 2",
-    description: "Media payment option 2.",
-    label: "Payment media 2",
-    button_text: "Payment media 2",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
   {
     sku: "payment_media_3",
     amount_xtr: 50,
-    title: "Payment media 3",
-    description: "Media payment option 3.",
-    label: "Payment media 3",
-    button_text: "Payment media 3",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
@@ -78,28 +69,28 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
     sku: "payment_action_1",
     feature_key: "fast_scene_skip",
     amount_xtr: 50,
-    title: "Payment action 1",
-    description: "Feature payment option 1.",
-    label: "Payment action 1",
-    button_text: "Payment action 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
   {
     sku: "payment_action_2",
-    feature_key: "future_action_2",
-    amount_xtr: 75,
-    title: "Payment action 2",
-    description: "Feature payment option 2.",
-    label: "Payment action 2",
-    button_text: "Payment action 2",
+    feature_key: "scene_unlock",
+    amount_xtr: 80,
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
   {
     sku: "payment_action_3",
     feature_key: "future_action_3",
     amount_xtr: 100,
-    title: "Payment action 3",
-    description: "Feature payment option 3.",
-    label: "Payment action 3",
-    button_text: "Payment action 3",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 
@@ -152,6 +143,19 @@ type MockRepository = {
   activateSubscription: (
     input: unknown,
   ) => Promise<number>;
+  activateSceneAccess: (
+    input: unknown,
+  ) => Promise<number>;
+  loadSceneAccessStatus: (
+    input: unknown,
+  ) => Promise<{
+    chat_id: number | null;
+    scene_session_id: string | null;
+    active_scene_session_id: string | null;
+    subscription_active: boolean;
+    scene_access_active: boolean;
+    scene_is_active: boolean;
+  } | null>;
   storePhotoEvent: (
     input: unknown,
   ) => Promise<{
@@ -190,6 +194,7 @@ function buildOfferStats(
     subscription_active: false,
     subscription_sku: null,
     subscription_until: null,
+    scene_access_active: false,
     delivered_in_scene: 0,
     total_available: 4,
     unseen_available: 4,
@@ -251,6 +256,7 @@ function buildMediaContext(
     subscription_active: false,
     subscription_sku: null,
     subscription_until: null,
+    scene_access_active: false,
     delivered_in_scene: 0,
     total_available: 4,
     unseen_available: 3,
@@ -282,10 +288,10 @@ function buildStoredInvoiceToken(
     telegram_invoice_message_id: null,
     invoice_link: null,
     stored: true,
-    invoice_title: "Payment media 1",
-    invoice_description: "Media payment option 1.",
-    invoice_label: "Payment media 1",
-    invoice_button_text: "Payment media 1",
+    invoice_title: "text",
+    invoice_description: "text",
+    invoice_label: "text",
+    invoice_button_text: "text",
     status: "invoice_sent",
     action_kind: "photo_payment",
     ...overrides,
@@ -382,6 +388,8 @@ function createRepository(
     loadInvoiceTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
     markInvoicePaid: 0,
     activateSubscription: 0,
+    activateSceneAccess: 0,
+    loadSceneAccessStatus: 0,
   };
 
   const repository: MockRepository = {
@@ -424,10 +432,10 @@ function createRepository(
           telegram_invoice_payload:
             row.telegram_invoice_payload ?? row.token ?? `token-${index + 1}`,
           expires_at: row.expires_at ?? new Date(Date.now() + 60_000).toISOString(),
-          invoice_title: row.invoice_title ?? `Payment plan ${index + 1}`,
-          invoice_description: row.invoice_description ?? "Subscription access",
-          invoice_label: row.invoice_label ?? `Payment plan ${index + 1}`,
-          invoice_button_text: row.invoice_button_text ?? `Payment plan ${index + 1}`,
+          invoice_title: row.invoice_title ?? "text",
+          invoice_description: row.invoice_description ?? "text",
+          invoice_label: row.invoice_label ?? "text",
+          invoice_button_text: row.invoice_button_text ?? "text",
           invoice_link: null,
         });
       });
@@ -474,6 +482,25 @@ function createRepository(
       calls.activateSubscription += 1;
       return 1;
     },
+    async activateSceneAccess() {
+      calls.activateSceneAccess += 1;
+      return 1;
+    },
+    async loadSceneAccessStatus(input) {
+      calls.loadSceneAccessStatus += 1;
+      const source = (input ?? {}) as {
+        chat_id?: number | null;
+        scene_session_id?: string | null;
+      };
+      return {
+        chat_id: source.chat_id ?? 101,
+        scene_session_id: source.scene_session_id ?? "scene-1",
+        active_scene_session_id: source.scene_session_id ?? "scene-1",
+        subscription_active: false,
+        scene_access_active: false,
+        scene_is_active: true,
+      };
+    },
     async storePhotoEvent() {
       return {
         chat_id: 101,
@@ -497,19 +524,22 @@ function createRepository(
         buildStoredInvoiceToken({
           token,
           sku:
-            index === 0 ? "payment_plan_1" : index === 1 ? "payment_plan_2" : "payment_plan_3",
-          amount_xtr: index === 0 ? 100 : index === 1 ? 200 : 300,
+            index === 0 ? "payment_action_2" : index === 1 ? "payment_plan_2" : "payment_plan_3",
+          amount_xtr: index === 0 ? 80 : index === 1 ? 200 : 300,
           invoice_title:
-            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
-          invoice_description: "Subscription access",
+            "text",
+          invoice_description: "text",
           invoice_label:
-            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
+            "text",
           invoice_button_text:
-            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
+            "text",
           payload_json: {
-            subscription_days: index === 0 ? 14 : index === 1 ? 30 : 60,
+            action_kind: index === 0 ? "feature_payment" : "subscription_payment",
+            feature_key: index === 0 ? "scene_unlock" : null,
+            sort_order: index,
+            subscription_days: index === 0 ? null : index === 1 ? 14 : 30,
             subscription_offer_reason: "subscription_command",
-            turn_limit: 15,
+            turn_limit: 20,
             turns_today: 0,
             turn_limit_reset_text: "00:00 МСК",
           },
@@ -584,7 +614,7 @@ test("prepare_offer returns callback offer for free media", async () => {
   assert.equal(first.has_media_offer, true);
   assert.equal(first.token_rows_prepared, 1);
   assert.equal(first.token_rows_inserted, 1);
-  assert.equal(first.reply_markup?.inline_keyboard[0]?.[0]?.text, "Получить фото");
+  assert.equal(first.reply_markup?.inline_keyboard[0]?.[0]?.text, "text");
   assert.notEqual(first.token_rows?.[0]?.token, second.token_rows?.[0]?.token);
 });
 
@@ -611,13 +641,73 @@ test("prepare_offer reuses stored invoice link for paid media", async () => {
   assert.equal(result.reply_markup?.inline_keyboard.at(-1)?.[0]?.url, "https://t.me/invoice-link");
 });
 
+test("prepare_offer adds scene unlock invoice under paid photo offers", async () => {
+  const { service } = createRepository({
+    async loadOfferStats() {
+      return buildOfferStats({
+        delivered_in_scene: 3,
+        unseen_available: 2,
+      });
+    },
+    async upsertInvoiceToken(input) {
+      const row = input as {
+        token: string;
+        payload_json: Record<string, unknown>;
+        sku: string;
+        amount_xtr: number;
+        invoice_button_text: string;
+      };
+      return buildStoredInvoiceToken({
+        token: row.token,
+        telegram_invoice_payload: row.token,
+        payload_json: row.payload_json,
+        sku: row.sku,
+        amount_xtr: row.amount_xtr,
+        invoice_button_text: row.invoice_button_text,
+        invoice_link:
+          row.sku === "payment_action_2"
+            ? "https://t.me/scene-pass"
+            : "https://t.me/photo",
+        scene_session_id:
+          row.sku === "payment_action_2" ? "scene-1" : "scene-1",
+      });
+    },
+  });
+
+  const result = await service.evaluate(buildRequest());
+
+  assert.equal(result.operation, "prepare_offer_invoice_link");
+  assert.deepEqual(
+    result.reply_markup?.inline_keyboard.map((row) => row[0]?.url),
+    ["https://t.me/photo", "https://t.me/scene-pass"],
+  );
+});
+
+test("prepare_offer makes paid photos free after scene pass", async () => {
+  const { service } = createRepository({
+    async loadOfferStats() {
+      return buildOfferStats({
+        delivered_in_scene: 3,
+        unseen_available: 2,
+        scene_access_active: true,
+      });
+    },
+  });
+
+  const result = await service.evaluate(buildRequest());
+
+  assert.equal(result.operation, "prepare_offer_callback");
+  assert.equal(result.price_required, 0);
+  assert.equal(result.invoice_kind, undefined);
+});
+
 test("prepare_offer applies active sku promotion to photo invoice pricing", async () => {
   await withPromotions([
     {
       promo_key: "media_sale",
       items: [{ sku: "payment_media_1", promo_amount_xtr: 7 }],
-      starts_at: "2026-08-01T00:00:00+03:00",
-      ends_at: "2026-08-31T23:59:59+03:00",
+      starts_at: "2026-09-01T00:00:00+03:00",
+      ends_at: "2026-09-30T23:59:59+03:00",
     },
   ], async () => {
     const { service } = createRepository({
@@ -706,8 +796,8 @@ test("feature_offer applies active sku promotion to action pricing", async () =>
     {
       promo_key: "action_sale",
       items: [{ sku: "payment_action_1", promo_amount_xtr: 35 }],
-      starts_at: "2026-08-01T00:00:00+03:00",
-      ends_at: "2026-08-31T23:59:59+03:00",
+      starts_at: "2026-09-01T00:00:00+03:00",
+      ends_at: "2026-09-30T23:59:59+03:00",
     },
   ], async () => {
     const { service } = createRepository();
@@ -749,7 +839,7 @@ test("invalid callback returns noop without media context query", async () => {
 
   assert.equal(result.operation, "noop");
   assert.equal(result.callback_valid, false);
-  assert.equal(result.callback_answer_text, "Кнопка устарела.");
+  assert.equal(result.callback_answer_text, "text");
   assert.equal(calls.loadMediaContext, 0);
 });
 
@@ -792,6 +882,37 @@ test("callback photo request can require invoice link for next media step", asyn
   assert.equal(result.needs_invoice_link, true);
   assert.equal(result.invoice_token, "inv_token");
   assert.equal(result.photo_url, "https://cdn.test/u1.jpg");
+});
+
+test("callback photo request unlocks through scene pass with zero price", async () => {
+  const { service } = createRepository({
+    async loadMediaContext() {
+      return buildMediaContext({
+        delivered_in_scene: 3,
+        scene_access_active: true,
+        next_unseen_json: {
+          uuid: "u2",
+          photo_url: "https://cdn.test/u2.jpg",
+          sort_order: 2,
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "btn_token",
+      callback_query_id: "cbq-pass",
+    }),
+  );
+
+  assert.equal(result.operation, "edit_photo");
+  assert.equal(result.access_mode, "scene_pass");
+  assert.equal(result.log_price_xtr, 0);
+  assert.equal(result.price_required, 0);
+  assert.equal(result.log_event_type, "media.photo.unlocked.scene_pass");
 });
 
 test("pre_checkout validates token and stores decision", async () => {
@@ -874,7 +995,7 @@ test("pre_checkout rejects mismatched row and payload action_kind", async () => 
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "payment_plan_1",
+          subscription_sku: "payment_plan_2",
           chat_id: 101,
         },
       });
@@ -944,7 +1065,7 @@ test("pre_checkout rejects mismatched payment details", async () => {
 
   assert.equal(result.operation, "answer_precheckout");
   assert.equal(result.precheckout_ok, false);
-  assert.equal(result.precheckout_error, "Сумма счёта больше не совпадает.");
+  assert.equal(result.precheckout_error, "text");
   assert.equal(calls.storePrecheckoutResult, 1);
 });
 
@@ -974,29 +1095,104 @@ test("pre_checkout rejects non-invoice payload kind", async () => {
   assert.equal(result.reason, "invoice_kind_invalid");
 });
 
+test("pre_checkout rejects scene unlock invoice after scene reset", async () => {
+  const { service } = createRepository({
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        action_kind: "feature_payment",
+        sku: "payment_action_2",
+        amount_xtr: 80,
+        payload_json: {
+          action_kind: "feature_payment",
+          feature_key: "scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+        },
+      });
+    },
+    async loadSceneAccessStatus() {
+      return {
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        active_scene_session_id: "scene-2",
+        subscription_active: false,
+        scene_access_active: false,
+        scene_is_active: false,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.pre_checkout.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      pre_checkout_query_id: "pcq-reset",
+      payment_currency: "XTR",
+      payment_total_amount: 80,
+    }),
+  );
+
+  assert.equal(result.operation, "answer_precheckout");
+  assert.equal(result.precheckout_ok, false);
+  assert.equal(result.reason, "scene_invoice_not_active");
+});
+
+test("pre_checkout rejects photo invoice after scene pass purchase", async () => {
+  const { service } = createRepository({
+    async loadSceneAccessStatus() {
+      return {
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        active_scene_session_id: "scene-1",
+        subscription_active: false,
+        scene_access_active: true,
+        scene_is_active: true,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.pre_checkout.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      pre_checkout_query_id: "pcq-pass-active",
+      payment_currency: "XTR",
+      payment_total_amount: 10,
+    }),
+  );
+
+  assert.equal(result.operation, "answer_precheckout");
+  assert.equal(result.precheckout_ok, false);
+  assert.equal(result.reason, "scene_access_already_active");
+});
+
 test("payment_success activates subscription for subscription invoices", async () => {
   const { service, calls } = createRepository({
     async loadInvoiceToken() {
       return buildLoadedInvoiceToken({
         action_kind: "subscription_payment",
-        sku: "payment_plan_1",
-        amount_xtr: 100,
+        sku: "payment_plan_2",
+        amount_xtr: 200,
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "payment_plan_1",
+          subscription_sku: "payment_plan_2",
         },
       });
     },
     async markInvoicePaid() {
       return buildPaidInvoiceToken({
         action_kind: "subscription_payment",
-        sku: "payment_plan_1",
-        amount_xtr: 100,
+        sku: "payment_plan_2",
+        amount_xtr: 200,
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "payment_plan_1",
+          subscription_sku: "payment_plan_2",
         },
         telegram_invoice_message_id: 777,
       });
@@ -1012,13 +1208,13 @@ test("payment_success activates subscription for subscription invoices", async (
       telegram_payment_charge_id: "charge-1",
       provider_payment_charge_id: "provider-1",
       payment_currency: "XTR",
-      payment_total_amount: 100,
+      payment_total_amount: 200,
     }),
   );
 
   assert.equal(result.operation, "subscription_activated");
   assert.equal(result.payment_kind, "subscription");
-  assert.equal(result.subscription_sku, "payment_plan_1");
+  assert.equal(result.subscription_sku, "payment_plan_2");
   assert.equal(result.offer_message_id, 777);
   assert.equal(calls.activateSubscription, 1);
 });
@@ -1135,7 +1331,7 @@ test("payment_success rejects mismatched row and payload action_kind", async () 
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "payment_plan_1",
+          subscription_sku: "payment_plan_2",
           chat_id: 101,
         },
       });
@@ -1310,12 +1506,12 @@ test("payment_success does not re-activate an already processed subscription", a
       calls.loadInvoiceTokenArgs.push({ token, chatId });
       return buildLoadedInvoiceToken({
         action_kind: "subscription_payment",
-        sku: "payment_plan_1",
-        amount_xtr: 100,
+        sku: "payment_plan_2",
+        amount_xtr: 200,
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "payment_plan_1",
+          subscription_sku: "payment_plan_2",
         },
       });
     },
@@ -1323,12 +1519,12 @@ test("payment_success does not re-activate an already processed subscription", a
       calls.markInvoicePaid += 1;
       return buildPaidInvoiceToken({
         action_kind: "subscription_payment",
-        sku: "payment_plan_1",
-        amount_xtr: 100,
+        sku: "payment_plan_2",
+        amount_xtr: 200,
         payload_json: {
           action_kind: "subscription_payment",
           subscription_days: 14,
-          subscription_sku: "payment_plan_1",
+          subscription_sku: "payment_plan_2",
         },
       });
     },
@@ -1347,7 +1543,7 @@ test("payment_success does not re-activate an already processed subscription", a
       telegram_payment_charge_id: "charge-5",
       provider_payment_charge_id: "provider-5",
       payment_currency: "XTR",
-      payment_total_amount: 100,
+      payment_total_amount: 200,
     }),
   );
 
@@ -1423,6 +1619,168 @@ test("payment_success returns deferred feature fulfillment for supported feature
   assert.equal(result.reason, "feature_fast_scene_skip_fulfillment_required");
 });
 
+test("payment_success activates scene access for scene unlock invoices", async () => {
+  const { service, calls } = createRepository({
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        action_kind: "feature_payment",
+        sku: "payment_action_2",
+        amount_xtr: 80,
+        payload_json: {
+          action_kind: "feature_payment",
+          feature_key: "scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          target_message_id: 777,
+        },
+      });
+    },
+    async markInvoicePaid() {
+      calls.markInvoicePaid += 1;
+      return buildPaidInvoiceToken({
+        action_kind: "feature_payment",
+        sku: "payment_action_2",
+        amount_xtr: 80,
+        payload_json: {
+          action_kind: "feature_payment",
+          feature_key: "scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          target_message_id: 777,
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.success.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      telegram_payment_charge_id: "charge-scene-pass",
+      provider_payment_charge_id: "provider-scene-pass",
+      payment_currency: "XTR",
+      payment_total_amount: 80,
+    }),
+  );
+
+  assert.equal(result.operation, "scene_access_activated");
+  assert.equal(result.payment_kind, "feature");
+  assert.equal(result.feature_key, "scene_unlock");
+  assert.equal(result.scene_session_id, "scene-1");
+  assert.equal(result.target_message_id, 777);
+  assert.equal(result.payment_token, "inv_payload");
+  assert.equal(calls.activateSceneAccess, 1);
+});
+
+test("payment_success returns idempotent scene access result for fulfilled pass token", async () => {
+  const { service, calls } = createRepository({
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        status: "fulfilled",
+        action_kind: "feature_payment",
+        sku: "payment_action_2",
+        amount_xtr: 80,
+        payload_json: {
+          action_kind: "feature_payment",
+          feature_key: "scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          target_message_id: 777,
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.success.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      telegram_payment_charge_id: "charge-scene-pass-repeat",
+      provider_payment_charge_id: "provider-scene-pass-repeat",
+      payment_currency: "XTR",
+      payment_total_amount: 80,
+    }),
+  );
+
+  assert.equal(result.operation, "scene_access_activated");
+  assert.equal(result.reason, "already_active");
+  assert.equal(result.payment_token, "inv_payload");
+  assert.equal(calls.activateSceneAccess, 0);
+});
+
+test("payment_success rejects stale scene-unlock invoice after user switches scene", async () => {
+  const { service, calls } = createRepository({
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        action_kind: "feature_payment",
+        sku: "payment_action_2",
+        amount_xtr: 80,
+        payload_json: {
+          action_kind: "feature_payment",
+          feature_key: "scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          target_message_id: 777,
+        },
+      });
+    },
+    async markInvoicePaid() {
+      calls.markInvoicePaid += 1;
+      return buildPaidInvoiceToken({
+        action_kind: "feature_payment",
+        sku: "payment_action_2",
+        amount_xtr: 80,
+        payload_json: {
+          action_kind: "feature_payment",
+          feature_key: "scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          target_message_id: 777,
+        },
+      });
+    },
+    async activateSceneAccess() {
+      calls.activateSceneAccess += 1;
+      return 0;
+    },
+    async loadSceneAccessStatus() {
+      calls.loadSceneAccessStatus += 1;
+      return {
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        active_scene_session_id: "scene-2",
+        subscription_active: false,
+        scene_access_active: false,
+        scene_is_active: false,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.success.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      telegram_payment_charge_id: "charge-stale-scene",
+      provider_payment_charge_id: "provider-stale-scene",
+      payment_currency: "XTR",
+      payment_total_amount: 80,
+    }),
+  );
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.reason, "scene_not_active");
+  assert.equal(result.payment_kind, "feature");
+  assert.equal(result.feature_key, "scene_unlock");
+  assert.equal(calls.markInvoicePaid, 1);
+  assert.equal(calls.activateSceneAccess, 1);
+});
+
 test("payment_success rejects unknown feature keys", async () => {
   const { service, calls } = createRepository({
     async loadInvoiceToken(token, chatId) {
@@ -1494,11 +1852,17 @@ test("subscription_offer returns missing invoice links when links are not stored
   const { service, calls } = createRepository({
     async upsertInvoiceTokens(inputs) {
       return (Array.isArray(inputs) ? inputs : []).map((input) => {
-        const row = input as { token: string; sku: string; amount_xtr: number };
+        const row = input as {
+          token: string;
+          sku: string;
+          amount_xtr: number;
+          payload_json: Record<string, unknown>;
+        };
         return buildStoredInvoiceToken({
           token: row.token,
           sku: row.sku,
           amount_xtr: row.amount_xtr,
+          payload_json: row.payload_json,
           invoice_link: null,
           scene_session_id: null,
           turn_no: null,
@@ -1514,7 +1878,7 @@ test("subscription_offer returns missing invoice links when links are not stored
       idempotency_key: "telegram:1",
       subscription_offer_reason: "subscription_command",
       turns_today: 0,
-      turn_limit: 15,
+      turn_limit: 20,
       turn_limit_reset_text: "00:00 МСК",
     }),
   );
@@ -1523,11 +1887,117 @@ test("subscription_offer returns missing invoice links when links are not stored
   assert.equal(result.missing_invoice_link_count, 3);
   assert.equal(result.subscription_invoice_tokens?.length, 3);
   assert.deepEqual(result.subscription_invoice_tokens, [
-    "telegram:1:payment_plan_1",
+    "telegram:1:scene-1:payment_action_2",
     "telegram:1:payment_plan_2",
     "telegram:1:payment_plan_3",
   ]);
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => item.sku),
+    ["payment_action_2", "payment_plan_2", "payment_plan_3"],
+  );
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => item.sort_order),
+    [0, 1, 2],
+  );
   assert.equal(calls.loadStoredInvoiceTokens, 0);
+});
+
+test("subscription_offer does not include scene pass without active scene", async () => {
+  const { service } = createRepository({
+    async loadSceneAccessStatus() {
+      return {
+        chat_id: 101,
+        scene_session_id: null,
+        active_scene_session_id: null,
+        subscription_active: false,
+        scene_access_active: false,
+        scene_is_active: false,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      scene_session_id: null,
+      active_scene_session_id: null,
+      idempotency_key: "telegram:no-scene",
+      subscription_offer_reason: "subscription_command",
+      turns_today: 20,
+      turn_limit: 20,
+      turn_limit_reset_text: "00:00 МСК",
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_links_needed");
+  assert.deepEqual(result.subscription_invoice_tokens, [
+    "telegram:no-scene:payment_plan_2",
+    "telegram:no-scene:payment_plan_3",
+  ]);
+});
+
+test("subscription_offer does not include scene pass after purchase", async () => {
+  const { service } = createRepository({
+    async loadSceneAccessStatus() {
+      return {
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        active_scene_session_id: "scene-1",
+        subscription_active: false,
+        scene_access_active: true,
+        scene_is_active: true,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      idempotency_key: "telegram:pass-active",
+      subscription_offer_reason: "daily_turn_limit",
+      turns_today: 20,
+      turn_limit: 20,
+      turn_limit_reset_text: "00:00 МСК",
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_links_needed");
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => item.sku),
+    ["payment_plan_2", "payment_plan_3"],
+  );
+});
+
+test("subscription_offer keeps subscription priority over scene pass", async () => {
+  const { service } = createRepository({
+    async loadSceneAccessStatus() {
+      return {
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        active_scene_session_id: "scene-1",
+        subscription_active: true,
+        scene_access_active: false,
+        scene_is_active: true,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      idempotency_key: "telegram:sub-active",
+      subscription_offer_reason: "subscription_command",
+      turns_today: 20,
+      turn_limit: 20,
+      turn_limit_reset_text: "00:00 МСК",
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_links_needed");
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => item.sku),
+    ["payment_plan_2", "payment_plan_3"],
+  );
 });
 
 test("subscription_offer applies promotions by sku and last active match wins", async () => {
@@ -1535,18 +2005,18 @@ test("subscription_offer applies promotions by sku and last active match wins", 
     {
       promo_key: "all_sale",
       items: [
-        { sku: "payment_plan_1", promo_amount_xtr: 90 },
+        { sku: "payment_action_2", promo_amount_xtr: 70 },
         { sku: "payment_plan_2", promo_amount_xtr: 150 },
         { sku: "payment_plan_3", promo_amount_xtr: 180 },
       ],
-      starts_at: "2026-08-01T00:00:00+03:00",
-      ends_at: "2026-08-31T23:59:59+03:00",
+      starts_at: "2026-09-01T00:00:00+03:00",
+      ends_at: "2026-09-30T23:59:59+03:00",
     },
     {
       promo_key: "plan_2_override",
       items: [{ sku: "payment_plan_2", promo_amount_xtr: 140 }],
-      starts_at: "2026-08-01T00:00:00+03:00",
-      ends_at: "2026-08-31T23:59:59+03:00",
+      starts_at: "2026-09-01T00:00:00+03:00",
+      ends_at: "2026-09-30T23:59:59+03:00",
     },
   ], async () => {
     const capturedRows: StoredInvoiceToken[] = [];
@@ -1601,7 +2071,7 @@ test("subscription_offer applies promotions by sku and last active match wins", 
         idempotency_key: "telegram:1",
         subscription_offer_reason: "subscription_command",
         turns_today: 0,
-        turn_limit: 15,
+        turn_limit: 20,
         turn_limit_reset_text: "00:00 МСК",
       }),
     );
@@ -1609,11 +2079,11 @@ test("subscription_offer applies promotions by sku and last active match wins", 
     assert.equal(result.operation, "subscription_offer_links_needed");
     assert.deepEqual(
       result.missing_invoice_items?.map((item) => item.amount_xtr),
-      [90, 140, 180],
+      [70, 140, 180],
     );
     assert.deepEqual(
       result.missing_invoice_items?.map((item) => item.original_amount_xtr),
-      [100, 200, 300],
+      [80, 200, 300],
     );
     assert.deepEqual(
       result.missing_invoice_items?.map((item) => item.promo_key),
@@ -1621,7 +2091,7 @@ test("subscription_offer applies promotions by sku and last active match wins", 
     );
     assert.deepEqual(
       result.subscription_offer_items?.map((item) => item.amount_xtr),
-      [90, 140, 180],
+      [70, 140, 180],
     );
   });
 });
@@ -1648,20 +2118,23 @@ test("subscription_offer becomes ready after created links are persisted", async
         buildStoredInvoiceToken({
           token,
           sku:
-            index === 0 ? "payment_plan_1" : index === 1 ? "payment_plan_2" : "payment_plan_3",
-          amount_xtr: index === 0 ? 100 : index === 1 ? 200 : 300,
+            index === 0 ? "payment_action_2" : index === 1 ? "payment_plan_2" : "payment_plan_3",
+          amount_xtr: index === 0 ? 80 : index === 1 ? 200 : 300,
           invoice_title:
-            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
-          invoice_description: "Subscription access",
+            "text",
+          invoice_description: "text",
           invoice_label:
-            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
+            "text",
           invoice_button_text:
-            index === 0 ? "Payment plan 1" : index === 1 ? "Payment plan 2" : "Payment plan 3",
+            "text",
           payload_json: {
-            subscription_days: index === 0 ? 14 : index === 1 ? 30 : 60,
+            action_kind: index === 0 ? "feature_payment" : "subscription_payment",
+            feature_key: index === 0 ? "scene_unlock" : null,
+            sort_order: index,
+            subscription_days: index === 0 ? null : index === 1 ? 14 : 30,
             subscription_offer_reason: "daily_turn_limit",
-            turn_limit: 15,
-            turns_today: 15,
+            turn_limit: 20,
+            turns_today: 20,
             turn_limit_reset_text: "00:00 МСК",
           },
           invoice_link: `https://t.me/invoice-${index + 1}`,
@@ -1679,12 +2152,12 @@ test("subscription_offer becomes ready after created links are persisted", async
       interaction_mode: "subscription_offer",
       idempotency_key: "telegram:1",
       subscription_offer_reason: "daily_turn_limit",
-      turns_today: 15,
-      turn_limit: 15,
+      turns_today: 20,
+      turn_limit: 20,
       turn_limit_reset_text: "00:00 МСК",
       created_invoice_links: [
         {
-          token: "telegram:1:payment_plan_1",
+          token: "telegram:1:scene-1:payment_action_2",
           invoice_link: "https://t.me/invoice-1",
         },
         {
@@ -1703,7 +2176,7 @@ test("subscription_offer becomes ready after created links are persisted", async
   assert.equal(calls.loadStoredInvoiceTokens, 1);
   assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.offer_reused, true);
-  assert.match(result.text ?? "", /лимит исчерпан/u);
+  assert.equal(result.text, "text");
   assert.equal(result.reply_markup?.inline_keyboard.length, 3);
 });
 
@@ -1844,4 +2317,109 @@ test("finalize_photo_event is idempotent when the same photo event is retried", 
   assert.equal(result.operation, "photo_event_stored");
   assert.equal(result.stored_count, 0);
   assert.equal(result.reason, "photo_event_skipped");
+});
+
+test("finalize_offer stores panel_text for photo caption persistence", async () => {
+  const capturedInput: { current: Record<string, unknown> | null } = {
+    current: null,
+  };
+  const { service } = createRepository({
+    async storePanel(input) {
+      capturedInput.current = input as Record<string, unknown>;
+      return {
+        chat_id: 101,
+        n: 5,
+        scene_session_id: "scene-1",
+        scene_turn_no: 3,
+        media_signature: "hotel_corridor_close",
+        price_required: 10,
+        panel_message_id: 700,
+        stored_count: 1,
+        invoice_rows_updated: 1,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "finalize_offer",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      scene_turn_no: 3,
+      media_signature: "hotel_corridor_close",
+      panel_message_id: 700,
+      price_required: 10,
+      panel_text: "Original bot message for photo caption",
+    }),
+  );
+
+  assert.equal(result.operation, "finalized_panel");
+  assert.equal(result.stored_count, 1);
+  assert.equal(
+    capturedInput.current?.panel_text,
+    "Original bot message for photo caption",
+  );
+});
+
+test("callback photo request returns panel_text as caption_text", async () => {
+  const { service } = createRepository({
+    async loadMediaContext() {
+      return buildMediaContext({
+        panel_text: "Original bot message for photo caption",
+        panel_entities_json: [],
+        delivered_in_scene: 0,
+        next_unseen_json: {
+          uuid: "u2",
+          photo_url: "https://cdn.test/u2.jpg",
+          sort_order: 2,
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "btn_token",
+      callback_query_id: "cbq-caption",
+    }),
+  );
+
+  assert.equal(result.operation, "edit_photo");
+  assert.equal(result.caption_text, "Original bot message for photo caption");
+  assert.deepEqual(result.caption_entities_json, []);
+});
+
+test("callback photo request truncates caption_text over 1024 chars", async () => {
+  const longText = "x".repeat(1100);
+  const { service } = createRepository({
+    async loadMediaContext() {
+      return buildMediaContext({
+        panel_text: longText,
+        panel_entities_json: [{ type: "bold" }],
+        delivered_in_scene: 0,
+        next_unseen_json: {
+          uuid: "u2",
+          photo_url: "https://cdn.test/u2.jpg",
+          sort_order: 2,
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "btn_token",
+      callback_query_id: "cbq-long-caption",
+    }),
+  );
+
+  assert.equal(result.operation, "edit_photo");
+  assert.ok(result.caption_text!.length <= 1024);
+  assert.ok(result.caption_text!.endsWith("..."));
+  assert.deepEqual(result.caption_entities_json, []);
 });

@@ -19,6 +19,7 @@ export type MediaCommerceOperation =
   | "edit_photo_with_invoice_link"
   | "answer_precheckout"
   | "subscription_activated"
+  | "scene_access_activated"
   | "feature_offer_required"
   | "feature_fulfillment_required"
   | "subscription_offer_links_needed"
@@ -140,6 +141,8 @@ export interface MediaCommerceDecisionResponse {
   subscription_days?: number | null;
   subscription_active?: boolean;
   subscription_until?: string | null;
+  active_scene_session_id?: string | null;
+  scene_access_active?: boolean;
   subscription_offer_reason?: MediaSubscriptionOfferReason | null;
   turn_limit?: number | null;
   turns_today?: number | null;
@@ -154,6 +157,11 @@ export interface MediaCommerceDecisionResponse {
     token: string;
     telegram_invoice_payload: string;
     amount_xtr: number;
+    action_kind?: string | null;
+    payment_kind?: "subscription" | "feature" | null;
+    feature_key?: string | null;
+    scene_session_id?: string | null;
+    sort_order?: number | null;
     original_amount_xtr?: number | null;
     promo_key?: string | null;
     invoice_title: string;
@@ -164,6 +172,11 @@ export interface MediaCommerceDecisionResponse {
   subscription_offer_items?: Array<{
     token: string;
     sku: string | null;
+    action_kind?: string | null;
+    payment_kind?: "subscription" | "feature" | null;
+    feature_key?: string | null;
+    scene_session_id?: string | null;
+    sort_order?: number | null;
     subscription_days: number | null;
     invoice_link: string | null;
     amount_xtr: number;
@@ -211,6 +224,7 @@ export interface MediaOfferStats {
   total_available: number;
   unseen_available: number;
   existing_panel_message_id: number | null;
+  scene_access_active: boolean;
 }
 
 export interface LoadedCallbackToken {
@@ -254,6 +268,7 @@ export interface MediaContext {
   subscription_active: boolean;
   subscription_sku: string | null;
   subscription_until: string | null;
+  scene_access_active: boolean;
   delivered_in_scene: number;
   total_available: number;
   unseen_available: number;

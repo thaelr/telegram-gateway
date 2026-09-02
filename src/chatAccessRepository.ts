@@ -9,6 +9,8 @@ type AccessContextRow = {
   subscription_sku: string | null;
   subscription_until: string | null;
   subscription_active: boolean;
+  active_scene_session_id: string | null;
+  scene_access_active: boolean;
   turns_today: number;
   scene_turn_no: number;
   selected_character_i: number | null;
@@ -69,6 +71,7 @@ export class ChatAccessRepository {
           cs.terms_accepted_at,
           cs.subscription_sku,
           cs.subscription_until,
+          cs.active_scene_session_id,
           COALESCE(cs.scene_turn_no, -1) AS scene_turn_no,
           cs.selected_character_i,
           cs.active_menu_screen,
@@ -77,6 +80,16 @@ export class ChatAccessRepository {
             cs.subscription_until IS NOT NULL
             AND cs.subscription_until > now()
           ) AS subscription_active
+      ),
+      active_scene AS (
+        SELECT
+          css.scene_session_id,
+          css.scene_access_unlocked_at IS NOT NULL AS scene_access_active
+        FROM public.chat_scene_sessions css
+        JOIN upserted u
+          ON css.chat_id = u.chat_id
+         AND css.scene_session_id = u.active_scene_session_id
+        LIMIT 1
       ),
       usage AS (
         SELECT COUNT(*)::integer AS turns_today
@@ -99,12 +112,15 @@ export class ChatAccessRepository {
           ELSE to_char(u.subscription_until AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
         END AS subscription_until,
         u.subscription_active,
+        u.active_scene_session_id,
+        COALESCE(active_scene.scene_access_active, FALSE) AS scene_access_active,
         COALESCE(usage.turns_today, 0) AS turns_today,
         u.scene_turn_no,
         u.selected_character_i,
         u.active_menu_screen,
         u.active_menu_message_id
       FROM upserted u
+      LEFT JOIN active_scene ON TRUE
       LEFT JOIN usage ON TRUE
     `;
 

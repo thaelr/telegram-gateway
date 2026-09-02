@@ -107,6 +107,8 @@ export interface AccessDecisionResponse {
   subscription_active?: boolean;
   subscription_sku?: string | null;
   subscription_until?: string | null;
+  active_scene_session_id?: string | null;
+  scene_access_active?: boolean;
   turns_today?: number | null;
   turn_limit?: number | null;
   turn_limit_reset_text?: string | null;
@@ -121,6 +123,7 @@ export interface AccessDecisionResponse {
   selected_character_i?: number | null;
   active_menu_screen?: string | null;
   active_menu_message_id?: number | null;
+  ux_copy?: unknown;
 }
 
 export interface AccessContext {
@@ -131,6 +134,8 @@ export interface AccessContext {
   subscription_sku: string | null;
   subscription_until: string | null;
   subscription_active: boolean;
+  active_scene_session_id: string | null;
+  scene_access_active: boolean;
   turns_today: number;
   scene_turn_no: number;
   selected_character_i: number | null;

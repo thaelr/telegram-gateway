@@ -14,10 +14,13 @@ import { MediaEventRepository } from "./mediaCommerceRepository/mediaEventReposi
 import { MediaPaymentRepository } from "./mediaCommerceRepository/paymentRepository.js";
 import {
   type ActivateSubscriptionInput,
+  type ActivateSceneAccessInput,
   type LoadMediaContextInput,
   type LoadOfferStatsInput,
   type MarkInvoicePaidInput,
   type QueryClient,
+  type SceneAccessStatus,
+  type SceneAccessStatusInput,
   type StorePanelInput,
   type StorePhotoEventInput,
   type StorePrecheckoutResultInput,
@@ -96,6 +99,18 @@ export class MediaCommerceRepository {
     input: ActivateSubscriptionInput,
   ): Promise<number> {
     return this.paymentRepository.activateSubscription(input);
+  }
+
+  async activateSceneAccess(
+    input: ActivateSceneAccessInput,
+  ): Promise<number> {
+    return this.paymentRepository.activateSceneAccess(input);
+  }
+
+  async loadSceneAccessStatus(
+    input: SceneAccessStatusInput,
+  ): Promise<SceneAccessStatus | null> {
+    return this.paymentRepository.loadSceneAccessStatus(input);
   }
 
   async storePhotoEvent(input: StorePhotoEventInput): Promise<MediaFinalizeResult> {

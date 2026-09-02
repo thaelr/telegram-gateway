@@ -39,10 +39,93 @@ const mediaPromotionSchema = z.object({
   }
 });
 
+const textSchema = z.string().min(1);
+
+const telegramUxCopySchema = z.object({
+  terms: z.object({
+    message: textSchema,
+    open_button: textSchema,
+    accept_button: textSchema,
+  }),
+  scene_reset: z.object({
+    confirm: textSchema,
+    yes_button: textSchema,
+    no_button: textSchema,
+    processing: textSchema,
+    continue: textSchema,
+  }),
+  promo: z.object({
+    activated: textSchema,
+    effect_id: textSchema,
+  }),
+  paysupport: z.object({
+    message_html: textSchema,
+  }),
+  scene_mode: z.object({
+    choice: textSchema,
+    roleplay_button: textSchema,
+    fast_button: textSchema,
+    back_button: textSchema,
+    transition: z.object({
+      fast: z.object({
+        text: textSchema,
+        effect_id: textSchema,
+      }),
+      roleplay: z.object({
+        text: textSchema,
+        effect_id: textSchema,
+      }),
+    }),
+  }),
+  character_gallery: z.object({
+    heading: textSchema,
+    empty: textSchema,
+    characters: z.record(z.string().min(1), z.object({
+      gallery_title: textSchema,
+      gallery_body: textSchema,
+      mode_intro: textSchema,
+      roleplay_description_html: textSchema,
+      fast_description_html: textSchema,
+    })),
+  }),
+  subscription: z.object({
+    active: textSchema,
+    daily_limit_offer: textSchema,
+    command_offer: textSchema,
+  }),
+  media: z.object({
+    get_photo_button: textSchema,
+    more_photo_button: textSchema,
+    generating: textSchema,
+    pay_button: textSchema,
+    scene_unlock_button: textSchema,
+    prev_button: textSchema,
+    next_button: textSchema,
+  }),
+  callbacks: z.object({
+    newscene_yes: textSchema,
+    newscene_no: textSchema,
+    terms_accept: textSchema,
+    character_select: textSchema,
+    character_back: textSchema,
+    scene_mode_fast: textSchema,
+    scene_mode_roleplay: textSchema,
+    scene_access_activated: textSchema,
+  }),
+  payment_errors: z.object({
+    expired: textSchema,
+    stale: textSchema,
+    different_scene: textSchema,
+    subscription_active: textSchema,
+    scene_already_unlocked: textSchema,
+  }),
+});
+
 export type MediaSubscriptionPlan = z.infer<typeof mediaSubscriptionPlanSchema>;
 export type MediaPhotoPlan = z.infer<typeof mediaPhotoPlanSchema>;
 export type MediaActionPlan = z.infer<typeof mediaActionPlanSchema>;
 export type MediaPromotion = z.infer<typeof mediaPromotionSchema>;
+export type TelegramUxCopy = z.infer<typeof telegramUxCopySchema>;
 
 function parseJsonEnv<T>(
   raw: string,
@@ -64,7 +147,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   INTERNAL_API_KEY: z.string().min(1),
   INTERNAL_API_KEY_HEADER: z.string().min(1).default("x-internal-api-key"),
-  TURN_LIMIT: z.coerce.number().int().positive().default(15),
+  TURN_LIMIT: z.coerce.number().int().positive().default(20),
   BUSINESS_TIME_ZONE: z.string().min(1).default("Europe/Moscow"),
   TURN_LIMIT_RESET_TEXT: z.string().min(1).default("00:00 МСК"),
   MEDIA_PAYMENT_CURRENCY: z.string().min(1).default("XTR"),
@@ -113,6 +196,13 @@ const envSchema = z.object({
       parseJsonEnv(
         raw,
         z.array(mediaPromotionSchema),
+      )),
+  TELEGRAM_UX_COPY_JSON: z
+    .string()
+    .transform((raw) =>
+      parseJsonEnv(
+        raw,
+        telegramUxCopySchema,
       )),
 });
 

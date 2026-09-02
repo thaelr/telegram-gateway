@@ -18,6 +18,7 @@ import {
   buildBaseResponse,
 } from "./mediaCommerce/responseBuilders.js";
 import {
+  buildSceneUnlockInvoiceInput,
   buildSubscriptionInvoiceInput,
   buildSubscriptionOfferMessage,
   mergeStoredRowsWithMetadata,
@@ -63,6 +64,8 @@ type MediaRepository = Pick<
   | "storePrecheckoutResult"
   | "markInvoicePaid"
   | "activateSubscription"
+  | "activateSceneAccess"
+  | "loadSceneAccessStatus"
   | "storePhotoEvent"
   | "storeInvoiceLinks"
   | "loadStoredInvoiceTokens"
@@ -116,6 +119,42 @@ function toOperationError(operation: string, error: unknown): MediaCommerceOpera
     extractErrorCode(error),
     { cause: error instanceof Error ? error : undefined },
   );
+}
+
+function buildMissingInvoiceItem(row: StoredInvoiceToken) {
+  return {
+    token: row.token,
+    telegram_invoice_payload: String(row.telegram_invoice_payload ?? row.token),
+    amount_xtr: Number(row.amount_xtr ?? 0),
+    action_kind:
+      typeof row.payload_json.action_kind === "string"
+        ? row.payload_json.action_kind
+        : row.action_kind ?? null,
+    payment_kind:
+      row.payload_json.action_kind === "subscription_payment"
+        ? "subscription" as const
+        : row.payload_json.action_kind === "feature_payment"
+          ? "feature" as const
+          : null,
+    feature_key:
+      typeof row.payload_json.feature_key === "string"
+        ? row.payload_json.feature_key
+        : null,
+    scene_session_id: row.scene_session_id,
+    sort_order: normalizeNonNegativeInteger(row.payload_json.sort_order) ?? 100,
+    original_amount_xtr:
+      normalizePositiveInteger(row.payload_json.original_amount_xtr) ?? null,
+    promo_key:
+      normalizeString(
+        typeof row.payload_json.promo_key === "string"
+          ? row.payload_json.promo_key
+          : null,
+      ) ?? null,
+    invoice_title: row.invoice_title,
+    invoice_description: row.invoice_description,
+    invoice_label: row.invoice_label,
+    invoice_button_text: row.invoice_button_text,
+  };
 }
 
 type RepositoryOperationLogContext = {
@@ -232,12 +271,14 @@ export class MediaCommerceDecisionService {
   ): Promise<MediaCommerceDecisionResponse> {
     const deliveredInScene = Number(stats.delivered_in_scene ?? 0);
     const subscriptionActive = stats.subscription_active === true;
+    const sceneAccessActive = stats.scene_access_active === true;
     const totalAvailable = Number(stats.total_available ?? 0);
     const unseenAvailable = Number(stats.unseen_available ?? 0);
     const existingPanel = normalizePositiveInteger(stats.existing_panel_message_id);
     const basePrice = Number(stats.base_price_xtr ?? 10);
     const priceRequired = calculateMediaPriceRequired({
       subscription_active: subscriptionActive,
+      scene_access_active: sceneAccessActive,
       delivered_in_scene: deliveredInScene,
       base_price_xtr: basePrice,
     });
@@ -266,6 +307,10 @@ export class MediaCommerceDecisionService {
 
     if (priceRequired > 0) {
       const photoPlan = resolvePhotoPlanByAmount(priceRequired);
+      const sceneUnlockPlan =
+        !subscriptionActive && !sceneAccessActive && stats.scene_session_id
+          ? resolveActionPlanByFeatureKey("scene_unlock")
+          : null;
       const invoicePayload = {
         action_kind: "photo_payment",
         chat_id: stats.chat_id,
@@ -302,6 +347,19 @@ export class MediaCommerceDecisionService {
           payload_json: invoicePayload,
         }),
       );
+      const storedSceneUnlockInvoice =
+        sceneUnlockPlan && stats.scene_session_id
+          ? await this.repository.upsertInvoiceToken(
+            buildSceneUnlockInvoiceInput({
+              chat_id: stats.chat_id,
+              scene_session_id: stats.scene_session_id,
+              idempotency_key: `scene:${stats.chat_id}:${stats.scene_session_id}`,
+              turn_limit: config.TURN_LIMIT,
+              target_message_id: null,
+              plan: sceneUnlockPlan,
+            }),
+          )
+          : null;
 
       const invoiceLink = normalizeString(storedInvoice?.invoice_link);
       const replyMarkup = invoiceLink
@@ -311,6 +369,19 @@ export class MediaCommerceDecisionService {
           invoiceLink,
         )
         : { inline_keyboard: [] };
+      const sceneUnlockInvoiceLink =
+        normalizeString(storedSceneUnlockInvoice?.invoice_link);
+      const finalReplyMarkup = sceneUnlockInvoiceLink
+        ? appendInvoiceButton(
+          replyMarkup,
+          String(
+            storedSceneUnlockInvoice?.invoice_button_text
+              ?? sceneUnlockPlan?.button_text
+              ?? config.TELEGRAM_UX_COPY_JSON.media.scene_unlock_button,
+          ),
+          sceneUnlockInvoiceLink,
+        )
+        : replyMarkup;
 
       return {
         ...base,
@@ -323,7 +394,7 @@ export class MediaCommerceDecisionService {
         price_required: priceRequired,
         operation: "prepare_offer_invoice_link",
         has_media_offer: true,
-        reply_markup: replyMarkup,
+        reply_markup: finalReplyMarkup,
         invoice_kind: "photo",
         invoice_sku: storedInvoice?.sku ?? photoPlan.sku,
         invoice_amount: storedInvoice?.amount_xtr ?? photoPlan.amount_xtr,
@@ -347,6 +418,10 @@ export class MediaCommerceDecisionService {
         invoice_token: storedInvoice?.token ?? null,
         invoice_link: invoiceLink,
         needs_invoice_link: invoiceLink == null,
+        missing_invoice_items:
+          storedSceneUnlockInvoice && sceneUnlockInvoiceLink == null
+            ? [buildMissingInvoiceItem(storedSceneUnlockInvoice)]
+            : undefined,
         reason: invoiceLink ? "invoice_link_reused" : "invoice_link_required",
       };
     }
@@ -380,7 +455,10 @@ export class MediaCommerceDecisionService {
       token_rows_prepared: 1,
       token_rows_inserted: insertedCount,
       reply_markup: {
-        inline_keyboard: [[{ text: "Получить фото", callback_data: tokenRow.token }]],
+        inline_keyboard: [[{
+          text: config.TELEGRAM_UX_COPY_JSON.media.get_photo_button,
+          callback_data: tokenRow.token,
+        }]],
       },
       reason: "free_offer_ready",
     };
@@ -481,9 +559,9 @@ export class MediaCommerceDecisionService {
       && !isExpired(callbackRow?.expires_at)
       && normalizeString(callbackRow?.status) === "active";
     const answerText = !valid
-      ? "Кнопка устарела."
+      ? config.TELEGRAM_UX_COPY_JSON.payment_errors.stale
       : (actionKind === "photo_request" || actionKind === "photo_regen")
-        ? "Секунду, генерируем фото"
+        ? config.TELEGRAM_UX_COPY_JSON.media.generating
         : "";
 
     const callbackBase = {
@@ -587,6 +665,7 @@ export class MediaCommerceDecisionService {
     }
 
     let invoiceToken: StoredInvoiceToken | null = null;
+    let sceneUnlockInvoiceToken: StoredInvoiceToken | null = null;
     let replyMarkup = decision.reply_markup;
     let operation = decision.operation;
     let tokenRowsInserted = 0;
@@ -623,6 +702,24 @@ export class MediaCommerceDecisionService {
           decision.invoice_payload_json as NonNullable<typeof decision.invoice_payload_json>,
       })
       : null;
+    const sceneUnlockPlan =
+      decision.invoice_kind === "photo"
+      && context.subscription_active !== true
+      && context.scene_access_active !== true
+      && context.scene_session_id
+        ? resolveActionPlanByFeatureKey("scene_unlock")
+        : null;
+    const sceneUnlockInvoiceInput =
+      sceneUnlockPlan && context.scene_session_id && base.chat_id
+        ? buildSceneUnlockInvoiceInput({
+          chat_id: base.chat_id as number,
+          scene_session_id: context.scene_session_id,
+          idempotency_key: `scene:${base.chat_id}:${context.scene_session_id}`,
+          turn_limit: config.TURN_LIMIT,
+          target_message_id: context.target_message_id,
+          plan: sceneUnlockPlan,
+        })
+        : null;
 
     if (decision.token_rows.length > 0 && shouldUpsertPhotoInvoice) {
       const [insertedCount, storedInvoice] = await Promise.all([
@@ -642,6 +739,11 @@ export class MediaCommerceDecisionService {
         );
       }
     }
+    if (sceneUnlockInvoiceInput) {
+      sceneUnlockInvoiceToken = await this.repository.upsertInvoiceToken(
+        sceneUnlockInvoiceInput,
+      );
+    }
 
     if (invoiceToken) {
       const invoiceLink = normalizeString(invoiceToken.invoice_link);
@@ -651,12 +753,24 @@ export class MediaCommerceDecisionService {
           String(
             invoiceToken?.invoice_button_text
               ?? decision.invoice_button_text
-              ?? `Ещё фото • ${decision.invoice_amount} ⭐`,
+              ?? config.TELEGRAM_UX_COPY_JSON.media.pay_button,
           ),
           invoiceLink,
         );
         operation = "edit_photo";
       }
+    }
+    const sceneUnlockInvoiceLink = normalizeString(sceneUnlockInvoiceToken?.invoice_link);
+    if (sceneUnlockInvoiceToken && sceneUnlockInvoiceLink) {
+      replyMarkup = appendInvoiceButton(
+        replyMarkup,
+        String(
+          sceneUnlockInvoiceToken.invoice_button_text
+            ?? sceneUnlockPlan?.button_text
+            ?? config.TELEGRAM_UX_COPY_JSON.media.scene_unlock_button,
+        ),
+        sceneUnlockInvoiceLink,
+      );
     }
 
     return {
@@ -709,6 +823,11 @@ export class MediaCommerceDecisionService {
       subscription_active: context.subscription_active,
       subscription_sku: context.subscription_sku,
       subscription_until: context.subscription_until,
+      scene_access_active: context.scene_access_active,
+      missing_invoice_items:
+        sceneUnlockInvoiceToken && sceneUnlockInvoiceLink == null
+          ? [buildMissingInvoiceItem(sceneUnlockInvoiceToken)]
+          : undefined,
       reason: operation === "edit_photo_with_invoice_link"
         ? "invoice_link_required"
         : "media_ready",
@@ -726,7 +845,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "answer_precheckout",
         precheckout_ok: false,
-        precheckout_error: "Счёт больше не актуален.",
+        precheckout_error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
         reason: !chatId ? "chat_id_required" : "invoice_payload_required",
       };
     }
@@ -741,11 +860,61 @@ export class MediaCommerceDecisionService {
       },
       () => this.repository.loadInvoiceToken(invoicePayload, chatId),
     );
-    const validation = validatePrecheckout(
+    let validation = validatePrecheckout(
       tokenRow,
       normalizeString(input.payment_currency),
       normalizeNonNegativeInteger(input.payment_total_amount),
     );
+    if (validation.ok && validation.action) {
+      const payload = parseJsonObject(tokenRow?.payload_json) ?? {};
+      const invoiceSceneSessionId =
+        normalizeString(tokenRow?.scene_session_id)
+        ?? normalizeString(
+          typeof payload.scene_session_id === "string"
+            ? payload.scene_session_id
+            : null,
+        );
+      if (
+        validation.action.payment_kind === "photo"
+        || validation.action.feature_key === "scene_unlock"
+      ) {
+        const sceneStatus = await this.runRepositoryOperation(
+          "payment.precheckout.loadSceneAccessStatus",
+          {
+            chat_id: chatId,
+            payment_kind: validation.action.payment_kind,
+            sku: normalizeString(tokenRow?.sku),
+            invoice_status: normalizeString(tokenRow?.status),
+          },
+          () => this.repository.loadSceneAccessStatus({
+            chat_id: chatId,
+            scene_session_id: invoiceSceneSessionId,
+          }),
+        );
+        if (!invoiceSceneSessionId || sceneStatus?.scene_is_active !== true) {
+          validation = {
+            ...validation,
+            ok: false,
+            error: config.TELEGRAM_UX_COPY_JSON.payment_errors.different_scene,
+            reason: "scene_invoice_not_active",
+          };
+        } else if (sceneStatus.subscription_active) {
+          validation = {
+            ...validation,
+            ok: false,
+            error: config.TELEGRAM_UX_COPY_JSON.payment_errors.subscription_active,
+            reason: "subscription_already_active",
+          };
+        } else if (sceneStatus.scene_access_active) {
+          validation = {
+            ...validation,
+            ok: false,
+            error: config.TELEGRAM_UX_COPY_JSON.payment_errors.scene_already_unlocked,
+            reason: "scene_access_already_active",
+          };
+        }
+      }
+    }
 
     if (tokenRow?.token != null) {
       const token = tokenRow.token;
@@ -850,6 +1019,27 @@ export class MediaCommerceDecisionService {
     }
 
     if (existingStatus === "fulfilled") {
+      if (
+        resolvedAction.payment_kind === "feature"
+        && resolvedAction.feature_key === "scene_unlock"
+      ) {
+        return {
+          ...base,
+          operation: "scene_access_activated",
+          text: config.TELEGRAM_UX_COPY_JSON.callbacks.scene_access_activated,
+          chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+          scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+          turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+          payment_kind: resolvedAction.payment_kind,
+          payment_token: loaded.token,
+          feature_key: resolvedAction.feature_key,
+          target_message_id:
+            normalizePositiveInteger(payload.target_message_id)
+            ?? normalizePositiveInteger(loaded.telegram_invoice_message_id)
+            ?? null,
+          reason: "already_active",
+        };
+      }
       return {
         ...base,
         chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
@@ -954,6 +1144,14 @@ export class MediaCommerceDecisionService {
     }
 
     if (resolvedAction.payment_kind === "feature") {
+      if (resolvedAction.feature_key === "scene_unlock") {
+        return this.fulfillSceneAccessPayment(
+          base,
+          paidRow,
+          payload,
+          resolvedAction,
+        );
+      }
       return this.buildFeatureFulfillmentResponse(
         base,
         paidRow,
@@ -1073,6 +1271,108 @@ export class MediaCommerceDecisionService {
       feature_key: action.feature_key,
       reason: `feature_${action.feature_key}_fulfillment_required`,
     };
+  }
+
+  private async fulfillSceneAccessPayment(
+    base: MediaCommerceDecisionResponse,
+    paidRow: PaidInvoiceToken,
+    payload: Record<string, unknown>,
+    action: FeaturePaymentAction,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const sceneSessionId = normalizeString(
+      typeof payload.scene_session_id === "string"
+        ? payload.scene_session_id
+        : paidRow.scene_session_id,
+    );
+    const sceneAccessSku = normalizeString(paidRow.sku);
+    if (!sceneSessionId || !sceneAccessSku) {
+      return {
+        ...base,
+        chat_id: paidRow.chat_id,
+        scene_session_id: paidRow.scene_session_id,
+        turn_no: paidRow.turn_no,
+        payment_kind: "feature",
+        payment_token: paidRow.token,
+        feature_key: action.feature_key,
+        reason: "scene_access_invoice_invalid",
+      };
+    }
+
+    const activatedCount = await this.runRepositoryOperation(
+      "payment.sceneAccess.activateSceneAccess",
+      {
+        chat_id: paidRow.chat_id,
+        payment_kind: "feature",
+        sku: sceneAccessSku,
+        invoice_status: paidRow.status,
+      },
+      () => this.repository.activateSceneAccess({
+        payment_token: paidRow.token,
+        chat_id: paidRow.chat_id,
+        scene_session_id: sceneSessionId,
+        scene_access_sku: sceneAccessSku,
+      }),
+    );
+    const failureReason = activatedCount > 0
+      ? null
+      : await this.resolveSceneAccessActivationFailure(
+        paidRow.chat_id,
+        sceneSessionId,
+      );
+
+    return {
+      ...base,
+      operation: activatedCount > 0 ? "scene_access_activated" : "noop",
+      text: activatedCount > 0
+        ? config.TELEGRAM_UX_COPY_JSON.callbacks.scene_access_activated
+        : undefined,
+      chat_id:
+        normalizePositiveInteger(payload.chat_id)
+        ?? paidRow.chat_id,
+      scene_session_id: sceneSessionId,
+      turn_no:
+        normalizeNonNegativeInteger(payload.turn_no)
+        ?? normalizeNonNegativeInteger(paidRow.turn_no),
+      scene_turn_no: normalizeNonNegativeInteger(payload.scene_turn_no),
+      target_message_id:
+        normalizePositiveInteger(payload.target_message_id)
+        ?? normalizePositiveInteger(paidRow.telegram_invoice_message_id)
+        ?? null,
+      payment_kind: "feature",
+      payment_token: paidRow.token,
+      feature_key: action.feature_key,
+      stored_count: activatedCount,
+      reason:
+        activatedCount > 0
+          ? "scene_access_activated"
+          : failureReason,
+    };
+  }
+
+  private async resolveSceneAccessActivationFailure(
+    chatId: number,
+    sceneSessionId: string,
+  ): Promise<"already_active" | "scene_not_active" | "invoice_invalid"> {
+    const sceneStatus = await this.runRepositoryOperation(
+      "payment.sceneAccess.loadSceneAccessStatus",
+      {
+        chat_id: chatId,
+        payment_kind: "feature",
+        sku: "payment_action_2",
+        invoice_status: "paid",
+      },
+      () => this.repository.loadSceneAccessStatus({
+        chat_id: chatId,
+        scene_session_id: sceneSessionId,
+      }),
+    );
+    if (sceneStatus?.scene_is_active !== true) {
+      return "scene_not_active";
+    }
+    if (sceneStatus.scene_access_active) {
+      return "already_active";
+    }
+    return "invoice_invalid";
   }
 
   private async fulfillPhotoPayment(
@@ -1199,9 +1499,42 @@ export class MediaCommerceDecisionService {
       normalizeNonNegativeInteger(input.turns_today) ?? turnLimit;
     const turnLimitResetText =
       normalizeString(input.turn_limit_reset_text) ?? config.TURN_LIMIT_RESET_TEXT;
-
-    const upsertedRows = await this.repository.upsertInvoiceTokens(
-      resolveSubscriptionPlans().map((plan) =>
+    const offerAccessStatus = await this.runRepositoryOperation(
+      "subscription.loadSceneAccessStatus",
+      {
+        chat_id: chatId,
+        payment_kind: null,
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.loadSceneAccessStatus({
+        chat_id: chatId,
+        scene_session_id: null,
+      }),
+    );
+    const subscriptionActive = offerAccessStatus?.subscription_active === true;
+    const sceneAccessActive = offerAccessStatus?.scene_access_active === true;
+    const activeSceneSessionId =
+      normalizeString(offerAccessStatus?.active_scene_session_id)
+      ?? null;
+    const sceneUnlockPlan =
+      !subscriptionActive && !sceneAccessActive && activeSceneSessionId
+        ? resolveActionPlanByFeatureKey("scene_unlock")
+        : null;
+    const invoiceInputs = [
+      ...(sceneUnlockPlan && activeSceneSessionId
+        ? [buildSceneUnlockInvoiceInput({
+          chat_id: chatId,
+          scene_session_id: activeSceneSessionId,
+          idempotency_key: idempotencyKey,
+          subscription_offer_reason: subscriptionOfferReason,
+          turn_limit: turnLimit,
+          turns_today: turnsToday,
+          turn_limit_reset_text: turnLimitResetText,
+          plan: sceneUnlockPlan,
+        })]
+        : []),
+      ...resolveSubscriptionPlans().map((plan, index) =>
         buildSubscriptionInvoiceInput({
           chat_id: chatId,
           idempotency_key: idempotencyKey,
@@ -1209,8 +1542,13 @@ export class MediaCommerceDecisionService {
           turn_limit: turnLimit,
           turns_today: turnsToday,
           turn_limit_reset_text: turnLimitResetText,
+          sort_order: index + 1,
           plan,
         })),
+    ];
+
+    const upsertedRows = await this.repository.upsertInvoiceTokens(
+      invoiceInputs,
     );
 
     const createdLinks = input.created_invoice_links ?? [];
@@ -1279,23 +1617,7 @@ export class MediaCommerceDecisionService {
         chat_id: chatId,
         missing_invoice_links: true,
         missing_invoice_link_count: missingRows.length,
-        missing_invoice_items: missingRows.map((row) => ({
-          token: row.token,
-          telegram_invoice_payload: String(row.telegram_invoice_payload ?? row.token),
-          amount_xtr: Number(row.amount_xtr ?? 0),
-          original_amount_xtr:
-            normalizePositiveInteger(row.payload_json.original_amount_xtr) ?? null,
-          promo_key:
-            normalizeString(
-              typeof row.payload_json.promo_key === "string"
-                ? row.payload_json.promo_key
-                : null,
-            ) ?? null,
-          invoice_title: row.invoice_title,
-          invoice_description: row.invoice_description,
-          invoice_label: row.invoice_label,
-          invoice_button_text: row.invoice_button_text,
-        })),
+        missing_invoice_items: missingRows.map((row) => buildMissingInvoiceItem(row)),
         subscription_invoice_tokens: tokenList,
         subscription_offer_reason: subscriptionOfferReason,
         turn_limit: turnLimit,
@@ -1304,6 +1626,22 @@ export class MediaCommerceDecisionService {
         subscription_offer_items: rows.map((row) => ({
           token: row.token,
           sku: row.sku,
+          action_kind:
+            typeof row.payload_json.action_kind === "string"
+              ? row.payload_json.action_kind
+              : row.action_kind ?? null,
+          payment_kind:
+            row.payload_json.action_kind === "subscription_payment"
+              ? "subscription"
+              : row.payload_json.action_kind === "feature_payment"
+                ? "feature"
+                : null,
+          feature_key:
+            typeof row.payload_json.feature_key === "string"
+              ? row.payload_json.feature_key
+              : null,
+          scene_session_id: row.scene_session_id,
+          sort_order: Number(row.payload_json.sort_order ?? 100),
           subscription_days:
             normalizePositiveInteger(row.payload_json.subscription_days) ?? null,
           invoice_link: normalizeString(row.invoice_link),

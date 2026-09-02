@@ -104,10 +104,7 @@ function requiresTermsGate(classification: RouterClassification): boolean {
 }
 
 function requiresSceneAccessCheck(classification: RouterClassification): boolean {
-  return (
-    classification.intent === "scene_mode" ||
-    classification.intent === "scene_message"
-  );
+  return classification.intent === "scene_message";
 }
 
 function classifyRouterInput(input: AccessDecisionRequest): RouterClassification {
@@ -268,47 +265,18 @@ function classifyRouterInput(input: AccessDecisionRequest): RouterClassification
   };
 }
 
-function formatDaysLabel(days: number): string {
-  const normalizedDays = Math.abs(Math.trunc(days));
-  const mod10 = normalizedDays % 10;
-  const mod100 = normalizedDays % 100;
-
-  if (mod10 === 1 && mod100 !== 11) {
-    return `${normalizedDays} день`;
-  }
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
-    return `${normalizedDays} дня`;
-  }
-  return `${normalizedDays} дней`;
-}
-
 function formatSubscriptionStatusText(context: AccessContext): string {
-  const sku = String(context.subscription_sku ?? "");
-  const rawUntil = context.subscription_until;
-  const until = rawUntil ? new Date(rawUntil) : null;
-  const formatter = new Intl.DateTimeFormat("ru-RU", {
-    timeZone: config.BUSINESS_TIME_ZONE,
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const daysLeft = until
-    ? Math.max(0, Math.ceil((until.getTime() - Date.now()) / 86_400_000))
-    : 0;
-  const plan = config.MEDIA_SUBSCRIPTION_PLANS_JSON.find((item) => item.sku === sku);
-  const label = plan
-    ? formatDaysLabel(plan.days)
-    : sku || "неизвестный план";
-
-  return [
-    "Подписка активна.",
-    "",
-    `План: ${label}.`,
-    `Действует до: ${until ? formatter.format(until) : "не указано"} МСК.`,
-    `Осталось примерно: ${daysLeft} дн.`,
-  ].join("\n");
+  return config.TELEGRAM_UX_COPY_JSON.subscription.active
+    .replaceAll("{subscription_sku}", String(context.subscription_sku ?? ""))
+    .replaceAll("{subscription_until}", String(context.subscription_until ?? ""))
+    .replaceAll(
+      "{subscription_days}",
+      String(
+        config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(
+          (item) => item.sku === context.subscription_sku,
+        )?.days ?? "",
+      ),
+    );
 }
 
 export class AccessDecisionService {
@@ -376,12 +344,15 @@ export class AccessDecisionService {
       subscription_active: accessContext.subscription_active,
       subscription_sku: accessContext.subscription_sku,
       subscription_until: accessContext.subscription_until,
+      active_scene_session_id: accessContext.active_scene_session_id,
+      scene_access_active: accessContext.scene_access_active,
       turns_today: accessContext.turns_today,
       turn_limit: config.TURN_LIMIT,
       turn_limit_reset_text: config.TURN_LIMIT_RESET_TEXT,
       selected_character_i: accessContext.selected_character_i,
       active_menu_screen: accessContext.active_menu_screen,
       active_menu_message_id: accessContext.active_menu_message_id,
+      ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
 
     if (
@@ -399,16 +370,16 @@ export class AccessDecisionService {
       };
     }
 
-    if (
-      classification.intent === "scene_start"
-    ) {
+    if (classification.intent === "scene_start") {
+      const hasActiveScene = accessContext.scene_turn_no >= 0;
+
       return {
         ...passthrough,
         ...contextFields,
         decision: "noop",
-        action: "show_character_gallery",
+        action: hasActiveScene ? "show_newscene_confirm" : "show_character_gallery",
         allowed: true,
-        reason: classification.intent,
+        reason: hasActiveScene ? "scene_start_requires_scene_reset" : "scene_start",
       };
     }
 
@@ -454,6 +425,7 @@ export class AccessDecisionService {
     if (requiresSceneAccessCheck(classification)) {
       if (
         accessContext.subscription_active ||
+        accessContext.scene_access_active ||
         accessContext.turns_today < config.TURN_LIMIT
       ) {
         return {
@@ -467,6 +439,8 @@ export class AccessDecisionService {
           allowed: true,
           reason: accessContext.subscription_active
             ? "subscription_active"
+            : accessContext.scene_access_active
+              ? "scene_access_active"
             : "within_daily_limit",
         };
       }

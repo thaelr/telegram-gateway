@@ -93,6 +93,27 @@ export type ActivateSubscriptionInput = {
   subscription_days: number;
 };
 
+export type ActivateSceneAccessInput = {
+  payment_token: string;
+  chat_id: number;
+  scene_session_id: string;
+  scene_access_sku: string | null;
+};
+
+export type SceneAccessStatusInput = {
+  chat_id: number;
+  scene_session_id: string | null;
+};
+
+export type SceneAccessStatus = {
+  chat_id: number | null;
+  scene_session_id: string | null;
+  active_scene_session_id: string | null;
+  subscription_active: boolean;
+  scene_access_active: boolean;
+  scene_is_active: boolean;
+};
+
 export type StorePhotoEventInput = SceneTurnRef & {
   event_type: string | null;
   media_signature: string | null;
@@ -159,6 +180,7 @@ export function buildEmptyOfferStats(input: LoadOfferStatsInput): MediaOfferStat
     subscription_active: false,
     subscription_sku: null,
     subscription_until: null,
+    scene_access_active: false,
     delivered_in_scene: 0,
     total_available: 0,
     unseen_available: 0,
@@ -187,6 +209,7 @@ export function buildEmptyMediaContext(input: LoadMediaContextInput): MediaConte
     subscription_active: false,
     subscription_sku: null,
     subscription_until: null,
+    scene_access_active: false,
     delivered_in_scene: 0,
     total_available: 0,
     unseen_available: 0,

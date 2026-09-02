@@ -17,7 +17,7 @@ const SUPPORTED_PAYMENT_ACTIONS = new Set([
   "feature_payment",
 ]);
 
-const SUPPORTED_FEATURE_KEYS = new Set(["fast_scene_skip"]);
+const SUPPORTED_FEATURE_KEYS = new Set(["fast_scene_skip", "scene_unlock"]);
 
 export const INVOICE_PAYLOAD_KIND = "invoice_payload";
 
@@ -46,7 +46,7 @@ export type ResolvedInvoiceAction =
   | {
     action_kind: "feature_payment";
     payment_kind: "feature";
-    feature_key: "fast_scene_skip";
+    feature_key: "fast_scene_skip" | "scene_unlock";
     subscription_days: 0;
     subscription_sku: null;
   };
@@ -63,12 +63,12 @@ export function normalizePaymentActionKind(
 
 export function normalizeFeatureKey(
   value: string | null | undefined,
-): "fast_scene_skip" | null {
+): "fast_scene_skip" | "scene_unlock" | null {
   const normalized = normalizeString(value);
   if (!normalized || !SUPPORTED_FEATURE_KEYS.has(normalized)) {
     return null;
   }
-  return normalized as "fast_scene_skip";
+  return normalized as "fast_scene_skip" | "scene_unlock";
 }
 
 export function hasExpectedPaymentDetails(
@@ -222,7 +222,7 @@ export function validatePrecheckout(
   if (!tokenRow?.found || !tokenRow.token) {
     return {
       ok: false,
-      error: "Счёт больше не актуален.",
+      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
       reason: "invoice_not_found",
       action: actionResolution.action,
     };
@@ -231,7 +231,7 @@ export function validatePrecheckout(
   if (normalizeString(tokenRow.kind) !== INVOICE_PAYLOAD_KIND) {
     return {
       ok: false,
-      error: "Счёт больше не актуален.",
+      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
       reason: "invoice_kind_invalid",
       action: actionResolution.action,
     };
@@ -240,7 +240,7 @@ export function validatePrecheckout(
   if (actionResolution.reason != null) {
     return {
       ok: false,
-      error: "Этот счёт больше не поддерживается.",
+      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
       reason: actionResolution.reason,
       action: actionResolution.action,
     };
@@ -249,7 +249,7 @@ export function validatePrecheckout(
   if (isExpired(tokenRow.expires_at)) {
     return {
       ok: false,
-      error: "Срок оплаты истёк.",
+      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.expired,
       reason: "invoice_expired",
       action: actionResolution.action,
     };
@@ -258,7 +258,7 @@ export function validatePrecheckout(
   if (normalizeString(tokenRow.status) !== "invoice_sent") {
     return {
       ok: false,
-      error: "Этот счёт уже недоступен.",
+      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
       reason: "invoice_status_invalid",
       action: actionResolution.action,
     };
@@ -273,7 +273,7 @@ export function validatePrecheckout(
   ) {
     return {
       ok: false,
-      error: "Сумма счёта больше не совпадает.",
+      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
       reason: "payment_details_mismatch",
       action: actionResolution.action,
     };

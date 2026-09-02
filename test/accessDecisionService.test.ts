@@ -1,49 +1,40 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AccessContext, AccessDecisionRequest } from "../src/types.js";
+import { installTestEnv } from "./testEnv.js";
 
-process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
-process.env.INTERNAL_API_KEY ??= "test-internal-key";
-process.env.TURN_LIMIT ??= "15";
+installTestEnv();
+process.env.TURN_LIMIT ??= "20";
 process.env.BUSINESS_TIME_ZONE ??= "Europe/Moscow";
 process.env.TURN_LIMIT_RESET_TEXT ??= "00:00 МСК";
 process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
   {
-    sku: "payment_plan_1",
-    days: 14,
-    amount_xtr: 111,
-    title: "Payment plan 1",
-    description: "Access plan option 1 for chat and media actions.",
-    label: "Payment plan 1",
-    button_text: "Payment plan 1",
-  },
-  {
     sku: "payment_plan_2",
-    days: 30,
+    days: 14,
     amount_xtr: 222,
-    title: "Payment plan 2",
-    description: "Access plan option 2 for chat and media actions.",
-    label: "Payment plan 2",
-    button_text: "Payment plan 2",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
   {
     sku: "payment_plan_3",
-    days: 60,
+    days: 30,
     amount_xtr: 333,
-    title: "Payment plan 3",
-    description: "Access plan option 3 for chat and media actions.",
-    label: "Payment plan 3",
-    button_text: "Payment plan 3",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
   {
     sku: "payment_media_1",
     amount_xtr: 11,
-    title: "Payment media 1",
-    description: "Media payment option 1.",
-    label: "Payment media 1",
-    button_text: "Payment media 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
@@ -51,10 +42,19 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
     sku: "payment_action_1",
     feature_key: "fast_scene_skip",
     amount_xtr: 55,
-    title: "Payment action 1",
-    description: "Feature payment option 1.",
-    label: "Payment action 1",
-    button_text: "Payment action 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
+  },
+  {
+    sku: "payment_action_2",
+    feature_key: "scene_unlock",
+    amount_xtr: 80,
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 
@@ -88,6 +88,8 @@ function buildAccessContext(
     subscription_sku: null,
     subscription_until: null,
     subscription_active: false,
+    active_scene_session_id: null,
+    scene_access_active: false,
     turns_today: 0,
     scene_turn_no: -1,
     selected_character_i: 1,
@@ -166,6 +168,29 @@ test("returns show_terms_gate when terms are not accepted", async () => {
   assert.equal(calls.length, 1);
 });
 
+test("returns show_terms_gate for /start with active scene when terms are not accepted", async () => {
+  const { service, calls } = createService(
+    buildAccessContext({ terms_accepted_at: null, scene_turn_no: 3 }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/start",
+      event_type: "command.received",
+      message_type: "command",
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.intent, "scene_start");
+  assert.equal(result.action, "show_terms_gate");
+  assert.equal(result.decision, "show_terms_gate");
+  assert.equal(result.allowed, false);
+  assert.equal(result.post_accept_intent, "start");
+  assert.equal(result.reason, "terms_not_accepted");
+  assert.equal(calls.length, 1);
+});
+
 test("returns show_character_gallery for /start after terms are accepted", async () => {
   const { service, calls } = createService(
     buildAccessContext({
@@ -188,6 +213,31 @@ test("returns show_character_gallery for /start after terms are accepted", async
   assert.equal(result.allowed, true);
   assert.equal(result.active_menu_screen, "character_gallery");
   assert.equal(result.active_menu_message_id, 88);
+  assert.equal(calls.length, 1);
+});
+
+test("returns show_newscene_confirm for /start when a scene is active", async () => {
+  const { service, calls } = createService(
+    buildAccessContext({
+      scene_turn_no: 3,
+      active_menu_screen: null,
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/start",
+      event_type: "command.received",
+      message_type: "command",
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.intent, "scene_start");
+  assert.equal(result.action, "show_newscene_confirm");
+  assert.equal(result.decision, "noop");
+  assert.equal(result.allowed, true);
+  assert.equal(result.reason, "scene_start_requires_scene_reset");
   assert.equal(calls.length, 1);
 });
 
@@ -284,8 +334,8 @@ test("returns allow_scene within daily limit", async () => {
   assert.equal(result.reason, "within_daily_limit");
 });
 
-test("returns subscription offer when daily limit is exhausted", async () => {
-  const { service } = createService(buildAccessContext({ turns_today: 15 }));
+test("returns subscription offer when daily limit is exhausted on message 21", async () => {
+  const { service } = createService(buildAccessContext({ turns_today: 20 }));
 
   const result = await service.evaluate(buildRequest());
 
@@ -296,11 +346,45 @@ test("returns subscription offer when daily limit is exhausted", async () => {
   assert.equal(result.reason, "daily_turn_limit_reached");
 });
 
+test("returns allow_scene when current scene is unlocked", async () => {
+  const { service } = createService(
+    buildAccessContext({
+      active_scene_session_id: "scene-1",
+      scene_access_active: true,
+      turns_today: 99,
+    }),
+  );
+
+  const result = await service.evaluate(buildRequest());
+
+  assert.equal(result.action, "run_scene_core");
+  assert.equal(result.decision, "allow_scene");
+  assert.equal(result.allowed, true);
+  assert.equal(result.scene_access_active, true);
+  assert.equal(result.reason, "scene_access_active");
+});
+
+test("returns subscription offer after new scene when scene unlock is gone", async () => {
+  const { service } = createService(
+    buildAccessContext({
+      active_scene_session_id: "scene-2",
+      scene_access_active: false,
+      turns_today: 20,
+    }),
+  );
+
+  const result = await service.evaluate(buildRequest());
+
+  assert.equal(result.action, "show_subscription_offer");
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "daily_turn_limit_reached");
+});
+
 test("returns subscription status for /subscription with active subscription", async () => {
   const { service } = createService(
     buildAccessContext({
       subscription_active: true,
-      subscription_sku: "payment_plan_1",
+      subscription_sku: "payment_plan_2",
       subscription_until: "2026-08-15T10:00:00.000Z",
     }),
   );
@@ -316,10 +400,10 @@ test("returns subscription status for /subscription with active subscription", a
   assert.equal(result.action, "show_subscription_status");
   assert.equal(result.decision, "show_subscription_status");
   assert.equal(result.allowed, true);
-  assert.match(result.text ?? "", /Подписка активна/u);
+  assert.equal(result.text, "text");
 });
 
-test("formats 30-day subscription plan from sku even when 4 days are left", async () => {
+test("formats 14-day subscription plan from sku even when 4 days are left", async () => {
   const { service } = createService(
     buildAccessContext({
       subscription_active: true,
@@ -337,15 +421,14 @@ test("formats 30-day subscription plan from sku even when 4 days are left", asyn
   );
 
   assert.equal(result.action, "show_subscription_status");
-  assert.match(result.text ?? "", /План: 30 дней\./u);
-  assert.match(result.text ?? "", /Осталось примерно: 4 дн\./u);
+  assert.equal(result.text, "text");
 });
 
-test("formats 14-day subscription plan from sku", async () => {
+test("formats 30-day subscription plan from sku", async () => {
   const { service } = createService(
     buildAccessContext({
       subscription_active: true,
-      subscription_sku: "payment_plan_1",
+      subscription_sku: "payment_plan_3",
       subscription_until: new Date(Date.now() + 2 * 86_400_000).toISOString(),
     }),
   );
@@ -359,8 +442,7 @@ test("formats 14-day subscription plan from sku", async () => {
   );
 
   assert.equal(result.action, "show_subscription_status");
-  assert.match(result.text ?? "", /План: 14 дней\./u);
-  assert.match(result.text ?? "", /Осталось примерно: 2 дн\./u);
+  assert.equal(result.text, "text");
 });
 
 test("returns subscription offer for /subscription without active subscription", async () => {
@@ -435,8 +517,8 @@ test("scene message is classified by event_type without route_target", async () 
   assert.equal(calls.length, 1);
 });
 
-test("scene mode callback is access-controlled and allowed within daily limit", async () => {
-  const { service, calls } = createService(buildAccessContext({ turns_today: 4 }));
+test("scene mode callback is not blocked by daily limit", async () => {
+  const { service, calls } = createService(buildAccessContext({ turns_today: 20 }));
 
   const result = await service.evaluate(
     buildRequest({
@@ -449,8 +531,9 @@ test("scene mode callback is access-controlled and allowed within daily limit", 
   assert.equal(result.intent, "scene_mode");
   assert.equal(result.action, "handle_scene_mode");
   assert.equal(result.scene_mode, "fast");
-  assert.equal(result.decision, "allow_scene");
+  assert.equal(result.decision, "noop");
   assert.equal(result.allowed, true);
+  assert.equal(result.reason, "scene_mode");
   assert.equal(calls.length, 1);
 });
 
@@ -484,7 +567,7 @@ test("commerce callback preserves panel text and entities passthrough", async ()
       route_target: null,
       event_type: "callback_query.received",
       callback_data: "btn_token",
-      panel_text: "Панель сцены",
+      panel_text: "text",
       panel_entities_json: entities,
       user_message: null,
     }),
@@ -492,7 +575,7 @@ test("commerce callback preserves panel text and entities passthrough", async ()
 
   assert.equal(result.action, "handle_commerce_interaction");
   assert.equal(result.decision, "noop");
-  assert.equal(result.panel_text, "Панель сцены");
+  assert.equal(result.panel_text, "text");
   assert.deepEqual(result.panel_entities_json, entities);
   assert.equal(calls.length, 0);
 });

@@ -1,28 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { installTestEnv } from "./testEnv.js";
 
-process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
-process.env.INTERNAL_API_KEY ??= "test-internal-key";
+installTestEnv();
 process.env.MEDIA_STORAGE_BASE_URL = "https://media.example.com";
 process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
   {
-    sku: "payment_plan_1",
+    sku: "payment_plan_2",
     days: 14,
     amount_xtr: 100,
-    title: "Payment plan 1",
-    description: "Access plan option 1 for chat and media actions.",
-    label: "Payment plan 1",
-    button_text: "Payment plan 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
   {
     sku: "payment_media_1",
     amount_xtr: 10,
-    title: "Payment media 1",
-    description: "Media payment option 1.",
-    label: "Payment media 1",
-    button_text: "Payment media 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
@@ -30,10 +30,19 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
     sku: "payment_action_1",
     feature_key: "fast_scene_skip",
     amount_xtr: 50,
-    title: "Payment action 1",
-    description: "Feature payment option 1.",
-    label: "Payment action 1",
-    button_text: "Payment action 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
+  },
+  {
+    sku: "payment_action_2",
+    feature_key: "scene_unlock",
+    amount_xtr: 80,
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 
@@ -616,7 +625,7 @@ test("upsertInvoiceToken normalizes string payload_json into an object before ca
       turn_no: null,
       scene_turn_no: null,
       payload_json: { subscription_days: 14 },
-      sku: "payment_plan_1",
+      sku: "payment_plan_2",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
       expires_at: "2026-08-14T10:00:00.000Z",
@@ -640,7 +649,7 @@ test("upsertInvoiceToken normalizes string payload_json into an object before ca
     scene_turn_no: null,
     payload_json: "{\"subscription_days\":14}" as never,
     action_kind: "subscription_payment",
-    sku: "payment_plan_1",
+    sku: "payment_plan_2",
     amount_xtr: 100,
     telegram_invoice_payload: "inv-1",
     expires_at: "2026-08-14T10:00:00.000Z",
@@ -664,7 +673,7 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       turn_no: null,
       scene_turn_no: null,
       payload_json: { subscription_days: 14 },
-      sku: "payment_plan_1",
+      sku: "payment_plan_2",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
       expires_at: "2026-08-14T10:00:00.000Z",
@@ -709,7 +718,7 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       scene_turn_no: null,
       payload_json: { subscription_days: 14 },
       action_kind: "subscription_payment",
-      sku: "payment_plan_1",
+      sku: "payment_plan_2",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
       expires_at: "2026-08-14T10:00:00.000Z",
@@ -752,7 +761,7 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       scene_turn_no: null,
       payload_json: { subscription_days: 14 },
       action_kind: "subscription_payment",
-      sku: "payment_plan_1",
+      sku: "payment_plan_2",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
       expires_at: "2026-08-14T10:00:00.000Z",
@@ -951,10 +960,48 @@ test("activateSubscription delegates to media_activate_subscription function", a
   const result = await repository.activateSubscription({
     payment_token: "inv-1",
     chat_id: 101,
-    subscription_sku: "payment_plan_1",
+    subscription_sku: "payment_plan_2",
     subscription_days: 14,
   });
 
   assert.equal(result, 1);
   assert.match(calls[0]?.sql ?? "", /SELECT public\.media_activate_subscription\(/u);
+});
+
+test("activateSceneAccess delegates to media_activate_scene_access function", async () => {
+  const { query, calls } = createTaggedQueryStub([[{ activated_count: 1 }]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.activateSceneAccess({
+    payment_token: "inv-scene-pass",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    scene_access_sku: "payment_action_2",
+  });
+
+  assert.equal(result, 1);
+  assert.match(calls[0]?.sql ?? "", /SELECT public\.media_activate_scene_access\(/u);
+});
+
+test("loadSceneAccessStatus reads active scene and pass state", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      active_scene_session_id: "scene-1",
+      subscription_active: false,
+      scene_access_active: true,
+      scene_is_active: true,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.loadSceneAccessStatus({
+    chat_id: 101,
+    scene_session_id: "scene-1",
+  });
+
+  assert.equal(result?.scene_access_active, true);
+  assert.equal(result?.scene_is_active, true);
+  assert.match(calls[0]?.sql ?? "", /FROM public\.chat_state cs/u);
 });

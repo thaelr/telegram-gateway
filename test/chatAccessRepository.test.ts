@@ -1,28 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AccessContext } from "../src/types.js";
+import { installTestEnv } from "./testEnv.js";
 
-process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
-process.env.INTERNAL_API_KEY ??= "test-internal-key";
+installTestEnv();
 process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
   {
-    sku: "payment_plan_1",
+    sku: "payment_plan_2",
     days: 14,
     amount_xtr: 111,
-    title: "Payment plan 1",
-    description: "Access plan option 1 for chat and media actions.",
-    label: "Payment plan 1",
-    button_text: "Payment plan 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
   {
     sku: "payment_media_1",
     amount_xtr: 11,
-    title: "Payment media 1",
-    description: "Media payment option 1.",
-    label: "Payment media 1",
-    button_text: "Payment media 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
@@ -30,10 +30,19 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
     sku: "payment_action_1",
     feature_key: "fast_scene_skip",
     amount_xtr: 55,
-    title: "Payment action 1",
-    description: "Feature payment option 1.",
-    label: "Payment action 1",
-    button_text: "Payment action 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
+  },
+  {
+    sku: "payment_action_2",
+    feature_key: "scene_unlock",
+    amount_xtr: 80,
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 
@@ -53,6 +62,8 @@ function buildAccessContext(overrides: Partial<AccessContext> = {}): AccessConte
     subscription_sku: null,
     subscription_until: null,
     subscription_active: false,
+    active_scene_session_id: null,
+    scene_access_active: false,
     turns_today: 0,
     scene_turn_no: -1,
     selected_character_i: null,

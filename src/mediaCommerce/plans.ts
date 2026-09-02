@@ -101,10 +101,10 @@ export function resolvePhotoPlanByAmount(
   ) ?? {
     sku: `payment_media_custom_${normalizedAmount}`,
     amount_xtr: normalizedAmount,
-    title: "Payment media",
-    description: "Media payment option.",
-    label: "Payment media",
-    button_text: `Получить фото • ${normalizedAmount} ⭐`,
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: config.TELEGRAM_UX_COPY_JSON.media.pay_button,
   };
 
   return applyPromotionToPlan(plan);

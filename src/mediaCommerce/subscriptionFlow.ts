@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import type { MediaActionPlan } from "../config.js";
 import type {
   InvoiceTokenPayload,
   MediaReplyMarkup,
@@ -14,10 +15,16 @@ export function buildSubscriptionOfferText(
   resetText: string,
 ): string {
   if (reason === "daily_turn_limit") {
-    return `Упс! Похоже, на сегодня бесплатный лимит исчерпан — ${turnsToday} из ${turnLimit} сообщений использованы.\n\nОн обновится после ${resetText}.\n\nНе хочешь ждать — подписка снимет лимит на диалог и откроет безлимитные генерации.\n\nВыбери подходящий план:`;
+    return config.TELEGRAM_UX_COPY_JSON.subscription.daily_limit_offer
+      .replaceAll("{turns_today}", String(turnsToday))
+      .replaceAll("{turn_limit}", String(turnLimit))
+      .replaceAll("{turn_limit_reset_text}", resetText);
   }
 
-  return "Подписка снимает лимит на диалог и открывает безлимитный доступ к генерациям.\n\nВыбери подходящий план:";
+  return config.TELEGRAM_UX_COPY_JSON.subscription.command_offer
+    .replaceAll("{turns_today}", String(turnsToday))
+    .replaceAll("{turn_limit}", String(turnLimit))
+    .replaceAll("{turn_limit_reset_text}", resetText);
 }
 
 export function buildSubscriptionOfferMessage(rows: StoredInvoiceToken[]): {
@@ -32,6 +39,11 @@ export function buildSubscriptionOfferMessage(rows: StoredInvoiceToken[]): {
   offer_items: Array<{
     token: string;
     sku: string | null;
+    action_kind: string | null;
+    payment_kind: "subscription" | "feature" | null;
+    feature_key: string | null;
+    scene_session_id: string | null;
+    sort_order: number | null;
     subscription_days: number | null;
     invoice_link: string | null;
     amount_xtr: number;
@@ -47,7 +59,9 @@ export function buildSubscriptionOfferMessage(rows: StoredInvoiceToken[]): {
     .slice()
     .sort(
       (left, right) =>
-        Number(left.payload_json.subscription_days ?? 0)
+        Number(left.payload_json.sort_order ?? 100)
+        - Number(right.payload_json.sort_order ?? 100)
+        || Number(left.payload_json.subscription_days ?? 0)
         - Number(right.payload_json.subscription_days ?? 0),
     );
 
@@ -71,13 +85,30 @@ export function buildSubscriptionOfferMessage(rows: StoredInvoiceToken[]): {
   const keyboard = sortedRows
     .map((row) => {
       const url = normalizeString(row.invoice_link);
-      const text = normalizeString(row.invoice_button_text) ?? "Оплатить";
+      const text = normalizeString(row.invoice_button_text) ?? "text";
       return url ? [{ text, url }] : [];
     })
     .filter((row) => row.length > 0);
   const offerItems = sortedRows.map((row) => ({
     token: row.token,
     sku: row.sku,
+    action_kind:
+      typeof row.payload_json.action_kind === "string"
+        ? row.payload_json.action_kind
+        : row.action_kind ?? null,
+    payment_kind: (
+      row.payload_json.action_kind === "subscription_payment"
+        ? "subscription"
+        : row.payload_json.action_kind === "feature_payment"
+          ? "feature"
+          : null
+    ) as "subscription" | "feature" | null,
+    feature_key:
+      typeof row.payload_json.feature_key === "string"
+        ? row.payload_json.feature_key
+        : null,
+    scene_session_id: row.scene_session_id,
+    sort_order: Number(row.payload_json.sort_order ?? 100),
     subscription_days: Number(row.payload_json.subscription_days ?? 0) || null,
     invoice_link: normalizeString(row.invoice_link),
     amount_xtr: Number(row.amount_xtr ?? 0),
@@ -113,6 +144,64 @@ export function buildSubscriptionOfferMessage(rows: StoredInvoiceToken[]): {
   };
 }
 
+export function buildSceneUnlockInvoiceInput(input: {
+  chat_id: number;
+  scene_session_id: string;
+  idempotency_key: string;
+  subscription_offer_reason?: MediaSubscriptionOfferReason | null;
+  turn_limit?: number | null;
+  turns_today?: number | null;
+  turn_limit_reset_text?: string | null;
+  target_message_id?: number | null;
+  plan: MediaActionPlan & {
+    original_amount_xtr?: number | null;
+    promo_key?: string | null;
+  };
+}) {
+  const payloadJson: InvoiceTokenPayload = {
+    action_kind: "feature_payment",
+    feature_key: "scene_unlock",
+    chat_id: input.chat_id,
+    scene_session_id: input.scene_session_id,
+    turn_no: null,
+    scene_turn_no: null,
+    media_signature: null,
+    target_message_id: input.target_message_id ?? null,
+    current_uuid: null,
+    base_price_xtr: 0,
+    requested_action: "scene_unlock_purchase",
+    subscription_offer_reason: input.subscription_offer_reason ?? null,
+    turn_limit: input.turn_limit ?? config.TURN_LIMIT,
+    turns_today: input.turns_today ?? null,
+    turn_limit_reset_text:
+      input.turn_limit_reset_text ?? config.TURN_LIMIT_RESET_TEXT,
+    idempotency_key: input.idempotency_key,
+    original_amount_xtr: input.plan.original_amount_xtr ?? input.plan.amount_xtr,
+    promo_key: input.plan.promo_key ?? null,
+    sort_order: 0,
+  };
+  const token = `${input.idempotency_key}:${input.scene_session_id}:${input.plan.sku}`;
+
+  return {
+    token,
+    kind: "invoice_payload",
+    chat_id: input.chat_id,
+    scene_session_id: input.scene_session_id,
+    turn_no: null,
+    scene_turn_no: null,
+    payload_json: payloadJson,
+    action_kind: "feature_payment",
+    sku: input.plan.sku,
+    amount_xtr: input.plan.amount_xtr,
+    telegram_invoice_payload: token,
+    expires_at: new Date(Date.now() + INVOICE_TTL_MS).toISOString(),
+    invoice_title: input.plan.title,
+    invoice_description: input.plan.description,
+    invoice_label: input.plan.label,
+    invoice_button_text: input.plan.button_text,
+  };
+}
+
 export function mergeStoredRowsWithMetadata(
   storedRows: StoredInvoiceToken[],
   sourceRows: StoredInvoiceToken[],
@@ -144,6 +233,7 @@ export function buildSubscriptionInvoiceInput(input: {
   turn_limit: number;
   turns_today: number;
   turn_limit_reset_text: string;
+  sort_order: number;
   plan: {
     sku: string;
     days: number;
@@ -176,6 +266,7 @@ export function buildSubscriptionInvoiceInput(input: {
     subscription_sku: input.plan.sku,
     original_amount_xtr: input.plan.original_amount_xtr ?? input.plan.amount_xtr,
     promo_key: input.plan.promo_key ?? null,
+    sort_order: input.sort_order,
   };
   const token = `${input.idempotency_key}:${input.plan.sku}`;
 

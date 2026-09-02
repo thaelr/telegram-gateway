@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { installTestEnv } from "./testEnv.js";
 
 process.env.NODE_ENV = "test";
-process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
-process.env.INTERNAL_API_KEY ??= "test-internal-key";
+installTestEnv();
 process.env.INTERNAL_API_KEY_HEADER ??= "x-internal-api-key";
-process.env.TURN_LIMIT ??= "15";
+process.env.TURN_LIMIT ??= "20";
 process.env.BUSINESS_TIME_ZONE ??= "Europe/Moscow";
 process.env.TURN_LIMIT_RESET_TEXT ??= "00:00 МСК";
 process.env.MEDIA_PAYMENT_CURRENCY ??= "XTR";
@@ -14,23 +14,23 @@ process.env.MEDIA_DEFAULT_BUCKET_NAME ??= "media_bucket";
 process.env.MEDIA_BUCKET_ALIAS_MAP_JSON ??= "{}";
 process.env.MEDIA_SUBSCRIPTION_PLANS_JSON ??= JSON.stringify([
   {
-    sku: "payment_plan_1",
+    sku: "payment_plan_2",
     days: 14,
     amount_xtr: 111,
-    title: "Payment plan 1",
-    description: "Access plan option 1 for chat and media actions.",
-    label: "Payment plan 1",
-    button_text: "Payment plan 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_PHOTO_PLANS_JSON ??= JSON.stringify([
   {
     sku: "payment_media_1",
     amount_xtr: 11,
-    title: "Payment media 1",
-    description: "Media payment option 1.",
-    label: "Payment media 1",
-    button_text: "Payment media 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
@@ -38,10 +38,19 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
     sku: "payment_action_1",
     feature_key: "fast_scene_skip",
     amount_xtr: 55,
-    title: "Payment action 1",
-    description: "Feature payment option 1.",
-    label: "Payment action 1",
-    button_text: "Payment action 1",
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
+  },
+  {
+    sku: "payment_action_2",
+    feature_key: "scene_unlock",
+    amount_xtr: 80,
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
   },
 ]);
 
