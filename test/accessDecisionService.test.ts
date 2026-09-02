@@ -479,6 +479,8 @@ test("returns character mode screen for character_select callback without reposi
   assert.equal(result.action, "show_character_mode_screen");
   assert.equal(result.character_i, 2);
   assert.equal(result.allowed, true);
+  assert.equal(typeof result.ux_copy, "object");
+  assert.notEqual(result.ux_copy, null);
   assert.equal(calls.length, 0);
 });
 

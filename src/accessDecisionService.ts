@@ -321,6 +321,7 @@ export class AccessDecisionService {
       telegram_chat_status: input.telegram_chat_status ?? null,
       character_i: effectiveCharacterId,
       scene_mode: effectiveSceneMode,
+      ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
 
     if (!requiresAccessContext(classification)) {
@@ -352,7 +353,6 @@ export class AccessDecisionService {
       selected_character_i: accessContext.selected_character_i,
       active_menu_screen: accessContext.active_menu_screen,
       active_menu_message_id: accessContext.active_menu_message_id,
-      ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
 
     if (
