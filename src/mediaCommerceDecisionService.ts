@@ -8,20 +8,19 @@ import {
 import {
   INVOICE_PAYLOAD_KIND,
   hasExpectedPaymentDetails,
+  normalizePaymentSource,
   type ResolvedInvoiceAction,
   resolveInvoiceActionResult,
   toPaidInvoiceToken,
   validatePrecheckout,
 } from "./mediaCommerce/paymentFlow.js";
 import {
-  appendInvoiceButton,
   buildBaseResponse,
 } from "./mediaCommerce/responseBuilders.js";
 import {
-  buildSceneUnlockInvoiceInput,
-  buildSubscriptionInvoiceInput,
-  buildSubscriptionOfferMessage,
-  mergeStoredRowsWithMetadata,
+  buildFeaturePaymentInputs,
+  buildSceneUnlockPaymentInputs,
+  buildSubscriptionPaymentInputs,
 } from "./mediaCommerce/subscriptionFlow.js";
 import {
   resolveSubscriptionPlans,
@@ -42,11 +41,23 @@ import {
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
 import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema.js";
 import { getRequestContext } from "./requestContext.js";
+import {
+  TelegramStarsPaymentAdapter,
+  type StarsInvoiceClient,
+} from "./payments/stars.js";
+import {
+  SbpPaymentAdapter,
+  type SbpPaymentClient,
+} from "./payments/sbp.js";
 import type {
   MediaCommerceDecisionResponse,
   MediaCommerceRoute,
   MediaContext,
+  MediaOfferItem,
+  MediaPaymentOption,
   MediaOfferStats,
+  PaymentCurrency,
+  PaymentSource,
   PaidInvoiceToken,
   StoredInvoiceToken,
 } from "./mediaCommerceTypes.js";
@@ -61,6 +72,7 @@ type MediaRepository = Pick<
   | "loadMediaContext"
   | "storePanel"
   | "loadInvoiceToken"
+  | "loadInvoiceTokenByExternalPaymentId"
   | "storePrecheckoutResult"
   | "markInvoicePaid"
   | "activateSubscription"
@@ -68,6 +80,8 @@ type MediaRepository = Pick<
   | "loadSceneAccessStatus"
   | "storePhotoEvent"
   | "storeInvoiceLinks"
+  | "claimSbpCheckoutCreation"
+  | "releaseSbpCheckoutCreation"
   | "loadStoredInvoiceTokens"
   | "storeSubscriptionOfferMessageId"
 >;
@@ -81,6 +95,25 @@ type FeaturePaymentAction = Extract<
   ResolvedInvoiceAction,
   { payment_kind: "feature" }
 >;
+
+function normalizePaymentCurrency(
+  value: string | null | undefined,
+): PaymentCurrency | null {
+  return value === "RUB" ? "RUB" : value === "XTR" ? "XTR" : null;
+}
+
+function getSourceSortOrder(source: PaymentSource | null | undefined): number {
+  return source === "sbp" ? 0 : source === "stars" ? 1 : 2;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+const SBP_CHECKOUT_WAIT_TIMEOUT_MS = 24_000;
+const SBP_CHECKOUT_WAIT_BACKOFF_MS = [200, 400, 800, 1000, 1500, 2000] as const;
 
 export class MediaCommerceOperationError extends Error {
   constructor(
@@ -121,43 +154,205 @@ function toOperationError(operation: string, error: unknown): MediaCommerceOpera
   );
 }
 
-function buildMissingInvoiceItem(row: StoredInvoiceToken) {
+function buildPaymentOption(row: StoredInvoiceToken): MediaPaymentOption {
+  const paymentSource = normalizePaymentSource(row.payment_source) ?? "stars";
+  const paymentCurrency = normalizePaymentCurrency(row.currency)
+    ?? (paymentSource === "sbp" ? "RUB" : "XTR");
+  const payload = parseJsonObject(row.payload_json) ?? {};
+
   return {
     token: row.token,
-    telegram_invoice_payload: String(row.telegram_invoice_payload ?? row.token),
-    amount_xtr: Number(row.amount_xtr ?? 0),
+    source: paymentSource,
+    amount: normalizeNonNegativeInteger(row.amount ?? row.amount_xtr) ?? 0,
+    currency: paymentCurrency,
+    checkout_url:
+      normalizeString(row.checkout_url)
+      ?? normalizeString(row.invoice_link)
+      ?? "",
+    external_payment_id: normalizeString(row.external_payment_id),
+    sku: row.sku,
     action_kind:
-      typeof row.payload_json.action_kind === "string"
-        ? row.payload_json.action_kind
+      typeof payload.action_kind === "string"
+        ? payload.action_kind
         : row.action_kind ?? null,
     payment_kind:
-      row.payload_json.action_kind === "subscription_payment"
+      payload.action_kind === "subscription_payment"
         ? "subscription" as const
-        : row.payload_json.action_kind === "feature_payment"
+        : payload.action_kind === "feature_payment"
           ? "feature" as const
+          : payload.action_kind === "photo_payment"
+            ? "photo" as const
           : null,
     feature_key:
-      typeof row.payload_json.feature_key === "string"
-        ? row.payload_json.feature_key
+      typeof payload.feature_key === "string"
+        ? payload.feature_key
         : null,
     scene_session_id: row.scene_session_id,
-    sort_order: normalizeNonNegativeInteger(row.payload_json.sort_order) ?? 100,
-    original_amount_xtr:
-      normalizePositiveInteger(row.payload_json.original_amount_xtr) ?? null,
+    sort_order: normalizeNonNegativeInteger(payload.sort_order) ?? 100,
+    subscription_days:
+      normalizePositiveInteger(payload.subscription_days) ?? null,
+    original_amount:
+      paymentSource === "sbp"
+        ? normalizePositiveInteger(payload.original_amount_rub)
+        : normalizePositiveInteger(payload.original_amount_xtr),
     promo_key:
       normalizeString(
-        typeof row.payload_json.promo_key === "string"
-          ? row.payload_json.promo_key
+        typeof payload.promo_key === "string"
+          ? payload.promo_key
           : null,
       ) ?? null,
-    invoice_title: row.invoice_title,
-    invoice_description: row.invoice_description,
-    invoice_label: row.invoice_label,
-    invoice_button_text: row.invoice_button_text,
+    title: row.invoice_title,
+    description: row.invoice_description,
+    label: row.invoice_label,
+    button_text: row.invoice_button_text,
   };
 }
 
-type RepositoryOperationLogContext = {
+function buildOfferItem(rows: StoredInvoiceToken[]): MediaOfferItem | null {
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const sortedRows = rows
+    .slice()
+    .sort((left, right) =>
+      getSourceSortOrder(normalizePaymentSource(left.payment_source))
+      - getSourceSortOrder(normalizePaymentSource(right.payment_source))
+      || Number(left.payload_json.sort_order ?? 100)
+      - Number(right.payload_json.sort_order ?? 100),
+    );
+  const primaryRow = sortedRows[0] ?? rows[0];
+  const payload = parseJsonObject(primaryRow?.payload_json) ?? {};
+
+  if (!primaryRow) {
+    return null;
+  }
+
+  return {
+    sku: primaryRow.sku,
+    action_kind:
+      typeof payload.action_kind === "string"
+        ? payload.action_kind
+        : primaryRow.action_kind ?? null,
+    payment_kind:
+      payload.action_kind === "subscription_payment"
+        ? "subscription"
+        : payload.action_kind === "feature_payment"
+          ? "feature"
+          : payload.action_kind === "photo_payment"
+            ? "photo"
+            : null,
+    feature_key:
+      typeof payload.feature_key === "string"
+        ? payload.feature_key
+        : null,
+    scene_session_id: primaryRow.scene_session_id,
+    sort_order: normalizeNonNegativeInteger(payload.sort_order) ?? 100,
+    subscription_days:
+      normalizePositiveInteger(payload.subscription_days) ?? null,
+    promo_key:
+      normalizeString(
+        typeof payload.promo_key === "string"
+          ? payload.promo_key
+          : null,
+      ) ?? null,
+    title: primaryRow.invoice_title,
+    description: primaryRow.invoice_description,
+    label: primaryRow.invoice_label,
+    payment_options: sortedRows.map((row) => buildPaymentOption(row)),
+  };
+}
+
+function buildOfferGroupKey(row: StoredInvoiceToken): string {
+  const payload = parseJsonObject(row.payload_json) ?? {};
+
+  return JSON.stringify([
+    normalizeString(row.action_kind) ?? null,
+    normalizeString(row.sku) ?? null,
+    normalizeString(row.scene_session_id) ?? null,
+    normalizeString(
+      typeof payload.feature_key === "string" ? payload.feature_key : null,
+    ) ?? null,
+    normalizePositiveInteger(payload.subscription_days) ?? null,
+    normalizeNonNegativeInteger(payload.sort_order) ?? 100,
+  ]);
+}
+
+function groupOfferItems(rows: StoredInvoiceToken[]): MediaOfferItem[] {
+  const grouped = new Map<string, StoredInvoiceToken[]>();
+
+  for (const row of rows) {
+    const key = buildOfferGroupKey(row);
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.push(row);
+    } else {
+      grouped.set(key, [row]);
+    }
+  }
+
+  return Array.from(grouped.values())
+    .map((rows) => buildOfferItem(rows))
+    .filter((item): item is MediaOfferItem => item != null)
+    .sort(
+      (left, right) =>
+        Number(left.sort_order ?? 100) - Number(right.sort_order ?? 100)
+        || Number(left.subscription_days ?? 0) - Number(right.subscription_days ?? 0),
+    );
+}
+
+function selectLegacyPrimaryRow(rows: StoredInvoiceToken[]): StoredInvoiceToken | null {
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const starsRow = rows.find(
+    (row) => normalizePaymentSource(row.payment_source) === "stars",
+  );
+  return starsRow ?? rows[0] ?? null;
+}
+
+function buildTopLevelPaymentFields(
+  rows: StoredInvoiceToken[],
+): Pick<
+  MediaCommerceDecisionResponse,
+  | "payment_source"
+  | "payment_amount"
+  | "payment_currency"
+  | "checkout_url"
+  | "external_payment_id"
+  | "invoice_token"
+  | "invoice_link"
+  | "payment_options"
+> {
+  const primary = selectLegacyPrimaryRow(rows);
+
+  return {
+    payment_source: primary ? normalizePaymentSource(primary.payment_source) : null,
+    payment_amount:
+      primary != null
+        ? normalizeNonNegativeInteger(primary.amount ?? primary.amount_xtr)
+        : null,
+    payment_currency: primary?.currency ?? null,
+    checkout_url:
+      primary != null
+        ? normalizeString(primary.checkout_url) ?? normalizeString(primary.invoice_link)
+        : null,
+    external_payment_id:
+      primary != null ? normalizeString(primary.external_payment_id) : null,
+    invoice_token: primary?.token ?? null,
+    invoice_link:
+      primary != null && normalizePaymentSource(primary.payment_source) === "stars"
+        ? normalizeString(primary.checkout_url) ?? normalizeString(primary.invoice_link)
+        : null,
+    payment_options: rows.map((row) => buildPaymentOption(row)).sort(
+      (left, right) =>
+        getSourceSortOrder(left.source) - getSourceSortOrder(right.source),
+    ),
+  };
+}
+
+type OperationLogContext = {
   chat_id?: number | null;
   payment_kind?: string | null;
   sku?: string | null;
@@ -178,16 +373,24 @@ function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute 
   if (mode === "finalize_subscription_offer") return "finalize_subscription_offer";
   if (eventType === "callback_query.received") return "callback";
   if (eventType === "payment.pre_checkout.received") return "pre_checkout";
-  if (eventType === "payment.success.received") return "payment_success";
+  if (eventType === "payment.success.received" || eventType === "payment.confirmed.received") {
+    return "payment_success";
+  }
   return "noop";
 }
 
 export class MediaCommerceDecisionService {
-  constructor(private readonly repository: MediaRepository) {}
+  constructor(
+    private readonly repository: MediaRepository,
+    private readonly starsClient: StarsInvoiceClient = new TelegramStarsPaymentAdapter(),
+    private readonly sbpClient: SbpPaymentClient | null = config.SBP_ENABLED
+      ? new SbpPaymentAdapter()
+      : null,
+  ) {}
 
-  private async runRepositoryOperation<T>(
+  private async runOperation<T>(
     operation: string,
-    context: RepositoryOperationLogContext,
+    context: OperationLogContext,
     execute: () => Promise<T>,
   ): Promise<T> {
     const requestId = getRequestContext()?.requestId ?? null;
@@ -208,6 +411,240 @@ export class MediaCommerceDecisionService {
       });
       throw operationError;
     }
+  }
+
+  private async runRepositoryOperation<T>(
+    operation: string,
+    context: OperationLogContext,
+    execute: () => Promise<T>,
+  ): Promise<T> {
+    return this.runOperation(operation, context, execute);
+  }
+
+  private async ensureStarsInvoiceLink(
+    row: StoredInvoiceToken,
+    operationPrefix: string,
+  ): Promise<StoredInvoiceToken> {
+    const existingLink =
+      normalizeString(row.checkout_url)
+      ?? normalizeString(row.invoice_link);
+    if (existingLink) {
+      return {
+        ...row,
+        checkout_url: existingLink,
+        invoice_link: existingLink,
+      };
+    }
+
+    const token = normalizeString(row.token);
+    const chatId = normalizePositiveInteger(row.chat_id);
+    const payload = normalizeString(row.telegram_invoice_payload);
+    const amountXtr = normalizePositiveInteger(row.amount_xtr);
+    const title = normalizeString(row.invoice_title);
+    const description = normalizeString(row.invoice_description);
+    const label = normalizeString(row.invoice_label);
+
+    if (!token || !chatId || !payload || !amountXtr || !title || !description || !label) {
+      throw new MediaCommerceOperationError(
+        "Stored invoice row is incomplete",
+        `${operationPrefix}.createInvoiceLink`,
+        "stars_invoice_creation_failed",
+      );
+    }
+
+    const context = {
+      chat_id: chatId,
+      payment_kind: normalizeString(row.action_kind),
+      sku: normalizeString(row.sku),
+      invoice_status: normalizeString(row.status),
+    };
+    const created = await this.runOperation(
+      `${operationPrefix}.createInvoiceLink`,
+      context,
+      () => this.starsClient.createStarsInvoice({
+        title,
+        description,
+        payload,
+        label,
+        amount_xtr: amountXtr,
+      }),
+    );
+
+    await this.runRepositoryOperation(
+      `${operationPrefix}.storeInvoiceLink`,
+      context,
+      () => this.repository.storeInvoiceLinks([{
+        token,
+        chat_id: chatId,
+        invoice_link: created.invoice_link,
+        checkout_url: created.invoice_link,
+        external_payment_id: null,
+      }]),
+    );
+
+    return {
+      ...row,
+      checkout_url: created.invoice_link,
+      invoice_link: created.invoice_link,
+    };
+  }
+
+  private async ensureSbpCheckout(
+    row: StoredInvoiceToken,
+    operationPrefix: string,
+  ): Promise<StoredInvoiceToken> {
+    const existingCheckout = normalizeString(row.checkout_url);
+    const existingExternalPaymentId = normalizeString(row.external_payment_id);
+    if (existingCheckout && existingExternalPaymentId) {
+      return {
+        ...row,
+        checkout_url: existingCheckout,
+        external_payment_id: existingExternalPaymentId,
+      };
+    }
+
+    if (!this.sbpClient) {
+      throw new MediaCommerceOperationError(
+        "SBP adapter is not configured",
+        `${operationPrefix}.createPayment`,
+        "sbp_payment_creation_failed",
+      );
+    }
+
+    const token = normalizeString(row.token);
+    const chatId = normalizePositiveInteger(row.chat_id);
+    const sku = normalizeString(row.sku);
+    const amountRub = normalizePositiveInteger(row.amount);
+    const title = normalizeString(row.invoice_title);
+    const description = normalizeString(row.invoice_description);
+    if (!token || !chatId || !sku || !amountRub || !title || !description) {
+      throw new MediaCommerceOperationError(
+        "Stored SBP row is incomplete",
+        `${operationPrefix}.createPayment`,
+        "sbp_payment_creation_failed",
+      );
+    }
+
+    const claimContext = {
+      chat_id: chatId,
+      payment_kind: normalizeString(row.action_kind),
+      sku,
+      invoice_status: normalizeString(row.status),
+    };
+    let claim = await this.runRepositoryOperation(
+      `${operationPrefix}.claimSbpCheckoutCreation`,
+      claimContext,
+      () => this.repository.claimSbpCheckoutCreation(token, chatId),
+    );
+    const waitStartedAt = Date.now();
+    let pollIndex = 0;
+
+    while (true) {
+      const claimedCheckout = normalizeString(claim?.checkout_url);
+      const claimedExternalPaymentId = normalizeString(claim?.external_payment_id);
+      if (claimedCheckout && claimedExternalPaymentId) {
+        return {
+          ...row,
+          checkout_url: claimedCheckout,
+          external_payment_id: claimedExternalPaymentId,
+        };
+      }
+
+      if (claim?.claim_acquired) {
+        break;
+      }
+
+      const remainingMs = SBP_CHECKOUT_WAIT_TIMEOUT_MS - (Date.now() - waitStartedAt);
+      if (remainingMs <= 0) {
+        throw new MediaCommerceOperationError(
+          "SBP checkout creation is already in progress",
+          `${operationPrefix}.createPayment`,
+          "sbp_payment_creation_failed",
+        );
+      }
+
+      const delayMs = Math.min(
+        SBP_CHECKOUT_WAIT_BACKOFF_MS[pollIndex] ?? 2000,
+        remainingMs,
+      );
+      pollIndex += 1;
+      await sleep(delayMs);
+
+      claim = await this.runRepositoryOperation(
+        `${operationPrefix}.claimSbpCheckoutCreation`,
+        claimContext,
+        () => this.repository.claimSbpCheckoutCreation(token, chatId),
+      );
+    }
+
+    let created: { external_payment_id: string; checkout_url: string };
+    try {
+      created = await this.runOperation(
+        `${operationPrefix}.createPayment`,
+        {
+          chat_id: chatId,
+          payment_kind: normalizeString(row.action_kind),
+          sku,
+          invoice_status: normalizeString(row.status),
+        },
+        () => this.sbpClient!.createPayment({
+          token,
+          chat_id: chatId,
+          sku,
+          title,
+          description,
+          amount_rub: amountRub,
+          metadata: {
+            scene_session_id: row.scene_session_id,
+            action_kind: row.action_kind ?? null,
+          },
+        }),
+      );
+    } catch (error) {
+      await this.runRepositoryOperation(
+        `${operationPrefix}.releaseSbpCheckoutCreation`,
+        {
+          chat_id: chatId,
+          payment_kind: normalizeString(row.action_kind),
+          sku,
+          invoice_status: normalizeString(row.status),
+        },
+        () => this.repository.releaseSbpCheckoutCreation(token, chatId),
+      );
+      throw error;
+    }
+
+    await this.runRepositoryOperation(
+      `${operationPrefix}.storeCheckout`,
+      {
+        chat_id: chatId,
+        payment_kind: normalizeString(row.action_kind),
+        sku,
+        invoice_status: normalizeString(row.status),
+      },
+      () => this.repository.storeInvoiceLinks([{
+        token,
+        chat_id: chatId,
+        invoice_link: null,
+        checkout_url: created.checkout_url,
+        external_payment_id: created.external_payment_id,
+      }]),
+    );
+
+    return {
+      ...row,
+      checkout_url: created.checkout_url,
+      external_payment_id: created.external_payment_id,
+    };
+  }
+
+  private async ensureStoredPaymentReady(
+    row: StoredInvoiceToken,
+    operationPrefix: string,
+  ): Promise<StoredInvoiceToken> {
+    return normalizePaymentSource(row.payment_source) === "sbp"
+      ? this.ensureSbpCheckout(row, operationPrefix)
+      : this.ensureStarsInvoiceLink(row, operationPrefix);
   }
 
   async evaluate(
@@ -349,8 +786,8 @@ export class MediaCommerceDecisionService {
       );
       const storedSceneUnlockInvoice =
         sceneUnlockPlan && stats.scene_session_id
-          ? await this.repository.upsertInvoiceToken(
-            buildSceneUnlockInvoiceInput({
+          ? await this.repository.upsertInvoiceTokens(
+            buildSceneUnlockPaymentInputs({
               chat_id: stats.chat_id,
               scene_session_id: stats.scene_session_id,
               idempotency_key: `scene:${stats.chat_id}:${stats.scene_session_id}`,
@@ -359,29 +796,25 @@ export class MediaCommerceDecisionService {
               plan: sceneUnlockPlan,
             }),
           )
-          : null;
-
-      const invoiceLink = normalizeString(storedInvoice?.invoice_link);
-      const replyMarkup = invoiceLink
-        ? appendInvoiceButton(
-          { inline_keyboard: [] },
-          String(storedInvoice?.invoice_button_text ?? photoPlan.button_text),
-          invoiceLink,
-        )
-        : { inline_keyboard: [] };
-      const sceneUnlockInvoiceLink =
-        normalizeString(storedSceneUnlockInvoice?.invoice_link);
-      const finalReplyMarkup = sceneUnlockInvoiceLink
-        ? appendInvoiceButton(
-          replyMarkup,
-          String(
-            storedSceneUnlockInvoice?.invoice_button_text
-              ?? sceneUnlockPlan?.button_text
-              ?? config.TELEGRAM_UX_COPY_JSON.media.scene_unlock_button,
-          ),
-          sceneUnlockInvoiceLink,
-        )
-        : replyMarkup;
+          : [];
+      const photoLinkWasReused = normalizeString(storedInvoice?.invoice_link) != null;
+      const [
+        linkedInvoice,
+        linkedSceneUnlockInvoice,
+      ] = await Promise.all([
+        storedInvoice
+          ? this.ensureStoredPaymentReady(storedInvoice, "prepareOffer.photo")
+          : Promise.resolve(null),
+        storedSceneUnlockInvoice.length > 0
+          ? Promise.all(
+            storedSceneUnlockInvoice.map((row) =>
+              this.ensureStoredPaymentReady(row, "prepareOffer.sceneUnlock")),
+          )
+          : Promise.resolve([]),
+      ]);
+      const topLevelPayment = linkedInvoice
+        ? buildTopLevelPaymentFields([linkedInvoice])
+        : buildTopLevelPaymentFields([]);
 
       return {
         ...base,
@@ -392,37 +825,33 @@ export class MediaCommerceDecisionService {
         media_signature: mediaSignature,
         base_price_xtr: basePrice,
         price_required: priceRequired,
-        operation: "prepare_offer_invoice_link",
+        operation: "prepare_offer_ready",
         has_media_offer: true,
-        reply_markup: finalReplyMarkup,
         invoice_kind: "photo",
-        invoice_sku: storedInvoice?.sku ?? photoPlan.sku,
-        invoice_amount: storedInvoice?.amount_xtr ?? photoPlan.amount_xtr,
+        invoice_sku: linkedInvoice?.sku ?? photoPlan.sku,
+        invoice_amount: linkedInvoice?.amount_xtr ?? photoPlan.amount_xtr,
         original_invoice_amount:
-          normalizePositiveInteger(storedInvoice?.payload_json.original_amount_xtr)
+          normalizePositiveInteger(linkedInvoice?.payload_json.original_amount_xtr)
           ?? photoPlan.original_amount_xtr,
         promo_key:
           normalizeString(
-            typeof storedInvoice?.payload_json.promo_key === "string"
-              ? storedInvoice.payload_json.promo_key
+            typeof linkedInvoice?.payload_json.promo_key === "string"
+              ? linkedInvoice.payload_json.promo_key
               : null,
           )
           ?? photoPlan.promo_key,
-        invoice_title: storedInvoice?.invoice_title ?? photoPlan.title,
+        invoice_title: linkedInvoice?.invoice_title ?? photoPlan.title,
         invoice_description:
-          storedInvoice?.invoice_description ?? photoPlan.description,
-        invoice_label: storedInvoice?.invoice_label ?? photoPlan.label,
+          linkedInvoice?.invoice_description ?? photoPlan.description,
+        invoice_label: linkedInvoice?.invoice_label ?? photoPlan.label,
         invoice_button_text:
-          storedInvoice?.invoice_button_text ?? photoPlan.button_text,
+          linkedInvoice?.invoice_button_text ?? photoPlan.button_text,
         invoice_payload_json: invoicePayload,
-        invoice_token: storedInvoice?.token ?? null,
-        invoice_link: invoiceLink,
-        needs_invoice_link: invoiceLink == null,
-        missing_invoice_items:
-          storedSceneUnlockInvoice && sceneUnlockInvoiceLink == null
-            ? [buildMissingInvoiceItem(storedSceneUnlockInvoice)]
-            : undefined,
-        reason: invoiceLink ? "invoice_link_reused" : "invoice_link_required",
+        ...topLevelPayment,
+        scene_unlock_offer_item: linkedSceneUnlockInvoice.length > 0
+          ? buildOfferItem(linkedSceneUnlockInvoice)
+          : null,
+        reason: photoLinkWasReused ? "invoice_link_reused" : "invoice_link_created",
       };
     }
 
@@ -437,6 +866,7 @@ export class MediaCommerceDecisionService {
       base_price_xtr: basePrice,
       next_action: "photo_request",
       requested_action: "photo_request",
+      button_text: config.TELEGRAM_UX_COPY_JSON.media.get_photo_button,
     });
     const insertedCount = await this.repository.upsertCallbackTokens([tokenRow]);
 
@@ -454,12 +884,6 @@ export class MediaCommerceDecisionService {
       token_rows: [tokenRow],
       token_rows_prepared: 1,
       token_rows_inserted: insertedCount,
-      reply_markup: {
-        inline_keyboard: [[{
-          text: config.TELEGRAM_UX_COPY_JSON.media.get_photo_button,
-          callback_data: tokenRow.token,
-        }]],
-      },
       reason: "free_offer_ready",
     };
   }
@@ -514,6 +938,36 @@ export class MediaCommerceDecisionService {
 
     const featureKey = normalizeString(input.feature_key) ?? "fast_scene_skip";
     const actionPlan = resolveActionPlanByFeatureKey(featureKey);
+    const storedFeatureInvoices = actionPlan
+      ? await this.repository.upsertInvoiceTokens(
+        buildFeaturePaymentInputs({
+          chat_id: chatId,
+          scene_session_id: normalizeString(input.scene_session_id),
+          turn_no: normalizeNonNegativeInteger(input.turn_no),
+          scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
+          character_i: normalizePositiveInteger(input.character_i),
+          scene_mode: normalizeString(input.scene_mode),
+          media_signature: normalizeString(input.media_signature),
+          target_message_id: normalizePositiveInteger(input.target_message_id),
+          current_uuid: normalizeLowerString(input.current_uuid),
+          base_price_xtr: normalizePositiveInteger(input.base_price_xtr),
+          idempotency_key: [
+            "feature",
+            chatId,
+            normalizeString(input.scene_session_id) ?? "no-scene",
+            normalizeNonNegativeInteger(input.turn_no) ?? "no-turn",
+            normalizeNonNegativeInteger(input.scene_turn_no) ?? "no-scene-turn",
+            featureKey,
+          ].join(":"),
+          requested_action: `${featureKey}_purchase`,
+          plan: actionPlan,
+        }),
+      )
+      : [];
+    const featureInvoices = await Promise.all(
+      storedFeatureInvoices.map((row) => this.ensureStoredPaymentReady(row, "featureOffer")),
+    );
+    const featureInvoice = selectLegacyPrimaryRow(featureInvoices);
 
     return {
       ...base,
@@ -521,14 +975,28 @@ export class MediaCommerceDecisionService {
       chat_id: chatId,
       feature_key: featureKey,
       invoice_kind: actionPlan ? "feature" : null,
-      invoice_sku: actionPlan?.sku ?? null,
-      invoice_amount: actionPlan?.amount_xtr ?? null,
-      original_invoice_amount: actionPlan?.original_amount_xtr ?? null,
-      promo_key: actionPlan?.promo_key ?? null,
-      invoice_title: actionPlan?.title ?? null,
-      invoice_description: actionPlan?.description ?? null,
-      invoice_label: actionPlan?.label ?? null,
-      invoice_button_text: actionPlan?.button_text ?? null,
+      invoice_sku: featureInvoice?.sku ?? actionPlan?.sku ?? null,
+      invoice_amount: featureInvoice?.amount_xtr ?? actionPlan?.amount_xtr ?? null,
+      original_invoice_amount:
+        normalizePositiveInteger(featureInvoice?.payload_json.original_amount_xtr)
+        ?? actionPlan?.original_amount_xtr
+        ?? null,
+      promo_key:
+        normalizeString(
+          typeof featureInvoice?.payload_json.promo_key === "string"
+            ? featureInvoice.payload_json.promo_key
+            : null,
+        )
+        ?? actionPlan?.promo_key
+        ?? null,
+      invoice_title: featureInvoice?.invoice_title ?? actionPlan?.title ?? null,
+      invoice_description:
+        featureInvoice?.invoice_description ?? actionPlan?.description ?? null,
+      invoice_label: featureInvoice?.invoice_label ?? actionPlan?.label ?? null,
+      invoice_button_text:
+        featureInvoice?.invoice_button_text ?? actionPlan?.button_text ?? null,
+      invoice_payload_json: featureInvoice?.payload_json ?? null,
+      ...buildTopLevelPaymentFields(featureInvoices),
       reason: "feature_offer_required",
     };
   }
@@ -665,9 +1133,7 @@ export class MediaCommerceDecisionService {
     }
 
     let invoiceToken: StoredInvoiceToken | null = null;
-    let sceneUnlockInvoiceToken: StoredInvoiceToken | null = null;
-    let replyMarkup = decision.reply_markup;
-    let operation = decision.operation;
+    let sceneUnlockInvoiceRows: StoredInvoiceToken[] = [];
     let tokenRowsInserted = 0;
     const shouldUpsertPhotoInvoice =
       decision.invoice_kind === "photo"
@@ -711,7 +1177,7 @@ export class MediaCommerceDecisionService {
         : null;
     const sceneUnlockInvoiceInput =
       sceneUnlockPlan && context.scene_session_id && base.chat_id
-        ? buildSceneUnlockInvoiceInput({
+        ? buildSceneUnlockPaymentInputs({
           chat_id: base.chat_id as number,
           scene_session_id: context.scene_session_id,
           idempotency_key: `scene:${base.chat_id}:${context.scene_session_id}`,
@@ -719,7 +1185,7 @@ export class MediaCommerceDecisionService {
           target_message_id: context.target_message_id,
           plan: sceneUnlockPlan,
         })
-        : null;
+        : [];
 
     if (decision.token_rows.length > 0 && shouldUpsertPhotoInvoice) {
       const [insertedCount, storedInvoice] = await Promise.all([
@@ -739,43 +1205,28 @@ export class MediaCommerceDecisionService {
         );
       }
     }
-    if (sceneUnlockInvoiceInput) {
-      sceneUnlockInvoiceToken = await this.repository.upsertInvoiceToken(
+    if (sceneUnlockInvoiceInput.length > 0) {
+      sceneUnlockInvoiceRows = await this.repository.upsertInvoiceTokens(
         sceneUnlockInvoiceInput,
       );
     }
-
-    if (invoiceToken) {
-      const invoiceLink = normalizeString(invoiceToken.invoice_link);
-      if (invoiceLink) {
-        replyMarkup = appendInvoiceButton(
-          replyMarkup,
-          String(
-            invoiceToken?.invoice_button_text
-              ?? decision.invoice_button_text
-              ?? config.TELEGRAM_UX_COPY_JSON.media.pay_button,
-          ),
-          invoiceLink,
-        );
-        operation = "edit_photo";
-      }
-    }
-    const sceneUnlockInvoiceLink = normalizeString(sceneUnlockInvoiceToken?.invoice_link);
-    if (sceneUnlockInvoiceToken && sceneUnlockInvoiceLink) {
-      replyMarkup = appendInvoiceButton(
-        replyMarkup,
-        String(
-          sceneUnlockInvoiceToken.invoice_button_text
-            ?? sceneUnlockPlan?.button_text
-            ?? config.TELEGRAM_UX_COPY_JSON.media.scene_unlock_button,
-        ),
-        sceneUnlockInvoiceLink,
-      );
-    }
+    const [linkedInvoiceToken, linkedSceneUnlockRows] = await Promise.all([
+      invoiceToken
+        ? this.ensureStoredPaymentReady(invoiceToken, "photo.nextPhoto")
+        : Promise.resolve(null),
+      sceneUnlockInvoiceRows.length > 0
+        ? Promise.all(
+          sceneUnlockInvoiceRows.map((row) =>
+            this.ensureStoredPaymentReady(row, "photo.sceneUnlock")),
+        )
+        : Promise.resolve([]),
+    ]);
+    invoiceToken = linkedInvoiceToken;
+    sceneUnlockInvoiceRows = linkedSceneUnlockRows;
 
     return {
       ...base,
-      operation,
+      operation: decision.operation,
       chat_id: context.chat_id,
       scene_session_id: context.scene_session_id,
       turn_no: context.turn_no,
@@ -785,7 +1236,6 @@ export class MediaCommerceDecisionService {
       current_uuid: decision.current_uuid,
       photo_url: decision.photo_url,
       selected_uuid: decision.selected_uuid,
-      reply_markup: replyMarkup,
       token_rows: decision.token_rows,
       token_rows_prepared: decision.token_rows.length,
       token_rows_inserted: tokenRowsInserted,
@@ -813,10 +1263,10 @@ export class MediaCommerceDecisionService {
       invoice_payload_json: decision.invoice_payload_json,
       invoice_button_text:
         invoiceToken?.invoice_button_text ?? decision.invoice_button_text,
-      invoice_token: invoiceToken?.token ?? null,
-      invoice_link: normalizeString(invoiceToken?.invoice_link),
-      needs_invoice_link:
-        invoiceToken != null && normalizeString(invoiceToken.invoice_link) == null,
+      ...buildTopLevelPaymentFields(invoiceToken ? [invoiceToken] : []),
+      scene_unlock_offer_item: sceneUnlockInvoiceRows.length > 0
+        ? buildOfferItem(sceneUnlockInvoiceRows)
+        : null,
       fulfillment_invoice_token: decision.fulfillment_invoice_token,
       caption_text: decision.caption_text,
       caption_entities_json: decision.caption_entities_json,
@@ -824,13 +1274,7 @@ export class MediaCommerceDecisionService {
       subscription_sku: context.subscription_sku,
       subscription_until: context.subscription_until,
       scene_access_active: context.scene_access_active,
-      missing_invoice_items:
-        sceneUnlockInvoiceToken && sceneUnlockInvoiceLink == null
-          ? [buildMissingInvoiceItem(sceneUnlockInvoiceToken)]
-          : undefined,
-      reason: operation === "edit_photo_with_invoice_link"
-        ? "invoice_link_required"
-        : "media_ready",
+      reason: "media_ready",
     };
   }
 
@@ -953,6 +1397,14 @@ export class MediaCommerceDecisionService {
     input: MediaCommerceDecisionRequest,
   ): Promise<MediaCommerceDecisionResponse> {
     const base = buildBaseResponse(input, "payment_success");
+    const inputPaymentSource = normalizePaymentSource(input.payment_source);
+    if (
+      inputPaymentSource === "sbp"
+      || normalizeString(input.event_type) === "payment.confirmed.received"
+    ) {
+      return this.evaluateExternalPaymentSuccess(base, input);
+    }
+
     const chatId = normalizePositiveInteger(input.chat_id);
     const invoicePayload = normalizeString(input.invoice_payload);
     if (!chatId || !invoicePayload) {
@@ -1002,7 +1454,8 @@ export class MediaCommerceDecisionService {
     const existingStatus = normalizeString(loaded.status);
     if (
       !hasExpectedPaymentDetails(
-        loaded.amount_xtr,
+        loaded.amount ?? loaded.amount_xtr,
+        loaded.currency ?? config.MEDIA_PAYMENT_CURRENCY,
         normalizeString(input.payment_currency),
         normalizeNonNegativeInteger(input.payment_total_amount),
       )
@@ -1070,16 +1523,19 @@ export class MediaCommerceDecisionService {
           chat_id: chatId,
           expected_kind: INVOICE_PAYLOAD_KIND,
           expected_action_kind: resolvedAction.action_kind,
+          payment_source: "stars",
           telegram_payment_charge_id: normalizeString(
             input.telegram_payment_charge_id,
           ),
           provider_payment_charge_id: normalizeString(
             input.provider_payment_charge_id,
           ),
+          external_payment_id: null,
           payment_currency: normalizeString(input.payment_currency),
           payment_total_amount: normalizeNonNegativeInteger(
             input.payment_total_amount,
           ),
+          checkout_url: normalizeString(input.checkout_url),
         }),
       );
 
@@ -1158,6 +1614,207 @@ export class MediaCommerceDecisionService {
         payload,
         resolvedAction,
       );
+    }
+
+    return this.fulfillPhotoPayment(base, paidRow, payload);
+  }
+
+  private async evaluateExternalPaymentSuccess(
+    base: MediaCommerceDecisionResponse,
+    input: MediaCommerceDecisionRequest,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const externalPaymentId = normalizeString(input.external_payment_id);
+
+    if (!externalPaymentId) {
+      return {
+        ...base,
+        payment_source: "sbp",
+        reason: "external_payment_id_required",
+      };
+    }
+
+    const loaded = await this.runRepositoryOperation(
+      "payment.external.loadInvoiceTokenByExternalPaymentId",
+      {
+        chat_id: null,
+        payment_kind: null,
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.loadInvoiceTokenByExternalPaymentId(externalPaymentId),
+    );
+    if (!loaded?.found || !loaded.token) {
+      return {
+        ...base,
+        payment_source: "sbp",
+        reason: "payment_not_found",
+      };
+    }
+
+    if (normalizeString(loaded.kind) !== INVOICE_PAYLOAD_KIND) {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        reason: "invoice_kind_invalid",
+      };
+    }
+
+    if (normalizePaymentSource(loaded.payment_source) !== "sbp") {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: normalizePaymentSource(loaded.payment_source),
+        reason: "payment_source_invalid",
+      };
+    }
+
+    const payload = parseJsonObject(loaded.payload_json) ?? {};
+    const loadedToken = loaded.token;
+    const loadedChatId = normalizePositiveInteger(loaded.chat_id);
+    const actionResolution = resolveInvoiceActionResult(payload, loaded.action_kind);
+    if (actionResolution.reason != null || !actionResolution.action) {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        reason: actionResolution.reason ?? "invoice_action_kind_invalid",
+      };
+    }
+
+    const resolvedAction = actionResolution.action;
+    const existingStatus = normalizeString(loaded.status);
+    if (
+      !hasExpectedPaymentDetails(
+        loaded.amount,
+        loaded.currency ?? "RUB",
+        normalizeString(input.payment_currency),
+        normalizeNonNegativeInteger(input.payment_total_amount),
+      )
+    ) {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        payment_kind: resolvedAction.payment_kind,
+        feature_key: resolvedAction.feature_key,
+        reason: "payment_details_mismatch",
+      };
+    }
+
+    if (existingStatus === "fulfilled") {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        payment_kind: resolvedAction.payment_kind,
+        payment_token: loaded.token,
+        feature_key: resolvedAction.feature_key,
+        reason: "payment_already_fulfilled",
+      };
+    }
+
+    let paidRow: PaidInvoiceToken | null = null;
+    if (existingStatus === "paid") {
+      paidRow = toPaidInvoiceToken(loaded);
+    } else if (existingStatus === "invoice_sent") {
+      paidRow = await this.runRepositoryOperation(
+        "payment.external.markInvoicePaid",
+        {
+          chat_id: loadedChatId,
+          payment_kind: resolvedAction.payment_kind,
+          sku: normalizeString(loaded.sku),
+          invoice_status: existingStatus,
+        },
+        () => this.repository.markInvoicePaid({
+          token: loadedToken,
+          chat_id: loadedChatId ?? 0,
+          expected_kind: INVOICE_PAYLOAD_KIND,
+          expected_action_kind: resolvedAction.action_kind,
+          payment_source: "sbp",
+          telegram_payment_charge_id: null,
+          provider_payment_charge_id: null,
+          external_payment_id: externalPaymentId,
+          payment_currency: normalizeString(input.payment_currency),
+          payment_total_amount: normalizeNonNegativeInteger(input.payment_total_amount),
+          checkout_url: normalizeString(input.checkout_url),
+        }),
+      );
+
+      if (!paidRow) {
+        const reloaded = await this.runRepositoryOperation(
+          "payment.external.reloadInvoiceTokenByExternalPaymentId",
+          {
+            chat_id: loadedChatId,
+            payment_kind: resolvedAction.payment_kind,
+            sku: normalizeString(loaded.sku),
+            invoice_status: existingStatus,
+          },
+          () => this.repository.loadInvoiceTokenByExternalPaymentId(externalPaymentId),
+        );
+        const reloadedStatus = normalizeString(reloaded?.status);
+        if (reloadedStatus === "fulfilled") {
+          return {
+            ...base,
+            chat_id: normalizePositiveInteger(reloaded?.chat_id) ?? base.chat_id,
+            scene_session_id: reloaded?.scene_session_id ?? base.scene_session_id,
+            turn_no: normalizeNonNegativeInteger(reloaded?.turn_no) ?? base.turn_no,
+            payment_source: "sbp",
+            payment_kind: resolvedAction.payment_kind,
+            payment_token: normalizeString(reloaded?.token),
+            feature_key: resolvedAction.feature_key,
+            reason: "payment_already_fulfilled",
+          };
+        }
+        if (reloadedStatus === "paid" && reloaded) {
+          paidRow = toPaidInvoiceToken(reloaded);
+        }
+      }
+    } else {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        payment_kind: resolvedAction.payment_kind,
+        feature_key: resolvedAction.feature_key,
+        reason: "invoice_status_invalid",
+      };
+    }
+
+    if (!paidRow) {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        payment_kind: resolvedAction.payment_kind,
+        feature_key: resolvedAction.feature_key,
+        reason: "payment_not_claimed",
+      };
+    }
+
+    if (resolvedAction.payment_kind === "subscription") {
+      return this.fulfillSubscriptionPayment(base, paidRow, resolvedAction);
+    }
+
+    if (resolvedAction.payment_kind === "feature") {
+      if (resolvedAction.feature_key === "scene_unlock") {
+        return this.fulfillSceneAccessPayment(base, paidRow, payload, resolvedAction);
+      }
+      return this.buildFeatureFulfillmentResponse(base, paidRow, payload, resolvedAction);
     }
 
     return this.fulfillPhotoPayment(base, paidRow, payload);
@@ -1523,7 +2180,7 @@ export class MediaCommerceDecisionService {
         : null;
     const invoiceInputs = [
       ...(sceneUnlockPlan && activeSceneSessionId
-        ? [buildSceneUnlockInvoiceInput({
+        ? buildSceneUnlockPaymentInputs({
           chat_id: chatId,
           scene_session_id: activeSceneSessionId,
           idempotency_key: idempotencyKey,
@@ -1532,10 +2189,10 @@ export class MediaCommerceDecisionService {
           turns_today: turnsToday,
           turn_limit_reset_text: turnLimitResetText,
           plan: sceneUnlockPlan,
-        })]
+        })
         : []),
-      ...resolveSubscriptionPlans().map((plan, index) =>
-        buildSubscriptionInvoiceInput({
+      ...resolveSubscriptionPlans().flatMap((plan, index) =>
+        buildSubscriptionPaymentInputs({
           chat_id: chatId,
           idempotency_key: idempotencyKey,
           subscription_offer_reason: subscriptionOfferReason,
@@ -1550,139 +2207,44 @@ export class MediaCommerceDecisionService {
     const upsertedRows = await this.repository.upsertInvoiceTokens(
       invoiceInputs,
     );
-
-    const createdLinks = input.created_invoice_links ?? [];
     const tokenList = upsertedRows.map((row) => row.token);
-    let rows = upsertedRows;
-
-    if (createdLinks.length > 0) {
-      const linkRows = createdLinks
-        .map((item) => {
-          const token = normalizeString(item.token);
-          const invoiceLink = normalizeString(item.invoice_link);
-          const sourceRow = token
-            ? upsertedRows.find((row) => row.token === token)
-            : undefined;
-          if (!token || !invoiceLink || !sourceRow) {
-            return null;
-          }
-          return {
-            token,
-            chat_id: sourceRow.chat_id,
-            invoice_link: invoiceLink,
-          };
-        })
-        .filter(
-          (
-            row,
-          ): row is { token: string; chat_id: number; invoice_link: string } =>
-            row != null,
-        );
-
-      if (linkRows.length > 0) {
-        await this.runRepositoryOperation(
-          "subscription.storeInvoiceLinks",
-          {
-            chat_id: chatId,
-            input_is_array: Array.isArray(linkRows),
-            input_length: linkRows.length,
-          },
-          () => this.repository.storeInvoiceLinks(linkRows),
-        );
-        rows = tokenList.length > 0
-          ? mergeStoredRowsWithMetadata(
-            await this.runRepositoryOperation(
-              "subscription.loadStoredInvoiceTokens",
-              {
-                chat_id: chatId,
-                input_is_array: Array.isArray(tokenList),
-                input_length: tokenList.length,
-              },
-              () => this.repository.loadStoredInvoiceTokens(tokenList),
-            ),
-            upsertedRows,
-          )
-          : upsertedRows;
-      }
-    }
-
-    const missingRows = rows.filter(
-      (row) => normalizeString(row.invoice_link) == null,
+    const rows = await Promise.all(
+      upsertedRows.map((row) =>
+        this.ensureStoredPaymentReady(row, "subscription")),
     );
 
-    if (missingRows.length > 0) {
-      return {
-        ...base,
-        operation: "subscription_offer_links_needed",
-        chat_id: chatId,
-        missing_invoice_links: true,
-        missing_invoice_link_count: missingRows.length,
-        missing_invoice_items: missingRows.map((row) => buildMissingInvoiceItem(row)),
-        subscription_invoice_tokens: tokenList,
-        subscription_offer_reason: subscriptionOfferReason,
-        turn_limit: turnLimit,
-        turns_today: turnsToday,
-        turn_limit_reset_text: turnLimitResetText,
-        subscription_offer_items: rows.map((row) => ({
-          token: row.token,
-          sku: row.sku,
-          action_kind:
-            typeof row.payload_json.action_kind === "string"
-              ? row.payload_json.action_kind
-              : row.action_kind ?? null,
-          payment_kind:
-            row.payload_json.action_kind === "subscription_payment"
-              ? "subscription"
-              : row.payload_json.action_kind === "feature_payment"
-                ? "feature"
-                : null,
-          feature_key:
-            typeof row.payload_json.feature_key === "string"
-              ? row.payload_json.feature_key
-              : null,
-          scene_session_id: row.scene_session_id,
-          sort_order: Number(row.payload_json.sort_order ?? 100),
-          subscription_days:
-            normalizePositiveInteger(row.payload_json.subscription_days) ?? null,
-          invoice_link: normalizeString(row.invoice_link),
-          amount_xtr: Number(row.amount_xtr ?? 0),
-          original_amount_xtr:
-            normalizePositiveInteger(row.payload_json.original_amount_xtr) ?? null,
-          promo_key:
-            normalizeString(
-              typeof row.payload_json.promo_key === "string"
-                ? row.payload_json.promo_key
-                : null,
-            ) ?? null,
-          invoice_title: row.invoice_title,
-          invoice_description: row.invoice_description,
-          invoice_label: row.invoice_label,
-          invoice_button_text: row.invoice_button_text,
-        })),
-        reason: "subscription_invoice_links_required",
-      };
-    }
+    const sortedRows = rows
+      .slice()
+      .sort(
+        (left, right) =>
+          Number(left.payload_json.sort_order ?? 100)
+          - Number(right.payload_json.sort_order ?? 100)
+          || Number(left.payload_json.subscription_days ?? 0)
+          - Number(right.payload_json.subscription_days ?? 0)
+          || getSourceSortOrder(normalizePaymentSource(left.payment_source))
+          - getSourceSortOrder(normalizePaymentSource(right.payment_source)),
+      );
+    const offerMessageId =
+      sortedRows
+        .map((row) => normalizePositiveInteger(row.telegram_invoice_message_id))
+        .find((value) => value != null)
+      ?? null;
 
-    const message = buildSubscriptionOfferMessage(rows);
     return {
       ...base,
       operation: "subscription_offer_ready",
       chat_id: chatId,
-      text: message.text,
-      reply_markup: message.reply_markup,
-      offer_message_id: message.offer_message_id,
+      offer_message_id: offerMessageId,
       offer_sent: false,
-      offer_reused: message.offer_message_id != null,
-      subscription_offer_reason: message.offer_reason,
-      turn_limit: message.turn_limit,
-      turns_today: message.turns_today,
-      turn_limit_reset_text: message.turn_limit_reset_text,
-      subscription_offer_items: message.offer_items,
-      subscription_invoice_tokens: message.subscription_invoice_tokens,
-      missing_invoice_links: false,
-      missing_invoice_link_count: 0,
+      offer_reused: offerMessageId != null,
+      subscription_offer_reason: subscriptionOfferReason,
+      turn_limit: turnLimit,
+      turns_today: turnsToday,
+      turn_limit_reset_text: turnLimitResetText,
+      subscription_offer_items: groupOfferItems(sortedRows),
+      subscription_invoice_tokens: tokenList,
       reason:
-        message.offer_message_id != null
+        offerMessageId != null
           ? "subscription_offer_reused"
           : "subscription_offer_ready",
     };

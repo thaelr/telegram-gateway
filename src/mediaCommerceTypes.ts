@@ -13,16 +13,14 @@ export type MediaCommerceRoute =
 export type MediaCommerceOperation =
   | "prepare_offer_none"
   | "prepare_offer_callback"
-  | "prepare_offer_invoice_link"
+  | "prepare_offer_ready"
   | "finalized_panel"
   | "edit_photo"
-  | "edit_photo_with_invoice_link"
   | "answer_precheckout"
   | "subscription_activated"
   | "scene_access_activated"
   | "feature_offer_required"
   | "feature_fulfillment_required"
-  | "subscription_offer_links_needed"
   | "subscription_offer_ready"
   | "subscription_offer_finalized"
   | "photo_event_stored"
@@ -32,19 +30,44 @@ export type MediaSubscriptionOfferReason =
   | "subscription_command"
   | "daily_turn_limit";
 
-export interface MediaButton {
-  text: string;
-  callback_data?: string;
-  url?: string;
-}
+export type PaymentSource = "stars" | "sbp";
+export type PaymentCurrency = "XTR" | "RUB";
 
-export interface MediaReplyMarkup {
-  inline_keyboard: MediaButton[][];
-}
-
-export interface CreatedInvoiceLink {
+export interface MediaPaymentOption {
   token: string;
-  invoice_link: string;
+  source: PaymentSource;
+  amount: number;
+  currency: PaymentCurrency;
+  checkout_url: string;
+  external_payment_id?: string | null;
+  sku: string | null;
+  action_kind?: string | null;
+  payment_kind?: "photo" | "subscription" | "feature" | null;
+  feature_key?: string | null;
+  scene_session_id?: string | null;
+  sort_order?: number | null;
+  subscription_days?: number | null;
+  original_amount?: number | null;
+  promo_key?: string | null;
+  title: string;
+  description: string;
+  label: string;
+  button_text: string;
+}
+
+export interface MediaOfferItem {
+  sku: string | null;
+  action_kind?: string | null;
+  payment_kind?: "photo" | "subscription" | "feature" | null;
+  feature_key?: string | null;
+  scene_session_id?: string | null;
+  sort_order?: number | null;
+  subscription_days?: number | null;
+  promo_key?: string | null;
+  title: string;
+  description: string;
+  label: string;
+  payment_options: MediaPaymentOption[];
 }
 
 export interface InteractionTokenRow {
@@ -83,7 +106,9 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
   turn_limit_reset_text?: string | null;
   idempotency_key?: string | null;
   original_amount_xtr?: number | null;
+  original_amount_rub?: number | null;
   promo_key?: string | null;
+  action_button_text?: string | null;
 }
 
 export interface MediaCommerceDecisionResponse {
@@ -101,7 +126,6 @@ export interface MediaCommerceDecisionResponse {
   base_price_xtr?: number | null;
   price_required?: number | null;
   has_media_offer?: boolean;
-  reply_markup?: MediaReplyMarkup | null;
   token_rows?: InteractionTokenRow[];
   token_rows_prepared?: number | null;
   token_rows_inserted?: number | null;
@@ -117,7 +141,12 @@ export interface MediaCommerceDecisionResponse {
   invoice_payload_json?: InvoiceTokenPayload | null;
   invoice_token?: string | null;
   invoice_link?: string | null;
-  needs_invoice_link?: boolean;
+  payment_source?: PaymentSource | null;
+  payment_amount?: number | null;
+  payment_currency?: string | null;
+  checkout_url?: string | null;
+  external_payment_id?: string | null;
+  payment_options?: MediaPaymentOption[];
   callback_valid?: boolean;
   callback_answer_text?: string;
   callback_show_alert?: boolean;
@@ -151,44 +180,9 @@ export interface MediaCommerceDecisionResponse {
   offer_message_id?: number | null;
   offer_sent?: boolean;
   offer_reused?: boolean;
-  missing_invoice_links?: boolean;
-  missing_invoice_link_count?: number | null;
-  missing_invoice_items?: Array<{
-    token: string;
-    telegram_invoice_payload: string;
-    amount_xtr: number;
-    action_kind?: string | null;
-    payment_kind?: "subscription" | "feature" | null;
-    feature_key?: string | null;
-    scene_session_id?: string | null;
-    sort_order?: number | null;
-    original_amount_xtr?: number | null;
-    promo_key?: string | null;
-    invoice_title: string;
-    invoice_description: string;
-    invoice_label: string;
-    invoice_button_text: string;
-  }>;
-  subscription_offer_items?: Array<{
-    token: string;
-    sku: string | null;
-    action_kind?: string | null;
-    payment_kind?: "subscription" | "feature" | null;
-    feature_key?: string | null;
-    scene_session_id?: string | null;
-    sort_order?: number | null;
-    subscription_days: number | null;
-    invoice_link: string | null;
-    amount_xtr: number;
-    original_amount_xtr?: number | null;
-    promo_key?: string | null;
-    invoice_title: string;
-    invoice_description: string;
-    invoice_label: string;
-    invoice_button_text: string;
-  }>;
+  scene_unlock_offer_item?: MediaOfferItem | null;
+  subscription_offer_items?: MediaOfferItem[];
   subscription_invoice_tokens?: string[] | null;
-  created_invoice_links?: CreatedInvoiceLink[] | null;
   stored_count?: number | null;
   invoice_rows_updated?: number | null;
   inserted_count?: number | null;
@@ -202,7 +196,6 @@ export interface MediaCommerceDecisionResponse {
   pre_checkout_query_id?: string | null;
   telegram_payment_charge_id?: string | null;
   provider_payment_charge_id?: string | null;
-  payment_currency?: string | null;
   payment_total_amount?: number | null;
   panel_message_id?: number | null;
   panel_text?: string | null;
@@ -285,6 +278,11 @@ export interface StoredInvoiceToken {
   scene_turn_no: number | null;
   payload_json: Record<string, unknown>;
   sku: string | null;
+  payment_source?: PaymentSource | null;
+  amount?: number | null;
+  currency?: PaymentCurrency | null;
+  checkout_url?: string | null;
+  external_payment_id?: string | null;
   amount_xtr: number | null;
   telegram_invoice_payload: string | null;
   expires_at: string | null;
@@ -310,6 +308,11 @@ export interface LoadedInvoiceToken {
   status: string | null;
   action_kind: string | null;
   sku: string | null;
+  payment_source?: PaymentSource | null;
+  amount?: number | null;
+  currency?: PaymentCurrency | null;
+  checkout_url?: string | null;
+  external_payment_id?: string | null;
   amount_xtr: number | null;
   expires_at: string | null;
   telegram_invoice_message_id?: number | null;
@@ -326,6 +329,11 @@ export interface PaidInvoiceToken {
   status: string;
   action_kind: string | null;
   sku: string | null;
+  payment_source?: PaymentSource | null;
+  amount?: number | null;
+  currency?: PaymentCurrency | null;
+  checkout_url?: string | null;
+  external_payment_id?: string | null;
   amount_xtr: number | null;
   telegram_invoice_message_id: number | null;
 }

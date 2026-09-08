@@ -1,7 +1,5 @@
 import type {
-  MediaButton,
   MediaCommerceDecisionResponse,
-  MediaReplyMarkup,
   MediaCommerceRoute,
 } from "../mediaCommerceTypes.js";
 import type { MediaCommerceDecisionRequest } from "./requestSchema.js";
@@ -12,58 +10,7 @@ import {
   normalizePositiveInteger,
   normalizeString,
   parseJsonArray,
-  parseJsonObject,
 } from "./utils.js";
-
-export function cloneReplyMarkup(
-  value: MediaReplyMarkup | Record<string, unknown> | null | undefined,
-): MediaReplyMarkup | null {
-  const objectValue = parseJsonObject(value) ?? null;
-  if (!objectValue) return null;
-  const keyboardRaw = objectValue.inline_keyboard;
-  if (!Array.isArray(keyboardRaw)) {
-    return { inline_keyboard: [] };
-  }
-
-  const inline_keyboard: MediaButton[][] = keyboardRaw
-    .map((row) => {
-      if (!Array.isArray(row)) return [];
-      return row
-        .map((button) => {
-          const source = parseJsonObject(button);
-          const text = normalizeString(String(source?.text ?? ""));
-          if (!source || !text) return null;
-          const callbackData = normalizeString(
-            typeof source.callback_data === "string"
-              ? source.callback_data
-              : null,
-          );
-          const url = normalizeString(
-            typeof source.url === "string" ? source.url : null,
-          );
-          return {
-            text,
-            ...(callbackData ? { callback_data: callbackData } : {}),
-            ...(url ? { url } : {}),
-          };
-        })
-        .filter((button): button is MediaButton => button != null);
-    })
-    .filter((row) => row.length > 0);
-
-  return { inline_keyboard };
-}
-
-export function appendInvoiceButton(
-  markup: MediaReplyMarkup | null,
-  text: string,
-  url: string,
-): MediaReplyMarkup {
-  const base = markup ? cloneReplyMarkup(markup) : { inline_keyboard: [] };
-  const inline_keyboard = base?.inline_keyboard ?? [];
-  inline_keyboard.push([{ text, url }]);
-  return { inline_keyboard };
-}
 
 export function buildBaseResponse(
   input: MediaCommerceDecisionRequest,
@@ -91,8 +38,12 @@ export function buildBaseResponse(
     pre_checkout_query_id: normalizeString(input.pre_checkout_query_id),
     telegram_payment_charge_id: normalizeString(input.telegram_payment_charge_id),
     provider_payment_charge_id: normalizeString(input.provider_payment_charge_id),
+    payment_source: input.payment_source ?? null,
     payment_currency: normalizeString(input.payment_currency),
     payment_total_amount: normalizeNonNegativeInteger(input.payment_total_amount),
+    payment_token: normalizeString(input.payment_token),
+    external_payment_id: normalizeString(input.external_payment_id),
+    checkout_url: normalizeString(input.checkout_url),
     subscription_active: input.subscription_active === true,
     scene_access_active: input.scene_access_active === true,
     feature_key: normalizeFeatureKey(input.feature_key),
@@ -115,7 +66,6 @@ export function buildBaseResponse(
     turn_limit_reset_text: normalizeString(input.turn_limit_reset_text),
     idempotency_key: normalizeString(input.idempotency_key),
     offer_message_id: normalizePositiveInteger(input.offer_message_id),
-    created_invoice_links: input.created_invoice_links ?? null,
     subscription_invoice_tokens: input.subscription_invoice_tokens ?? null,
     source: normalizeString(input.source),
     update_id: normalizePositiveInteger(input.update_id),

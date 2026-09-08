@@ -16,7 +16,6 @@ export const mediaCommerceRequestSchema = z.object({
   panel_message_id: z.coerce.number().int().positive().nullable().optional(),
   price_required: z.coerce.number().int().nonnegative().nullable().optional(),
   has_media_offer: z.boolean().nullable().optional(),
-  reply_markup: z.unknown().nullable().optional(),
   token_rows_prepared: z.coerce.number().int().nonnegative().nullable().optional(),
   callback_data: z.string().trim().nullable().optional(),
   callback_query_id: z.string().trim().nullable().optional(),
@@ -28,8 +27,12 @@ export const mediaCommerceRequestSchema = z.object({
   pre_checkout_query_id: z.string().trim().nullable().optional(),
   telegram_payment_charge_id: z.string().trim().nullable().optional(),
   provider_payment_charge_id: z.string().trim().nullable().optional(),
+  payment_source: z.enum(["stars", "sbp"]).nullable().optional(),
   payment_currency: z.string().trim().nullable().optional(),
   payment_total_amount: z.coerce.number().int().nonnegative().nullable().optional(),
+  payment_token: z.string().trim().nullable().optional(),
+  external_payment_id: z.string().trim().nullable().optional(),
+  checkout_url: z.string().trim().nullable().optional(),
   feature_key: z.string().trim().nullable().optional(),
   invoice_link: z.string().trim().nullable().optional(),
   invoice_token: z.string().trim().nullable().optional(),
@@ -57,15 +60,6 @@ export const mediaCommerceRequestSchema = z.object({
   turns_today: z.coerce.number().int().nonnegative().nullable().optional(),
   turn_limit_reset_text: z.string().trim().nullable().optional(),
   idempotency_key: z.string().trim().nullable().optional(),
-  created_invoice_links: z
-    .array(
-      z.object({
-        token: z.string().trim().min(1),
-        invoice_link: z.string().trim().min(1),
-      }),
-    )
-    .nullable()
-    .optional(),
   offer_message_id: z.coerce.number().int().positive().nullable().optional(),
   subscription_invoice_tokens: z
     .array(z.string().trim().min(1))

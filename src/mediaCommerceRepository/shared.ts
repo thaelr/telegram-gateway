@@ -1,6 +1,12 @@
 import type { JSONValue } from "postgres";
 import { sql } from "../db.js";
-import type { MediaContext, MediaFinalizeResult, MediaOfferStats } from "../mediaCommerceTypes.js";
+import type {
+  MediaContext,
+  MediaFinalizeResult,
+  MediaOfferStats,
+  PaymentCurrency,
+  PaymentSource,
+} from "../mediaCommerceTypes.js";
 
 export type QueryClient = typeof sql;
 
@@ -34,8 +40,13 @@ export type UpsertInvoiceTokenInput = SceneTurnRef & {
   payload_json: Record<string, unknown>;
   action_kind: string;
   sku: string;
-  amount_xtr: number;
-  telegram_invoice_payload: string;
+  payment_source?: PaymentSource | null;
+  amount?: number | null;
+  currency?: PaymentCurrency | null;
+  amount_xtr: number | null;
+  telegram_invoice_payload: string | null;
+  checkout_url?: string | null;
+  external_payment_id?: string | null;
   expires_at: string;
   invoice_title: string;
   invoice_description: string;
@@ -44,6 +55,14 @@ export type UpsertInvoiceTokenInput = SceneTurnRef & {
 };
 
 export type UpsertInvoiceTokenBatchInput = UpsertInvoiceTokenInput[];
+
+export type SbpCheckoutCreationClaim = {
+  token: string | null;
+  chat_id: number | null;
+  checkout_url: string | null;
+  external_payment_id: string | null;
+  claim_acquired: boolean;
+};
 
 export type StorePanelInput = SceneTurnRef & {
   media_signature: string | null;
@@ -80,10 +99,13 @@ export type MarkInvoicePaidInput = {
   chat_id: number;
   expected_kind: string;
   expected_action_kind: string;
-  telegram_payment_charge_id: string | null;
-  provider_payment_charge_id: string | null;
-  payment_currency: string | null;
-  payment_total_amount: number | null;
+  payment_source?: PaymentSource | null;
+  telegram_payment_charge_id?: string | null;
+  provider_payment_charge_id?: string | null;
+  external_payment_id?: string | null;
+  payment_currency?: string | null;
+  payment_total_amount?: number | null;
+  checkout_url?: string | null;
 };
 
 export type ActivateSubscriptionInput = {

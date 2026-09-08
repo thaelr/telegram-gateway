@@ -3,6 +3,7 @@ import { z } from "zod";
 const invoicePlanSchema = z.object({
   sku: z.string().min(1),
   amount_xtr: z.coerce.number().int().positive(),
+  amount_rub: z.coerce.number().int().positive().nullable().optional(),
   title: z.string().min(1),
   description: z.string().min(1),
   label: z.string().min(1),
@@ -22,6 +23,7 @@ const mediaActionPlanSchema = invoicePlanSchema.extend({
 const mediaPromotionItemSchema = z.object({
   sku: z.string().min(1),
   promo_amount_xtr: z.coerce.number().int().positive(),
+  promo_amount_rub: z.coerce.number().int().positive().nullable().optional(),
 });
 
 const mediaPromotionSchema = z.object({
@@ -141,12 +143,22 @@ function parseJsonEnv<T>(
   }
 }
 
-const envSchema = z.object({
+const rawEnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().min(1).default("0.0.0.0"),
   DATABASE_URL: z.string().url(),
   INTERNAL_API_KEY: z.string().min(1),
   INTERNAL_API_KEY_HEADER: z.string().min(1).default("x-internal-api-key"),
+  TG_BOT_TOKEN: z.string().min(1),
+  SBP_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => value?.trim().toLowerCase() === "true"),
+  SBP_API_BASE_URL: z.string().trim().optional(),
+  SBP_MERCHANT_ID: z.string().trim().optional(),
+  SBP_API_SECRET: z.string().trim().optional(),
+  SBP_RETURN_URL: z.string().trim().optional(),
+  SBP_FAILED_URL: z.string().trim().optional(),
   TURN_LIMIT: z.coerce.number().int().positive().default(20),
   BUSINESS_TIME_ZONE: z.string().min(1).default("Europe/Moscow"),
   TURN_LIMIT_RESET_TEXT: z.string().min(1).default("00:00 МСК"),
@@ -206,4 +218,40 @@ const envSchema = z.object({
       )),
 });
 
-export const config = envSchema.parse(process.env);
+const parsedEnv = rawEnvSchema.parse(process.env);
+
+const normalizedSbpConfig = {
+  SBP_ENABLED: parsedEnv.SBP_ENABLED,
+  SBP_API_BASE_URL: parsedEnv.SBP_API_BASE_URL?.trim() || null,
+  SBP_MERCHANT_ID: parsedEnv.SBP_MERCHANT_ID?.trim() || null,
+  SBP_API_SECRET: parsedEnv.SBP_API_SECRET?.trim() || null,
+  SBP_RETURN_URL: parsedEnv.SBP_RETURN_URL?.trim() || null,
+  SBP_FAILED_URL: parsedEnv.SBP_FAILED_URL?.trim() || null,
+} as const;
+
+if (normalizedSbpConfig.SBP_ENABLED) {
+  const missingKeys = [
+    ["SBP_API_BASE_URL", normalizedSbpConfig.SBP_API_BASE_URL],
+    ["SBP_MERCHANT_ID", normalizedSbpConfig.SBP_MERCHANT_ID],
+    ["SBP_API_SECRET", normalizedSbpConfig.SBP_API_SECRET],
+    ["SBP_RETURN_URL", normalizedSbpConfig.SBP_RETURN_URL],
+    ["SBP_FAILED_URL", normalizedSbpConfig.SBP_FAILED_URL],
+  ]
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+
+  if (missingKeys.length > 0) {
+    throw new Error(
+      `SBP is enabled but required env vars are missing: ${missingKeys.join(", ")}`,
+    );
+  }
+
+  z.string().url().parse(normalizedSbpConfig.SBP_API_BASE_URL);
+  z.string().url().parse(normalizedSbpConfig.SBP_RETURN_URL);
+  z.string().url().parse(normalizedSbpConfig.SBP_FAILED_URL);
+}
+
+export const config = {
+  ...parsedEnv,
+  ...normalizedSbpConfig,
+};

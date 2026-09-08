@@ -31,10 +31,13 @@ export class MediaPaymentRepository {
         ${input.chat_id}::bigint,
         ${input.expected_kind}::text,
         ${input.expected_action_kind}::text,
-        ${input.telegram_payment_charge_id}::text,
-        ${input.provider_payment_charge_id}::text,
-        ${input.payment_currency}::text,
-        ${input.payment_total_amount}::integer
+        ${input.payment_source ?? null}::text,
+        ${input.telegram_payment_charge_id ?? null}::text,
+        ${input.provider_payment_charge_id ?? null}::text,
+        ${input.external_payment_id ?? null}::text,
+        ${input.payment_currency ?? null}::text,
+        ${input.payment_total_amount ?? null}::integer,
+        ${input.checkout_url ?? null}::text
       )
     `;
 

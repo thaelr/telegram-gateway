@@ -21,6 +21,7 @@ import {
   type QueryClient,
   type SceneAccessStatus,
   type SceneAccessStatusInput,
+  type SbpCheckoutCreationClaim,
   type StorePanelInput,
   type StorePhotoEventInput,
   type StorePrecheckoutResultInput,
@@ -87,6 +88,14 @@ export class MediaCommerceRepository {
     return this.tokenRepository.loadInvoiceToken(token, chatId);
   }
 
+  async loadInvoiceTokenByExternalPaymentId(
+    externalPaymentId: string | null,
+  ): Promise<LoadedInvoiceToken | null> {
+    return this.tokenRepository.loadInvoiceTokenByExternalPaymentId(
+      externalPaymentId,
+    );
+  }
+
   async storePrecheckoutResult(input: StorePrecheckoutResultInput): Promise<void> {
     return this.paymentRepository.storePrecheckoutResult(input);
   }
@@ -118,9 +127,29 @@ export class MediaCommerceRepository {
   }
 
   async storeInvoiceLinks(
-    items: Array<{ token: string; chat_id: number; invoice_link: string }>,
+    items: Array<{
+      token: string;
+      chat_id: number;
+      invoice_link?: string | null;
+      checkout_url?: string | null;
+      external_payment_id?: string | null;
+    }>,
   ): Promise<number> {
     return this.tokenRepository.storeInvoiceLinks(items);
+  }
+
+  async claimSbpCheckoutCreation(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<SbpCheckoutCreationClaim | null> {
+    return this.tokenRepository.claimSbpCheckoutCreation(token, chatId);
+  }
+
+  async releaseSbpCheckoutCreation(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<number> {
+    return this.tokenRepository.releaseSbpCheckoutCreation(token, chatId);
   }
 
   async loadStoredInvoiceTokens(tokens: string[]): Promise<StoredInvoiceToken[]> {

@@ -5,7 +5,9 @@ import type {
   LoadedCallbackToken,
   LoadedInvoiceToken,
   MediaContext,
+  MediaOfferItem,
   MediaOfferStats,
+  MediaPaymentOption,
   PaidInvoiceToken,
   StoredInvoiceToken,
 } from "../src/mediaCommerceTypes.js";
@@ -98,6 +100,7 @@ const { MediaCommerceDecisionService } = await import(
   "../src/mediaCommerceDecisionService.js"
 );
 const { config } = await import("../src/config.js");
+const { SbpPaymentError } = await import("../src/payments/sbp.js");
 
 type MockRepository = {
   loadOfferStats: (
@@ -136,6 +139,9 @@ type MockRepository = {
     token: string | null,
     chatId: number | null,
   ) => Promise<LoadedInvoiceToken | null>;
+  loadInvoiceTokenByExternalPaymentId: (
+    externalPaymentId: string | null,
+  ) => Promise<LoadedInvoiceToken | null>;
   storePrecheckoutResult: (input: unknown) => Promise<void>;
   markInvoicePaid: (
     input: unknown,
@@ -170,6 +176,20 @@ type MockRepository = {
     invoice_rows_updated: number;
   }>;
   storeInvoiceLinks: (items: unknown) => Promise<number>;
+  claimSbpCheckoutCreation: (
+    token: string | null,
+    chatId: number | null,
+  ) => Promise<{
+    token: string | null;
+    chat_id: number | null;
+    checkout_url: string | null;
+    external_payment_id: string | null;
+    claim_acquired: boolean;
+  } | null>;
+  releaseSbpCheckoutCreation: (
+    token: string | null,
+    chatId: number | null,
+  ) => Promise<number>;
   loadStoredInvoiceTokens: (
     tokens: string[],
   ) => Promise<StoredInvoiceToken[]>;
@@ -178,6 +198,16 @@ type MockRepository = {
     chatId: number,
     offerMessageId: number,
   ) => Promise<number>;
+};
+
+type MockStarsClient = {
+  createStarsInvoice: (input: unknown) => Promise<{ invoice_link: string }>;
+};
+
+type MockSbpClient = {
+  createPayment: (
+    input: unknown,
+  ) => Promise<{ external_payment_id: string; checkout_url: string }>;
 };
 
 function buildOfferStats(
@@ -273,7 +303,7 @@ function buildMediaContext(
 function buildStoredInvoiceToken(
   overrides: Partial<StoredInvoiceToken> = {},
 ): StoredInvoiceToken {
-  return {
+  const base: StoredInvoiceToken = {
     token: "inv_token",
     kind: "invoice_payload",
     chat_id: 101,
@@ -282,6 +312,11 @@ function buildStoredInvoiceToken(
     scene_turn_no: 3,
     payload_json: {},
     sku: "payment_media_1",
+    payment_source: "stars",
+    amount: 10,
+    currency: "XTR",
+    checkout_url: null,
+    external_payment_id: null,
     amount_xtr: 10,
     telegram_invoice_payload: "inv_token",
     expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -294,14 +329,39 @@ function buildStoredInvoiceToken(
     invoice_button_text: "text",
     status: "invoice_sent",
     action_kind: "photo_payment",
-    ...overrides,
+  };
+
+  const merged = { ...base, ...overrides };
+  const paymentSource = merged.payment_source ?? "stars";
+  const checkoutUrl =
+    overrides.checkout_url
+    ?? overrides.invoice_link
+    ?? merged.checkout_url
+    ?? merged.invoice_link
+    ?? null;
+  const amount =
+    overrides.amount
+    ?? (paymentSource === "sbp"
+      ? merged.amount ?? null
+      : overrides.amount_xtr ?? merged.amount_xtr ?? merged.amount ?? null);
+  const currency =
+    overrides.currency
+    ?? (paymentSource === "sbp" ? "RUB" : "XTR");
+
+  return {
+    ...merged,
+    payment_source: paymentSource,
+    amount,
+    currency,
+    checkout_url: checkoutUrl,
+    invoice_link: paymentSource === "stars" ? checkoutUrl : merged.invoice_link ?? null,
   };
 }
 
 function buildLoadedInvoiceToken(
   overrides: Partial<LoadedInvoiceToken> = {},
 ): LoadedInvoiceToken {
-  return {
+  const base: LoadedInvoiceToken = {
     requested_token: "inv_payload",
     token: "inv_payload",
     kind: "invoice_payload",
@@ -322,18 +382,42 @@ function buildLoadedInvoiceToken(
     status: "invoice_sent",
     action_kind: "photo_payment",
     sku: "payment_media_1",
+    payment_source: "stars",
+    amount: 10,
+    currency: "XTR",
+    checkout_url: null,
+    external_payment_id: null,
     amount_xtr: 10,
     expires_at: new Date(Date.now() + 60_000).toISOString(),
     telegram_invoice_message_id: null,
     found: true,
-    ...overrides,
+  };
+
+  const merged = { ...base, ...overrides };
+  const paymentSource = merged.payment_source ?? "stars";
+
+  return {
+    ...merged,
+    payment_source: paymentSource,
+    amount:
+      overrides.amount
+      ?? (paymentSource === "sbp"
+        ? merged.amount ?? null
+        : overrides.amount_xtr ?? merged.amount_xtr ?? merged.amount ?? null),
+    currency:
+      overrides.currency
+      ?? (paymentSource === "sbp" ? "RUB" : "XTR"),
+    checkout_url:
+      overrides.checkout_url
+      ?? merged.checkout_url
+      ?? null,
   };
 }
 
 function buildPaidInvoiceToken(
   overrides: Partial<PaidInvoiceToken> = {},
 ): PaidInvoiceToken {
-  return {
+  const base: PaidInvoiceToken = {
     token: "inv_payload",
     kind: "invoice_payload",
     chat_id: 101,
@@ -353,10 +437,44 @@ function buildPaidInvoiceToken(
     status: "paid",
     action_kind: "photo_payment",
     sku: "payment_media_1",
+    payment_source: "stars",
+    amount: 10,
+    currency: "XTR",
+    checkout_url: null,
+    external_payment_id: null,
     amount_xtr: 10,
     telegram_invoice_message_id: null,
-    ...overrides,
   };
+
+  const merged = { ...base, ...overrides };
+  const paymentSource = merged.payment_source ?? "stars";
+
+  return {
+    ...merged,
+    payment_source: paymentSource,
+    amount:
+      overrides.amount
+      ?? (paymentSource === "sbp"
+        ? merged.amount ?? null
+        : overrides.amount_xtr ?? merged.amount_xtr ?? merged.amount ?? null),
+    currency:
+      overrides.currency
+      ?? (paymentSource === "sbp" ? "RUB" : "XTR"),
+  };
+}
+
+function findPaymentOption(
+  options: MediaPaymentOption[] | null | undefined,
+  source: "stars" | "sbp",
+): MediaPaymentOption | null {
+  return (options ?? []).find((item) => item.source === source) ?? null;
+}
+
+function firstOfferPaymentOption(
+  offerItem: MediaOfferItem | null | undefined,
+  source: "stars" | "sbp" = "stars",
+): MediaPaymentOption | null {
+  return findPaymentOption(offerItem?.payment_options, source);
 }
 
 function buildRequest(
@@ -378,14 +496,23 @@ function buildRequest(
 
 function createRepository(
   overrides: Partial<MockRepository> = {},
+  starsOverrides: Partial<MockStarsClient> = {},
+  sbpOverrides: Partial<MockSbpClient> = {},
 ) {
   const calls = {
     loadMediaContext: 0,
     storePrecheckoutResult: 0,
     storeInvoiceLinks: 0,
     loadStoredInvoiceTokens: 0,
+    createStarsInvoice: 0,
+    createStarsInvoiceInputs: [] as unknown[],
+    createSbpPayment: 0,
+    createSbpPaymentInputs: [] as unknown[],
+    claimSbpCheckoutCreation: 0,
+    releaseSbpCheckoutCreation: 0,
     loadCallbackTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
     loadInvoiceTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
+    loadInvoiceTokenByExternalPaymentIdArgs: [] as Array<string | null>,
     markInvoicePaid: 0,
     activateSubscription: 0,
     activateSceneAccess: 0,
@@ -399,8 +526,56 @@ function createRepository(
     async upsertCallbackTokens(tokenRows) {
       return tokenRows.length;
     },
-    async upsertInvoiceToken() {
-      return buildStoredInvoiceToken();
+    async upsertInvoiceToken(input) {
+      const row = (input ?? {}) as {
+        token?: string;
+        kind?: string;
+        chat_id?: number;
+        scene_session_id?: string | null;
+        turn_no?: number | null;
+        scene_turn_no?: number | null;
+        payload_json?: Record<string, unknown>;
+        action_kind?: string;
+        sku?: string;
+        payment_source?: "stars" | "sbp";
+        amount?: number | null;
+        currency?: "XTR" | "RUB";
+        amount_xtr?: number;
+        telegram_invoice_payload?: string;
+        checkout_url?: string | null;
+        external_payment_id?: string | null;
+        expires_at?: string | null;
+        invoice_title?: string;
+        invoice_description?: string;
+        invoice_label?: string;
+        invoice_button_text?: string;
+        invoice_link?: string | null;
+      };
+
+      return buildStoredInvoiceToken({
+        token: row.token ?? "inv_token",
+        kind: row.kind ?? "invoice_payload",
+        chat_id: row.chat_id ?? 101,
+        scene_session_id: row.scene_session_id ?? "scene-1",
+        turn_no: row.turn_no ?? 5,
+        scene_turn_no: row.scene_turn_no ?? 3,
+        payload_json: row.payload_json ?? {},
+        action_kind: row.action_kind ?? "photo_payment",
+        sku: row.sku ?? "payment_media_1",
+        payment_source: row.payment_source ?? "stars",
+        amount: row.amount ?? row.amount_xtr ?? 10,
+        currency: row.currency ?? (row.payment_source === "sbp" ? "RUB" : "XTR"),
+        checkout_url: row.checkout_url ?? null,
+        external_payment_id: row.external_payment_id ?? null,
+        amount_xtr: row.amount_xtr ?? 10,
+        telegram_invoice_payload: row.telegram_invoice_payload ?? row.token ?? "inv_token",
+        expires_at: row.expires_at ?? new Date(Date.now() + 60_000).toISOString(),
+        invoice_title: row.invoice_title ?? "text",
+        invoice_description: row.invoice_description ?? "text",
+        invoice_label: row.invoice_label ?? "text",
+        invoice_button_text: row.invoice_button_text ?? "text",
+        invoice_link: row.invoice_link ?? null,
+      });
     },
     async upsertInvoiceTokens(inputs) {
       const rows = Array.isArray(inputs) ? inputs : [];
@@ -411,8 +586,13 @@ function createRepository(
           chat_id?: number;
           payload_json?: Record<string, unknown>;
           sku?: string;
+          payment_source?: "stars" | "sbp";
+          amount?: number | null;
+          currency?: "XTR" | "RUB";
           amount_xtr?: number;
           telegram_invoice_payload?: string;
+          checkout_url?: string | null;
+          external_payment_id?: string | null;
           expires_at?: string | null;
           invoice_title?: string;
           invoice_description?: string;
@@ -428,6 +608,11 @@ function createRepository(
           scene_turn_no: null,
           payload_json: row.payload_json ?? {},
           sku: row.sku ?? `payment_plan_${index + 1}`,
+          payment_source: row.payment_source ?? "stars",
+          amount: row.amount ?? row.amount_xtr ?? (index + 1) * 100,
+          currency: row.currency ?? (row.payment_source === "sbp" ? "RUB" : "XTR"),
+          checkout_url: row.checkout_url ?? null,
+          external_payment_id: row.external_payment_id ?? null,
           amount_xtr: row.amount_xtr ?? (index + 1) * 100,
           telegram_invoice_payload:
             row.telegram_invoice_payload ?? row.token ?? `token-${index + 1}`,
@@ -470,6 +655,16 @@ function createRepository(
     async loadInvoiceToken(token, chatId) {
       calls.loadInvoiceTokenArgs.push({ token, chatId });
       return buildLoadedInvoiceToken();
+    },
+    async loadInvoiceTokenByExternalPaymentId(externalPaymentId) {
+      calls.loadInvoiceTokenByExternalPaymentIdArgs.push(externalPaymentId);
+      return buildLoadedInvoiceToken({
+        payment_source: "sbp",
+        amount: 80,
+        currency: "RUB",
+        checkout_url: "https://sbp.example/checkout/1",
+        external_payment_id: "sbp-payment-1",
+      });
     },
     async storePrecheckoutResult() {
       calls.storePrecheckoutResult += 1;
@@ -518,6 +713,20 @@ function createRepository(
       calls.storeInvoiceLinks += 1;
       return 2;
     },
+    async claimSbpCheckoutCreation(token, chatId) {
+      calls.claimSbpCheckoutCreation += 1;
+      return {
+        token,
+        chat_id: chatId,
+        checkout_url: null,
+        external_payment_id: null,
+        claim_acquired: true,
+      };
+    },
+    async releaseSbpCheckoutCreation() {
+      calls.releaseSbpCheckoutCreation += 1;
+      return 1;
+    },
     async loadStoredInvoiceTokens(tokens) {
       calls.loadStoredInvoiceTokens += 1;
       return tokens.map((token, index) =>
@@ -555,9 +764,30 @@ function createRepository(
     },
     ...overrides,
   };
+  const starsClient: MockStarsClient = {
+    async createStarsInvoice(input) {
+      calls.createStarsInvoice += 1;
+      calls.createStarsInvoiceInputs.push(input);
+      return {
+        invoice_link: `https://t.me/generated-invoice-${calls.createStarsInvoice}`,
+      };
+    },
+    ...starsOverrides,
+  };
+  const sbpClient: MockSbpClient = {
+    async createPayment(input) {
+      calls.createSbpPayment += 1;
+      calls.createSbpPaymentInputs.push(input);
+      return {
+        external_payment_id: `sbp-payment-${calls.createSbpPayment}`,
+        checkout_url: `https://sbp.example/checkout/${calls.createSbpPayment}`,
+      };
+    },
+    ...sbpOverrides,
+  };
 
   return {
-    service: new MediaCommerceDecisionService(repository),
+    service: new MediaCommerceDecisionService(repository, starsClient, sbpClient),
     calls,
   };
 }
@@ -614,12 +844,12 @@ test("prepare_offer returns callback offer for free media", async () => {
   assert.equal(first.has_media_offer, true);
   assert.equal(first.token_rows_prepared, 1);
   assert.equal(first.token_rows_inserted, 1);
-  assert.equal(first.reply_markup?.inline_keyboard[0]?.[0]?.text, "text");
+  assert.equal(first.token_rows?.[0]?.payload_json.action_button_text, "text");
   assert.notEqual(first.token_rows?.[0]?.token, second.token_rows?.[0]?.token);
 });
 
 test("prepare_offer reuses stored invoice link for paid media", async () => {
-  const { service } = createRepository({
+  const { service, calls } = createRepository({
     async loadOfferStats() {
       return buildOfferStats({
         delivered_in_scene: 3,
@@ -631,14 +861,37 @@ test("prepare_offer reuses stored invoice link for paid media", async () => {
         invoice_link: "https://t.me/invoice-link",
       });
     },
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input) => {
+        const row = input as {
+          token: string;
+          payload_json: Record<string, unknown>;
+          sku: string;
+          amount_xtr: number;
+          invoice_button_text: string;
+        };
+
+        return buildStoredInvoiceToken({
+          token: row.token,
+          telegram_invoice_payload: row.token,
+          payload_json: row.payload_json,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          invoice_button_text: row.invoice_button_text,
+          invoice_link: "https://t.me/scene-pass",
+          scene_session_id: "scene-1",
+        });
+      });
+    },
   });
 
   const result = await service.evaluate(buildRequest());
 
-  assert.equal(result.operation, "prepare_offer_invoice_link");
-  assert.equal(result.needs_invoice_link, false);
+  assert.equal(result.operation, "prepare_offer_ready");
   assert.equal(result.invoice_link, "https://t.me/invoice-link");
-  assert.equal(result.reply_markup?.inline_keyboard.at(-1)?.[0]?.url, "https://t.me/invoice-link");
+  assert.equal(result.payment_options?.length, 1);
+  assert.equal(findPaymentOption(result.payment_options, "stars")?.checkout_url, "https://t.me/invoice-link");
+  assert.equal(calls.createStarsInvoice, 0);
 });
 
 test("prepare_offer adds scene unlock invoice under paid photo offers", async () => {
@@ -664,23 +917,41 @@ test("prepare_offer adds scene unlock invoice under paid photo offers", async ()
         sku: row.sku,
         amount_xtr: row.amount_xtr,
         invoice_button_text: row.invoice_button_text,
-        invoice_link:
-          row.sku === "payment_action_2"
-            ? "https://t.me/scene-pass"
-            : "https://t.me/photo",
+        invoice_link: "https://t.me/photo",
         scene_session_id:
-          row.sku === "payment_action_2" ? "scene-1" : "scene-1",
+          "scene-1",
+      });
+    },
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input) => {
+        const row = input as {
+          token: string;
+          payload_json: Record<string, unknown>;
+          sku: string;
+          amount_xtr: number;
+          invoice_button_text: string;
+        };
+
+        return buildStoredInvoiceToken({
+          token: row.token,
+          telegram_invoice_payload: row.token,
+          payload_json: row.payload_json,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          invoice_button_text: row.invoice_button_text,
+          invoice_link: "https://t.me/scene-pass",
+          scene_session_id: "scene-1",
+        });
       });
     },
   });
 
   const result = await service.evaluate(buildRequest());
 
-  assert.equal(result.operation, "prepare_offer_invoice_link");
-  assert.deepEqual(
-    result.reply_markup?.inline_keyboard.map((row) => row[0]?.url),
-    ["https://t.me/photo", "https://t.me/scene-pass"],
-  );
+  assert.equal(result.operation, "prepare_offer_ready");
+  assert.equal(result.invoice_link, "https://t.me/photo");
+  assert.equal(firstOfferPaymentOption(result.scene_unlock_offer_item)?.checkout_url, "https://t.me/scene-pass");
+  assert.equal(result.scene_unlock_offer_item?.feature_key, "scene_unlock");
 });
 
 test("prepare_offer makes paid photos free after scene pass", async () => {
@@ -759,7 +1030,7 @@ test("prepare_offer applies active sku promotion to photo invoice pricing", asyn
 
     const result = await service.evaluate(buildRequest());
 
-    assert.equal(result.operation, "prepare_offer_invoice_link");
+    assert.equal(result.operation, "prepare_offer_ready");
     assert.equal(result.invoice_sku, "payment_media_1");
     assert.equal(result.invoice_amount, 7);
     assert.equal(result.original_invoice_amount, 10);
@@ -769,8 +1040,8 @@ test("prepare_offer applies active sku promotion to photo invoice pricing", asyn
   });
 });
 
-test("feature_offer is routed in TS and keeps feature execution context", async () => {
-  const { service } = createRepository();
+test("feature_offer is routed in TS and returns a ready Stars invoice", async () => {
+  const { service, calls } = createRepository();
 
   const result = await service.evaluate(
     buildRequest({
@@ -786,9 +1057,532 @@ test("feature_offer is routed in TS and keeps feature execution context", async 
   assert.equal(result.chat_id, 101);
   assert.equal(result.invoice_sku, "payment_action_1");
   assert.equal(result.invoice_amount, 50);
+  assert.equal(result.invoice_link, "https://t.me/generated-invoice-1");
+  assert.equal(findPaymentOption(result.payment_options, "stars")?.checkout_url, "https://t.me/generated-invoice-1");
   assert.equal(result.character_i, 2);
   assert.equal(result.scene_mode, "fast");
   assert.equal(result.target_message_id, 777);
+  assert.equal(calls.createStarsInvoice, 1);
+});
+
+test("feature_offer returns Stars and SBP payment options when SBP is enabled", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousActionPlans = config.MEDIA_ACTION_PLANS_JSON;
+
+  config.SBP_ENABLED = true;
+  config.MEDIA_ACTION_PLANS_JSON = [
+    {
+      sku: "payment_action_1",
+      feature_key: "fast_scene_skip",
+      amount_xtr: 50,
+      amount_rub: 80,
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "text",
+    },
+  ];
+
+  try {
+    const { service, calls } = createRepository();
+
+    const result = await service.evaluate(
+      buildRequest({
+        interaction_mode: "feature_offer",
+        character_i: 2,
+        scene_mode: "fast",
+        target_message_id: 777,
+      }),
+    );
+
+    assert.equal(result.operation, "feature_offer_required");
+    assert.equal(result.payment_options?.length, 2);
+    assert.equal(findPaymentOption(result.payment_options, "stars")?.checkout_url, "https://t.me/generated-invoice-1");
+    assert.equal(findPaymentOption(result.payment_options, "sbp")?.checkout_url, "https://sbp.example/checkout/1");
+    assert.equal(findPaymentOption(result.payment_options, "sbp")?.amount, 80);
+    assert.equal(findPaymentOption(result.payment_options, "sbp")?.currency, "RUB");
+    assert.equal(calls.createStarsInvoice, 1);
+    assert.equal(calls.createSbpPayment, 1);
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_ACTION_PLANS_JSON = previousActionPlans;
+  }
+});
+
+test("feature_offer reuses stored SBP checkout when another request owns creation claim", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousActionPlans = config.MEDIA_ACTION_PLANS_JSON;
+
+  config.SBP_ENABLED = true;
+  config.MEDIA_ACTION_PLANS_JSON = [
+    {
+      sku: "payment_action_1",
+      feature_key: "fast_scene_skip",
+      amount_xtr: 50,
+      amount_rub: 80,
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "text",
+    },
+  ];
+
+  try {
+    const { service, calls } = createRepository({
+      async claimSbpCheckoutCreation(token, chatId) {
+        calls.claimSbpCheckoutCreation += 1;
+        const hasCheckout = calls.claimSbpCheckoutCreation > 1;
+        return {
+          token,
+          chat_id: chatId,
+          checkout_url: hasCheckout ? "https://sbp.example/checkout/reused" : null,
+          external_payment_id: hasCheckout ? "sbp-payment-reused" : null,
+          claim_acquired: false,
+        };
+      },
+    });
+
+    const result = await service.evaluate(
+      buildRequest({
+        interaction_mode: "feature_offer",
+        character_i: 2,
+        scene_mode: "fast",
+        target_message_id: 777,
+      }),
+    );
+
+    assert.equal(result.operation, "feature_offer_required");
+    assert.equal(findPaymentOption(result.payment_options, "sbp")?.checkout_url, "https://sbp.example/checkout/reused");
+    assert.equal(findPaymentOption(result.payment_options, "sbp")?.external_payment_id, "sbp-payment-reused");
+    assert.equal(calls.claimSbpCheckoutCreation, 2);
+    assert.equal(calls.loadStoredInvoiceTokens, 0);
+    assert.equal(calls.createSbpPayment, 0);
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_ACTION_PLANS_JSON = previousActionPlans;
+  }
+});
+
+test("feature_offer waits longer than the old short poll window and reuses the checkout", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousActionPlans = config.MEDIA_ACTION_PLANS_JSON;
+
+  config.SBP_ENABLED = true;
+  config.MEDIA_ACTION_PLANS_JSON = [
+    {
+      sku: "payment_action_1",
+      feature_key: "fast_scene_skip",
+      amount_xtr: 50,
+      amount_rub: 80,
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "text",
+    },
+  ];
+
+  let checkout: { checkout_url: string; external_payment_id: string } | null = null;
+  let claimHeld = false;
+
+  try {
+    const { service, calls } = createRepository(
+      {
+        async claimSbpCheckoutCreation(token, chatId) {
+          calls.claimSbpCheckoutCreation += 1;
+          return {
+            token,
+            chat_id: chatId,
+            checkout_url: checkout?.checkout_url ?? null,
+            external_payment_id: checkout?.external_payment_id ?? null,
+            claim_acquired: !checkout && !claimHeld ? (claimHeld = true) : false,
+          };
+        },
+        async storeInvoiceLinks(items) {
+          calls.storeInvoiceLinks += 1;
+          const rows = Array.isArray(items) ? items : [];
+          for (const row of rows) {
+            const source = row as {
+              checkout_url?: string | null;
+              external_payment_id?: string | null;
+            };
+            if (source.checkout_url && source.external_payment_id) {
+              checkout = {
+                checkout_url: source.checkout_url,
+                external_payment_id: source.external_payment_id,
+              };
+            }
+          }
+          return rows.length;
+        },
+      },
+      {},
+      {
+        async createPayment(input) {
+          calls.createSbpPayment += 1;
+          calls.createSbpPaymentInputs.push(input);
+          await new Promise((resolve) => setTimeout(resolve, 3100));
+          return {
+            external_payment_id: "sbp-payment-slow-shared",
+            checkout_url: "https://sbp.example/checkout/slow-shared",
+          };
+        },
+      },
+    );
+
+    const [first, second] = await Promise.all([
+      service.evaluate(
+        buildRequest({
+          interaction_mode: "feature_offer",
+          character_i: 2,
+          scene_mode: "fast",
+          target_message_id: 777,
+        }),
+      ),
+      service.evaluate(
+        buildRequest({
+          interaction_mode: "feature_offer",
+          character_i: 2,
+          scene_mode: "fast",
+          target_message_id: 777,
+        }),
+      ),
+    ]);
+
+    assert.equal(first.operation, "feature_offer_required");
+    assert.equal(second.operation, "feature_offer_required");
+    assert.equal(calls.createSbpPayment, 1);
+    assert.equal(
+      findPaymentOption(first.payment_options, "sbp")?.external_payment_id,
+      "sbp-payment-slow-shared",
+    );
+    assert.equal(
+      findPaymentOption(second.payment_options, "sbp")?.external_payment_id,
+      "sbp-payment-slow-shared",
+    );
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_ACTION_PLANS_JSON = previousActionPlans;
+  }
+});
+
+test("feature_offer concurrent requests create at most one SBP provider transaction", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousActionPlans = config.MEDIA_ACTION_PLANS_JSON;
+
+  config.SBP_ENABLED = true;
+  config.MEDIA_ACTION_PLANS_JSON = [
+    {
+      sku: "payment_action_1",
+      feature_key: "fast_scene_skip",
+      amount_xtr: 50,
+      amount_rub: 80,
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "text",
+    },
+  ];
+
+  let checkout: { checkout_url: string; external_payment_id: string } | null = null;
+  let claimHeld = false;
+
+  try {
+    const { service, calls } = createRepository(
+      {
+        async claimSbpCheckoutCreation(token, chatId) {
+          calls.claimSbpCheckoutCreation += 1;
+          return {
+            token,
+            chat_id: chatId,
+            checkout_url: checkout?.checkout_url ?? null,
+            external_payment_id: checkout?.external_payment_id ?? null,
+            claim_acquired: !checkout && !claimHeld ? (claimHeld = true) : false,
+          };
+        },
+        async storeInvoiceLinks(items) {
+          calls.storeInvoiceLinks += 1;
+          const rows = Array.isArray(items) ? items : [];
+          for (const row of rows) {
+            const source = row as {
+              checkout_url?: string | null;
+              external_payment_id?: string | null;
+            };
+            if (source.checkout_url && source.external_payment_id) {
+              checkout = {
+                checkout_url: source.checkout_url,
+                external_payment_id: source.external_payment_id,
+              };
+            }
+          }
+          return rows.length;
+        },
+        async loadStoredInvoiceTokens(tokens) {
+          calls.loadStoredInvoiceTokens += 1;
+          return tokens.map((token) =>
+            buildStoredInvoiceToken({
+              token,
+              kind: "invoice_payload",
+              chat_id: 101,
+              scene_session_id: "scene-1",
+              turn_no: 5,
+              scene_turn_no: 3,
+              payload_json: {
+                action_kind: "feature_payment",
+                feature_key: "fast_scene_skip",
+              },
+              action_kind: "feature_payment",
+              sku: "payment_action_1",
+              payment_source: "sbp",
+              amount: 80,
+              currency: "RUB",
+              amount_xtr: null,
+              telegram_invoice_payload: null,
+              checkout_url: checkout?.checkout_url ?? null,
+              external_payment_id: checkout?.external_payment_id ?? null,
+              invoice_link: null,
+            }),
+          );
+        },
+      },
+      {},
+      {
+        async createPayment(input) {
+          calls.createSbpPayment += 1;
+          calls.createSbpPaymentInputs.push(input);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          return {
+            external_payment_id: "sbp-payment-shared",
+            checkout_url: "https://sbp.example/checkout/shared",
+          };
+        },
+      },
+    );
+
+    const [first, second] = await Promise.all([
+      service.evaluate(
+        buildRequest({
+          interaction_mode: "feature_offer",
+          character_i: 2,
+          scene_mode: "fast",
+          target_message_id: 777,
+        }),
+      ),
+      service.evaluate(
+        buildRequest({
+          interaction_mode: "feature_offer",
+          character_i: 2,
+          scene_mode: "fast",
+          target_message_id: 777,
+        }),
+      ),
+    ]);
+
+    assert.equal(first.operation, "feature_offer_required");
+    assert.equal(second.operation, "feature_offer_required");
+    assert.equal(calls.createSbpPayment, 1);
+    assert.equal(
+      findPaymentOption(first.payment_options, "sbp")?.external_payment_id,
+      "sbp-payment-shared",
+    );
+    assert.equal(
+      findPaymentOption(second.payment_options, "sbp")?.external_payment_id,
+      "sbp-payment-shared",
+    );
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_ACTION_PLANS_JSON = previousActionPlans;
+  }
+});
+
+test("feature_offer waiting request claims SBP checkout creation after creator failure", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousActionPlans = config.MEDIA_ACTION_PLANS_JSON;
+
+  config.SBP_ENABLED = true;
+  config.MEDIA_ACTION_PLANS_JSON = [
+    {
+      sku: "payment_action_1",
+      feature_key: "fast_scene_skip",
+      amount_xtr: 50,
+      amount_rub: 80,
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "text",
+    },
+  ];
+
+  let checkout: { checkout_url: string; external_payment_id: string } | null = null;
+  let claimHeld = false;
+  let shouldFailFirstCreate = true;
+
+  try {
+    const originalConsoleError = console.error;
+    const { service, calls } = createRepository(
+      {
+        async claimSbpCheckoutCreation(token, chatId) {
+          calls.claimSbpCheckoutCreation += 1;
+          return {
+            token,
+            chat_id: chatId,
+            checkout_url: checkout?.checkout_url ?? null,
+            external_payment_id: checkout?.external_payment_id ?? null,
+            claim_acquired: !checkout && !claimHeld ? (claimHeld = true) : false,
+          };
+        },
+        async releaseSbpCheckoutCreation() {
+          calls.releaseSbpCheckoutCreation += 1;
+          claimHeld = false;
+          return 1;
+        },
+        async storeInvoiceLinks(items) {
+          calls.storeInvoiceLinks += 1;
+          const rows = Array.isArray(items) ? items : [];
+          for (const row of rows) {
+            const source = row as {
+              checkout_url?: string | null;
+              external_payment_id?: string | null;
+            };
+            if (source.checkout_url && source.external_payment_id) {
+              checkout = {
+                checkout_url: source.checkout_url,
+                external_payment_id: source.external_payment_id,
+              };
+            }
+          }
+          return rows.length;
+        },
+      },
+      {},
+      {
+        async createPayment(input) {
+          calls.createSbpPayment += 1;
+          calls.createSbpPaymentInputs.push(input);
+          if (shouldFailFirstCreate) {
+            shouldFailFirstCreate = false;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            throw new SbpPaymentError(
+              "SBP payment request timed out",
+              "request",
+              null,
+              "TimeoutError",
+            );
+          }
+          return {
+            external_payment_id: "sbp-payment-recovered",
+            checkout_url: "https://sbp.example/checkout/recovered",
+          };
+        },
+      },
+    );
+
+    console.error = () => {};
+    try {
+      const [first, second] = await Promise.allSettled([
+        service.evaluate(
+          buildRequest({
+            interaction_mode: "feature_offer",
+            character_i: 2,
+            scene_mode: "fast",
+            target_message_id: 777,
+          }),
+        ),
+        service.evaluate(
+          buildRequest({
+            interaction_mode: "feature_offer",
+            character_i: 2,
+            scene_mode: "fast",
+            target_message_id: 777,
+          }),
+        ),
+      ]);
+
+      assert.equal(first.status, "rejected");
+      assert.equal(second.status, "fulfilled");
+      if (second.status === "fulfilled") {
+        assert.equal(second.value.operation, "feature_offer_required");
+        assert.equal(
+          findPaymentOption(second.value.payment_options, "sbp")?.external_payment_id,
+          "sbp-payment-recovered",
+        );
+      }
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    assert.equal(calls.createSbpPayment, 2);
+    assert.equal(calls.releaseSbpCheckoutCreation, 1);
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_ACTION_PLANS_JSON = previousActionPlans;
+  }
+});
+
+test("feature_offer releases SBP checkout creation claim after provider timeout", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousActionPlans = config.MEDIA_ACTION_PLANS_JSON;
+
+  config.SBP_ENABLED = true;
+  config.MEDIA_ACTION_PLANS_JSON = [
+    {
+      sku: "payment_action_1",
+      feature_key: "fast_scene_skip",
+      amount_xtr: 50,
+      amount_rub: 80,
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "text",
+    },
+  ];
+
+  try {
+    const originalConsoleError = console.error;
+    const { service, calls } = createRepository(
+      {},
+      {},
+      {
+        async createPayment(input) {
+          calls.createSbpPayment += 1;
+          calls.createSbpPaymentInputs.push(input);
+          throw new SbpPaymentError(
+            "SBP payment request timed out",
+            "request",
+            null,
+            "TimeoutError",
+          );
+        },
+      },
+    );
+
+    console.error = () => {};
+    try {
+      await assert.rejects(
+        () =>
+          service.evaluate(
+            buildRequest({
+              interaction_mode: "feature_offer",
+              character_i: 2,
+              scene_mode: "fast",
+              target_message_id: 777,
+            }),
+          ),
+        (error: unknown) =>
+          error instanceof Error
+          && "code" in error
+          && error.code === "sbp_payment_creation_failed",
+      );
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    assert.equal(calls.claimSbpCheckoutCreation, 1);
+    assert.equal(calls.createSbpPayment, 1);
+    assert.equal(calls.releaseSbpCheckoutCreation, 1);
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_ACTION_PLANS_JSON = previousActionPlans;
+  }
 });
 
 test("feature_offer applies active sku promotion to action pricing", async () => {
@@ -800,7 +1594,7 @@ test("feature_offer applies active sku promotion to action pricing", async () =>
       ends_at: "2026-09-30T23:59:59+03:00",
     },
   ], async () => {
-    const { service } = createRepository();
+    const { service, calls } = createRepository();
 
     const result = await service.evaluate(
       buildRequest({
@@ -815,6 +1609,8 @@ test("feature_offer applies active sku promotion to action pricing", async () =>
     assert.equal(result.invoice_amount, 35);
     assert.equal(result.original_invoice_amount, 50);
     assert.equal(result.promo_key, "action_sale");
+    assert.equal(result.invoice_link, "https://t.me/generated-invoice-1");
+    assert.equal(calls.createStarsInvoice, 1);
   });
 });
 
@@ -843,8 +1639,8 @@ test("invalid callback returns noop without media context query", async () => {
   assert.equal(calls.loadMediaContext, 0);
 });
 
-test("callback photo request can require invoice link for next media step", async () => {
-  const { service } = createRepository({
+test("callback photo request returns next media step with ready invoice links", async () => {
+  const { service, calls } = createRepository({
     async loadMediaContext() {
       return buildMediaContext({
         delivered_in_scene: 3,
@@ -890,14 +1686,13 @@ test("callback photo request can require invoice link for next media step", asyn
     }),
   );
 
-  assert.equal(result.operation, "edit_photo_with_invoice_link");
-  assert.equal(result.needs_invoice_link, true);
+  assert.equal(result.operation, "edit_photo");
+  assert.equal(result.payment_options?.length, 1);
   assert.match(String(result.invoice_token ?? ""), /^inv_/u);
+  assert.equal(result.invoice_link, "https://t.me/generated-invoice-1");
   assert.equal(result.photo_url, "https://cdn.test/u1.jpg");
-  assert.deepEqual(
-    result.missing_invoice_items?.map((item) => item.feature_key),
-    ["scene_unlock"],
-  );
+  assert.equal(firstOfferPaymentOption(result.scene_unlock_offer_item)?.checkout_url, "https://t.me/generated-invoice-2");
+  assert.equal(calls.createStarsInvoice, 2);
 });
 
 test("callback photo request unlocks through scene pass with zero price", async () => {
@@ -1232,6 +2027,164 @@ test("payment_success activates subscription for subscription invoices", async (
   assert.equal(result.payment_kind, "subscription");
   assert.equal(result.subscription_sku, "payment_plan_2");
   assert.equal(result.offer_message_id, 777);
+  assert.equal(calls.activateSubscription, 1);
+});
+
+test("payment.confirmed.received resolves SBP payment by external id without internal token", async () => {
+  const { service, calls } = createRepository({
+    async loadInvoiceToken() {
+      assert.fail("SBP webhook must not load invoice by internal token");
+    },
+    async loadInvoiceTokenByExternalPaymentId(externalPaymentId) {
+      calls.loadInvoiceTokenByExternalPaymentIdArgs.push(externalPaymentId);
+      return buildLoadedInvoiceToken({
+        token: "telegram:1:payment_plan_2:sbp",
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        payment_source: "sbp",
+        amount: 299,
+        amount_xtr: null,
+        currency: "RUB",
+        external_payment_id: "platega-transaction-1",
+        checkout_url: "https://platega.example/checkout/1",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 14,
+          subscription_sku: "payment_plan_2",
+        },
+      });
+    },
+    async markInvoicePaid() {
+      calls.markInvoicePaid += 1;
+      return buildPaidInvoiceToken({
+        token: "telegram:1:payment_plan_2:sbp",
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        payment_source: "sbp",
+        amount: 299,
+        amount_xtr: null,
+        currency: "RUB",
+        external_payment_id: "platega-transaction-1",
+        checkout_url: "https://platega.example/checkout/1",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 14,
+          subscription_sku: "payment_plan_2",
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.confirmed.received",
+      payment_source: "sbp",
+      external_payment_id: "platega-transaction-1",
+      payment_currency: "RUB",
+      payment_total_amount: 299,
+      payment_token: null,
+      invoice_token: null,
+      chat_id: null,
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_activated");
+  assert.equal(result.payment_source, "sbp");
+  assert.equal(result.payment_kind, "subscription");
+  assert.equal(result.payment_token, "telegram:1:payment_plan_2:sbp");
+  assert.deepEqual(calls.loadInvoiceTokenByExternalPaymentIdArgs, ["platega-transaction-1"]);
+  assert.equal(calls.markInvoicePaid, 1);
+  assert.equal(calls.activateSubscription, 1);
+});
+
+test("payment.confirmed.received is idempotent for duplicate fulfilled SBP webhook", async () => {
+  const { service, calls } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId(externalPaymentId) {
+      calls.loadInvoiceTokenByExternalPaymentIdArgs.push(externalPaymentId);
+      return buildLoadedInvoiceToken({
+        token: "telegram:1:payment_plan_2:sbp",
+        status: "fulfilled",
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        payment_source: "sbp",
+        amount: 299,
+        amount_xtr: null,
+        currency: "RUB",
+        external_payment_id: "platega-transaction-1",
+        checkout_url: "https://platega.example/checkout/1",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 14,
+          subscription_sku: "payment_plan_2",
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.confirmed.received",
+      payment_source: "sbp",
+      external_payment_id: "platega-transaction-1",
+      payment_currency: "RUB",
+      payment_total_amount: 299,
+      payment_token: null,
+      invoice_token: null,
+      chat_id: null,
+    }),
+  );
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.reason, "payment_already_fulfilled");
+  assert.equal(calls.markInvoicePaid, 0);
+  assert.equal(calls.activateSubscription, 0);
+});
+
+test("payment.confirmed.received retries fulfillment for already paid SBP webhook", async () => {
+  const { service, calls } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId(externalPaymentId) {
+      calls.loadInvoiceTokenByExternalPaymentIdArgs.push(externalPaymentId);
+      return buildLoadedInvoiceToken({
+        token: "telegram:1:payment_plan_2:sbp",
+        status: "paid",
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        payment_source: "sbp",
+        amount: 299,
+        amount_xtr: null,
+        currency: "RUB",
+        external_payment_id: "platega-transaction-1",
+        checkout_url: "https://platega.example/checkout/1",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 14,
+          subscription_sku: "payment_plan_2",
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.confirmed.received",
+      payment_source: "sbp",
+      external_payment_id: "platega-transaction-1",
+      payment_currency: "RUB",
+      payment_total_amount: 299,
+      payment_token: null,
+      invoice_token: null,
+      chat_id: null,
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_activated");
+  assert.equal(result.payment_source, "sbp");
+  assert.equal(result.payment_kind, "subscription");
+  assert.equal(result.payment_token, "telegram:1:payment_plan_2:sbp");
+  assert.equal(calls.markInvoicePaid, 0);
   assert.equal(calls.activateSubscription, 1);
 });
 
@@ -1864,7 +2817,7 @@ test("payment_success rejects unknown action kinds", async () => {
   assert.equal(calls.markInvoicePaid, 0);
 });
 
-test("subscription_offer returns missing invoice links when links are not stored yet", async () => {
+test("subscription_offer creates missing invoice links internally", async () => {
   const { service, calls } = createRepository({
     async upsertInvoiceTokens(inputs) {
       return (Array.isArray(inputs) ? inputs : []).map((input) => {
@@ -1899,8 +2852,7 @@ test("subscription_offer returns missing invoice links when links are not stored
     }),
   );
 
-  assert.equal(result.operation, "subscription_offer_links_needed");
-  assert.equal(result.missing_invoice_link_count, 3);
+  assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.subscription_invoice_tokens?.length, 3);
   assert.deepEqual(result.subscription_invoice_tokens, [
     "telegram:1:scene-1:payment_action_2",
@@ -1915,7 +2867,17 @@ test("subscription_offer returns missing invoice links when links are not stored
     result.subscription_offer_items?.map((item) => item.sort_order),
     [0, 1, 2],
   );
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
+    [
+      "https://t.me/generated-invoice-1",
+      "https://t.me/generated-invoice-2",
+      "https://t.me/generated-invoice-3",
+    ],
+  );
+  assert.equal(calls.storeInvoiceLinks, 3);
   assert.equal(calls.loadStoredInvoiceTokens, 0);
+  assert.equal(calls.createStarsInvoice, 3);
 });
 
 test("subscription_offer does not include scene pass without active scene", async () => {
@@ -1945,7 +2907,7 @@ test("subscription_offer does not include scene pass without active scene", asyn
     }),
   );
 
-  assert.equal(result.operation, "subscription_offer_links_needed");
+  assert.equal(result.operation, "subscription_offer_ready");
   assert.deepEqual(result.subscription_invoice_tokens, [
     "telegram:no-scene:payment_plan_2",
     "telegram:no-scene:payment_plan_3",
@@ -1977,7 +2939,7 @@ test("subscription_offer does not include scene pass after purchase", async () =
     }),
   );
 
-  assert.equal(result.operation, "subscription_offer_links_needed");
+  assert.equal(result.operation, "subscription_offer_ready");
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => item.sku),
     ["payment_plan_2", "payment_plan_3"],
@@ -2009,7 +2971,7 @@ test("subscription_offer keeps subscription priority over scene pass", async () 
     }),
   );
 
-  assert.equal(result.operation, "subscription_offer_links_needed");
+  assert.equal(result.operation, "subscription_offer_ready");
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => item.sku),
     ["payment_plan_2", "payment_plan_3"],
@@ -2076,9 +3038,6 @@ test("subscription_offer applies promotions by sku and last active match wins", 
         capturedRows.push(...rows);
         return rows;
       },
-      async loadStoredInvoiceTokens() {
-        return capturedRows;
-      },
     });
 
     const result = await service.evaluate(
@@ -2092,27 +3051,23 @@ test("subscription_offer applies promotions by sku and last active match wins", 
       }),
     );
 
-    assert.equal(result.operation, "subscription_offer_links_needed");
+    assert.equal(result.operation, "subscription_offer_ready");
     assert.deepEqual(
-      result.missing_invoice_items?.map((item) => item.amount_xtr),
+      result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.amount),
       [70, 140, 180],
     );
     assert.deepEqual(
-      result.missing_invoice_items?.map((item) => item.original_amount_xtr),
+      result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.original_amount),
       [80, 200, 300],
     );
     assert.deepEqual(
-      result.missing_invoice_items?.map((item) => item.promo_key),
+      result.subscription_offer_items?.map((item) => item.promo_key),
       ["all_sale", "plan_2_override", "all_sale"],
-    );
-    assert.deepEqual(
-      result.subscription_offer_items?.map((item) => item.amount_xtr),
-      [70, 140, 180],
     );
   });
 });
 
-test("subscription_offer becomes ready after created links are persisted", async () => {
+test("subscription_offer persists freshly created links without reload loop", async () => {
   const { service, calls } = createRepository({
     async upsertInvoiceTokens(inputs) {
       return (Array.isArray(inputs) ? inputs : []).map((input) => {
@@ -2128,39 +3083,6 @@ test("subscription_offer becomes ready after created links are persisted", async
         });
       });
     },
-    async loadStoredInvoiceTokens(tokens) {
-      calls.loadStoredInvoiceTokens += 1;
-      return tokens.map((token, index) =>
-        buildStoredInvoiceToken({
-          token,
-          sku:
-            index === 0 ? "payment_action_2" : index === 1 ? "payment_plan_2" : "payment_plan_3",
-          amount_xtr: index === 0 ? 80 : index === 1 ? 200 : 300,
-          invoice_title:
-            "text",
-          invoice_description: "text",
-          invoice_label:
-            "text",
-          invoice_button_text:
-            "text",
-          payload_json: {
-            action_kind: index === 0 ? "feature_payment" : "subscription_payment",
-            feature_key: index === 0 ? "scene_unlock" : null,
-            sort_order: index,
-            subscription_days: index === 0 ? null : index === 1 ? 14 : 30,
-            subscription_offer_reason: "daily_turn_limit",
-            turn_limit: 20,
-            turns_today: 20,
-            turn_limit_reset_text: "00:00 МСК",
-          },
-          invoice_link: `https://t.me/invoice-${index + 1}`,
-          telegram_invoice_message_id: 900,
-          scene_session_id: null,
-          turn_no: null,
-          scene_turn_no: null,
-        }),
-      );
-    },
   });
 
   const result = await service.evaluate(
@@ -2171,29 +3093,23 @@ test("subscription_offer becomes ready after created links are persisted", async
       turns_today: 20,
       turn_limit: 20,
       turn_limit_reset_text: "00:00 МСК",
-      created_invoice_links: [
-        {
-          token: "telegram:1:scene-1:payment_action_2",
-          invoice_link: "https://t.me/invoice-1",
-        },
-        {
-          token: "telegram:1:payment_plan_2",
-          invoice_link: "https://t.me/invoice-2",
-        },
-        {
-          token: "telegram:1:payment_plan_3",
-          invoice_link: "https://t.me/invoice-3",
-        },
-      ],
     }),
   );
 
-  assert.equal(calls.storeInvoiceLinks, 1);
-  assert.equal(calls.loadStoredInvoiceTokens, 1);
+  assert.equal(calls.storeInvoiceLinks, 3);
+  assert.equal(calls.loadStoredInvoiceTokens, 0);
+  assert.equal(calls.createStarsInvoice, 3);
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.equal(result.offer_reused, true);
-  assert.equal(result.text, "text");
-  assert.equal(result.reply_markup?.inline_keyboard.length, 3);
+  assert.equal(result.offer_reused, false);
+  assert.equal(result.text, undefined);
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
+    [
+      "https://t.me/generated-invoice-1",
+      "https://t.me/generated-invoice-2",
+      "https://t.me/generated-invoice-3",
+    ],
+  );
 });
 
 test("subscription_offer reuses stored invoice links from batch upsert without reload", async () => {
@@ -2254,8 +3170,17 @@ test("subscription_offer reuses stored invoice links from batch upsert without r
 
   assert.equal(calls.storeInvoiceLinks, 0);
   assert.equal(calls.loadStoredInvoiceTokens, 0);
+  assert.equal(calls.createStarsInvoice, 0);
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.equal(result.reply_markup?.inline_keyboard.length, 3);
+  assert.equal(result.text, undefined);
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
+    [
+      "https://t.me/reused-1",
+      "https://t.me/reused-2",
+      "https://t.me/reused-3",
+    ],
+  );
   assert.equal(result.offer_reused, true);
 });
 
@@ -2287,8 +3212,8 @@ test("prepare_offer uses random unique invoice tokens for photo payments", async
   const first = await service.evaluate(buildRequest());
   const second = await service.evaluate(buildRequest());
 
-  assert.equal(first.operation, "prepare_offer_invoice_link");
-  assert.equal(second.operation, "prepare_offer_invoice_link");
+  assert.equal(first.operation, "prepare_offer_ready");
+  assert.equal(second.operation, "prepare_offer_ready");
   assert.notEqual(first.invoice_token, second.invoice_token);
 });
 

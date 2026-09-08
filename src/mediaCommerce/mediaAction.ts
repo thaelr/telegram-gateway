@@ -1,12 +1,11 @@
 import type {
   InteractionTokenRow,
   InvoiceTokenPayload,
-  MediaButton,
   MediaContext,
-  MediaReplyMarkup,
   MediaUnlockedItem,
 } from "../mediaCommerceTypes.js";
 import { config } from "../config.js";
+import type { UpsertInvoiceTokenInput } from "../mediaCommerceRepository/shared.js";
 import {
   buildRandomToken,
   INVOICE_TTL_MS,
@@ -26,11 +25,10 @@ export const PHOTO_ACTIONS = new Set([
 ]);
 
 export type MediaActionDecision = {
-  operation: "noop" | "edit_photo" | "edit_photo_with_invoice_link";
+  operation: "noop" | "edit_photo";
   photo_url: string | null;
   selected_uuid: string | null;
   current_uuid: string | null;
-  reply_markup: MediaReplyMarkup | null;
   token_rows: InteractionTokenRow[];
   log_event_type: string | null;
   access_mode: string | null;
@@ -124,6 +122,7 @@ export function buildCallbackTokenRow(input: {
   base_price_xtr: number;
   next_action: string;
   requested_action: string;
+  button_text?: string | null;
   extraPayload?: Record<string, unknown>;
 }): InteractionTokenRow {
   const token = buildRandomToken("btn");
@@ -148,6 +147,7 @@ export function buildCallbackTokenRow(input: {
         input.next_action === "photo_regen"
           ? "photo_regen"
           : input.requested_action,
+      action_button_text: normalizeString(input.button_text) ?? null,
       ...(input.extraPayload ?? {}),
     },
     status: "active",
@@ -174,7 +174,7 @@ export function buildPhotoInvoiceInput(input: {
   invoice_label: string;
   invoice_button_text: string;
   payload_json: InvoiceTokenPayload;
-}) {
+}): UpsertInvoiceTokenInput {
   const token = buildRandomToken("inv");
 
   return {
@@ -191,8 +191,13 @@ export function buildPhotoInvoiceInput(input: {
     },
     action_kind: "photo_payment",
     sku: input.invoice_sku,
+    payment_source: "stars",
+    amount: input.amount_xtr,
+    currency: "XTR",
     amount_xtr: input.amount_xtr,
     telegram_invoice_payload: token,
+    checkout_url: null,
+    external_payment_id: null,
     expires_at: new Date(Date.now() + INVOICE_TTL_MS).toISOString(),
     invoice_title: input.invoice_title,
     invoice_description: input.invoice_description,
@@ -235,7 +240,6 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
     photo_url: null,
     selected_uuid: null,
     current_uuid: currentUuid,
-    reply_markup: null,
     token_rows: [],
     log_event_type: null,
     access_mode: null,
@@ -351,12 +355,10 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
     base_price_xtr: basePrice,
   });
   const tokenRows: InteractionTokenRow[] = [];
-  const keyboard: MediaButton[][] = [];
 
   const addCallbackRow = (
     buttons: Array<{ text: string; action: string; extraPayload?: Record<string, unknown> }>,
   ) => {
-    const rowButtons: MediaButton[] = [];
     for (const button of buttons) {
       const tokenRow = buildCallbackTokenRow({
         chat_id: context.chat_id,
@@ -370,16 +372,10 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
         next_action: button.action,
         requested_action:
           normalizeString(context.requested_action) ?? "photo_request",
+        button_text: button.text,
         extraPayload: button.extraPayload,
       });
       tokenRows.push(tokenRow);
-      rowButtons.push({
-        text: button.text,
-        callback_data: tokenRow.token,
-      });
-    }
-    if (rowButtons.length > 0) {
-      keyboard.push(rowButtons);
     }
   };
 
@@ -405,7 +401,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   if (unseenAfter > 0) {
     if (nextPrice > 0) {
       const photoPlan = resolvePhotoPlanByAmount(nextPrice);
-      finalOperation = "edit_photo_with_invoice_link";
+      finalOperation = "edit_photo";
       invoiceKind = "photo";
       invoiceSku = photoPlan.sku;
       invoiceAmount = photoPlan.amount_xtr;
@@ -444,7 +440,6 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
     photo_url: selected.photo_url,
     selected_uuid: selected.uuid,
     current_uuid: selected.uuid,
-    reply_markup: { inline_keyboard: keyboard },
     token_rows: tokenRows,
     log_event_type: logEventType,
     access_mode: accessMode,

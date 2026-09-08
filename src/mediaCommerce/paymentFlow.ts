@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import type {
   LoadedInvoiceToken,
+  PaymentSource,
   PaidInvoiceToken,
 } from "../mediaCommerceTypes.js";
 import {
@@ -18,6 +19,7 @@ const SUPPORTED_PAYMENT_ACTIONS = new Set([
 ]);
 
 const SUPPORTED_FEATURE_KEYS = new Set(["fast_scene_skip", "scene_unlock"]);
+const SUPPORTED_PAYMENT_SOURCES = new Set(["stars", "sbp"]);
 
 export const INVOICE_PAYLOAD_KIND = "invoice_payload";
 
@@ -72,15 +74,26 @@ export function normalizeFeatureKey(
 }
 
 export function hasExpectedPaymentDetails(
-  amountXtr: number | null | undefined,
+  amount: number | null | undefined,
+  expectedCurrency: string | null | undefined,
   currency: string | null | undefined,
   totalAmount: number | null | undefined,
 ): boolean {
   return (
-    normalizeString(currency) === config.MEDIA_PAYMENT_CURRENCY
+    normalizeString(currency) === normalizeString(expectedCurrency)
     && normalizeNonNegativeInteger(totalAmount) != null
-    && normalizeNonNegativeInteger(totalAmount) === normalizeNonNegativeInteger(amountXtr)
+    && normalizeNonNegativeInteger(totalAmount) === normalizeNonNegativeInteger(amount)
   );
+}
+
+export function normalizePaymentSource(
+  value: string | null | undefined,
+): PaymentSource | null {
+  const normalized = normalizeString(value);
+  if (!normalized || !SUPPORTED_PAYMENT_SOURCES.has(normalized)) {
+    return null;
+  }
+  return normalized as PaymentSource;
 }
 
 export function resolveInvoiceAction(
@@ -202,6 +215,16 @@ export function toPaidInvoiceToken(
     status: normalizeString(row.status) ?? "paid",
     action_kind: normalizeString(row.action_kind),
     sku: normalizeString(row.sku),
+    payment_source: normalizePaymentSource(row.payment_source),
+    amount: normalizeNonNegativeInteger(row.amount),
+    currency:
+      normalizeString(row.currency) === "RUB"
+        ? "RUB"
+        : normalizeString(row.currency) === "XTR"
+          ? "XTR"
+          : null,
+    checkout_url: normalizeString(row.checkout_url),
+    external_payment_id: normalizeString(row.external_payment_id),
     amount_xtr: normalizeNonNegativeInteger(row.amount_xtr),
     telegram_invoice_message_id:
       normalizePositiveInteger(row.telegram_invoice_message_id) ?? null,
@@ -266,7 +289,8 @@ export function validatePrecheckout(
 
   if (
     !hasExpectedPaymentDetails(
-      tokenRow.amount_xtr,
+      tokenRow.amount ?? tokenRow.amount_xtr,
+      tokenRow.currency ?? config.MEDIA_PAYMENT_CURRENCY,
       normalizeString(paymentCurrency),
       normalizeNonNegativeInteger(paymentTotalAmount),
     )

@@ -348,6 +348,44 @@ test("loadInvoiceToken delegates to media_load_interaction_token and preserves i
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_interaction_token\(/u);
 });
 
+test("loadInvoiceTokenByExternalPaymentId delegates to dedicated lookup and preserves invoice fields", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      requested_token: "platega-transaction-1",
+      token: "inv-sbp-1",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      payload_json: { action_kind: "subscription_payment" },
+      status: "invoice_sent",
+      action_kind: "subscription_payment",
+      sku: "payment_plan_2",
+      payment_source: "sbp",
+      amount: 299,
+      currency: "RUB",
+      checkout_url: "https://pay.platega.example/redirect/1",
+      external_payment_id: "platega-transaction-1",
+      amount_xtr: null,
+      expires_at: "2026-08-14T10:00:00.000Z",
+      telegram_invoice_message_id: 777,
+      found: true,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.loadInvoiceTokenByExternalPaymentId(
+    "platega-transaction-1",
+  );
+
+  assert.equal(result?.token, "inv-sbp-1");
+  assert.equal(result?.payment_source, "sbp");
+  assert.equal(result?.amount, 299);
+  assert.equal(result?.currency, "RUB");
+  assert.equal(result?.external_payment_id, "platega-transaction-1");
+  assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_invoice_token_by_external_payment_id\(/u);
+});
+
 test("upsertCallbackTokens delegates to media_upsert_callback_tokens", async () => {
   const { query, calls } = createTaggedQueryStub([[{ inserted_count: 2 }]]);
   const repository = new MediaCommerceRepository(query as never);
@@ -420,6 +458,36 @@ test("storeInvoiceLinks delegates to media_store_invoice_links", async () => {
     { token: "inv-1", chat_id: 101, invoice_link: "https://example.com/1" },
     { token: "inv-2", chat_id: 101, invoice_link: "https://example.com/2" },
   ]);
+});
+
+test("claimSbpCheckoutCreation delegates to media_claim_sbp_checkout_creation", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      token: "inv-sbp-1",
+      chat_id: 101,
+      checkout_url: null,
+      external_payment_id: null,
+      claim_acquired: true,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.claimSbpCheckoutCreation("inv-sbp-1", 101);
+
+  assert.equal(result?.token, "inv-sbp-1");
+  assert.equal(result?.chat_id, 101);
+  assert.equal(result?.claim_acquired, true);
+  assert.match(calls[0]?.sql ?? "", /FROM public\.media_claim_sbp_checkout_creation\(/u);
+});
+
+test("releaseSbpCheckoutCreation delegates to media_release_sbp_checkout_creation", async () => {
+  const { query, calls } = createTaggedQueryStub([[{ updated_count: 1 }]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.releaseSbpCheckoutCreation("inv-sbp-1", 101);
+
+  assert.equal(result, 1);
+  assert.match(calls[0]?.sql ?? "", /public\.media_release_sbp_checkout_creation/u);
 });
 
 test("loadStoredInvoiceTokens delegates to media_load_stored_invoice_tokens", async () => {
@@ -762,6 +830,9 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       payload_json: { subscription_days: 14 },
       action_kind: "subscription_payment",
       sku: "payment_plan_2",
+      payment_source: "stars",
+      amount: 100,
+      currency: "XTR",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
       expires_at: "2026-08-14T10:00:00.000Z",
@@ -780,6 +851,9 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       payload_json: { subscription_days: 30 },
       action_kind: "subscription_payment",
       sku: "payment_plan_2",
+      payment_source: "stars",
+      amount: 200,
+      currency: "XTR",
       amount_xtr: 200,
       telegram_invoice_payload: "inv-2",
       expires_at: "2026-08-14T10:00:00.000Z",

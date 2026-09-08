@@ -9,6 +9,7 @@ import {
   asJsonValue,
   type QueryClient,
   parseJsonObject,
+  type SbpCheckoutCreationClaim,
   type UpsertInvoiceTokenBatchInput,
   type UpsertInvoiceTokenInput,
 } from "./shared.js";
@@ -19,8 +20,15 @@ export class MediaInteractionTokenRepository {
   private normalizeInvoiceTokenInput(
     input: UpsertInvoiceTokenInput,
   ): UpsertInvoiceTokenInput {
+    const paymentSource = input.payment_source ?? "stars";
+    const amount = input.amount ?? input.amount_xtr ?? null;
+    const currency = input.currency ?? (paymentSource === "sbp" ? "RUB" : "XTR");
+
     return {
       ...input,
+      payment_source: paymentSource,
+      amount,
+      currency,
       payload_json: parseJsonObject(input.payload_json) ?? {},
     };
   }
@@ -52,8 +60,13 @@ export class MediaInteractionTokenRepository {
         ${sql.json(asJsonValue(normalizedInput.payload_json))},
         ${normalizedInput.action_kind}::text,
         ${normalizedInput.sku}::text,
+        ${normalizedInput.payment_source ?? null}::text,
+        ${normalizedInput.amount ?? null}::integer,
+        ${normalizedInput.currency ?? null}::text,
         ${normalizedInput.amount_xtr}::integer,
         ${normalizedInput.telegram_invoice_payload}::text,
+        ${normalizedInput.checkout_url ?? null}::text,
+        ${normalizedInput.external_payment_id ?? null}::text,
         ${normalizedInput.expires_at}::timestamptz,
         ${normalizedInput.invoice_title}::text,
         ${normalizedInput.invoice_description}::text,
@@ -136,6 +149,47 @@ export class MediaInteractionTokenRepository {
           status: row.status,
           action_kind: row.action_kind,
           sku: row.sku ?? null,
+          payment_source: row.payment_source ?? null,
+          amount: row.amount ?? null,
+          currency: row.currency ?? null,
+          checkout_url: row.checkout_url ?? null,
+          external_payment_id: row.external_payment_id ?? null,
+          amount_xtr: row.amount_xtr ?? null,
+          expires_at: row.expires_at,
+          telegram_invoice_message_id: row.telegram_invoice_message_id ?? null,
+          found: row.found,
+        }
+      : null;
+  }
+
+  async loadInvoiceTokenByExternalPaymentId(
+    externalPaymentId: string | null,
+  ): Promise<LoadedInvoiceToken | null> {
+    const rows = await this.query<LoadedInvoiceToken[]>`
+      SELECT *
+      FROM public.media_load_invoice_token_by_external_payment_id(
+        ${externalPaymentId}::text
+      )
+    `;
+
+    const row = rows[0] ?? null;
+    return row
+      ? {
+          requested_token: row.requested_token,
+          token: row.token,
+          kind: row.kind,
+          chat_id: row.chat_id,
+          scene_session_id: row.scene_session_id,
+          turn_no: row.turn_no,
+          payload_json: row.payload_json,
+          status: row.status,
+          action_kind: row.action_kind,
+          sku: row.sku ?? null,
+          payment_source: row.payment_source ?? null,
+          amount: row.amount ?? null,
+          currency: row.currency ?? null,
+          checkout_url: row.checkout_url ?? null,
+          external_payment_id: row.external_payment_id ?? null,
           amount_xtr: row.amount_xtr ?? null,
           expires_at: row.expires_at,
           telegram_invoice_message_id: row.telegram_invoice_message_id ?? null,
@@ -145,11 +199,46 @@ export class MediaInteractionTokenRepository {
   }
 
   async storeInvoiceLinks(
-    items: Array<{ token: string; chat_id: number; invoice_link: string }>,
+    items: Array<{
+      token: string;
+      chat_id: number;
+      invoice_link?: string | null;
+      checkout_url?: string | null;
+      external_payment_id?: string | null;
+    }>,
   ): Promise<number> {
     const rows = await this.query<Array<{ updated_count: number }>>`
       SELECT public.media_store_invoice_links(
         ${sql.json(asJsonValue(items))}
+      ) AS updated_count
+    `;
+
+    return rows[0]?.updated_count ?? 0;
+  }
+
+  async claimSbpCheckoutCreation(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<SbpCheckoutCreationClaim | null> {
+    const rows = await this.query<SbpCheckoutCreationClaim[]>`
+      SELECT *
+      FROM public.media_claim_sbp_checkout_creation(
+        ${token}::text,
+        ${chatId}::bigint
+      )
+    `;
+
+    return rows[0] ?? null;
+  }
+
+  async releaseSbpCheckoutCreation(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<number> {
+    const rows = await this.query<Array<{ updated_count: number }>>`
+      SELECT public.media_release_sbp_checkout_creation(
+        ${token}::text,
+        ${chatId}::bigint
       ) AS updated_count
     `;
 
