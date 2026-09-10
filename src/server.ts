@@ -25,6 +25,7 @@ const routerRequestSchema = z.object({
   route_target: z.string().trim().nullable().optional(),
   message_type: z.string().trim().nullable().optional(),
   user_message: z.string().nullable().optional(),
+  raw_update: z.unknown().nullable().optional(),
   inbound_message_id: z.coerce.number().int().positive().nullable().optional(),
   character_i: z.coerce.number().int().positive().nullable().optional(),
   scene_mode: z.string().trim().nullable().optional(),

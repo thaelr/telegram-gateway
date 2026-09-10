@@ -643,6 +643,7 @@ test("commerce callback preserves panel text and entities passthrough", async ()
   });
 
   const entities = [{ type: "bold", offset: 0, length: 4 }];
+  const rawUpdate = { callback_query: { id: "cbq-1" } };
   const result = await service.evaluate(
     buildRequest({
       route_target: null,
@@ -650,6 +651,7 @@ test("commerce callback preserves panel text and entities passthrough", async ()
       callback_data: "btn_token",
       panel_text: "text",
       panel_entities_json: entities,
+      raw_update: rawUpdate,
       user_message: null,
     }),
   );
@@ -658,6 +660,7 @@ test("commerce callback preserves panel text and entities passthrough", async ()
   assert.equal(result.decision, "noop");
   assert.equal(result.panel_text, "text");
   assert.deepEqual(result.panel_entities_json, entities);
+  assert.deepEqual(result.raw_update, rawUpdate);
   assert.equal(calls.length, 0);
 });
 

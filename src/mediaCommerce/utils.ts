@@ -73,15 +73,26 @@ export const INVOICE_TTL_MS = 30 * 60 * 1000;
 
 export function extractPanelFromRawUpdate(
   rawUpdate: unknown,
-): { panel_text: string | null; panel_entities_json: unknown[] | null } {
+): {
+  panel_text: string | null;
+  panel_entities_json: unknown[] | null;
+  message_kind: "text" | "caption" | null;
+  reply_markup: Record<string, unknown> | null;
+} {
   const update = parseJsonObject(rawUpdate);
   const callback = parseJsonObject(update?.callback_query);
   const message = parseJsonObject(callback?.message);
+  const messageKind =
+    typeof message?.text === "string"
+      ? "text"
+      : typeof message?.caption === "string"
+        ? "caption"
+        : null;
   const text =
     typeof message?.text === "string"
-      ? normalizeString(message.text)
+      ? (message.text.length > 0 ? message.text : null)
       : typeof message?.caption === "string"
-        ? normalizeString(message.caption)
+        ? (message.caption.length > 0 ? message.caption : null)
         : null;
   const entities =
     parseJsonArray(message?.entities)
@@ -91,5 +102,7 @@ export function extractPanelFromRawUpdate(
   return {
     panel_text: text,
     panel_entities_json: entities,
+    message_kind: messageKind,
+    reply_markup: parseJsonObject(message?.reply_markup),
   };
 }

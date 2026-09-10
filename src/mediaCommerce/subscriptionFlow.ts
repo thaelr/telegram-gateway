@@ -27,12 +27,28 @@ function buildPaymentToken(baseToken: string, source: PaymentSource): string {
   return source === "stars" ? baseToken : `${baseToken}:${source}`;
 }
 
+function applyPaymentTemplate(
+  template: string,
+  values: Record<string, string | number>,
+): string {
+  return Object.entries(values).reduce(
+    (result, [key, value]) => result.replaceAll(`{${key}}`, String(value)),
+    template,
+  );
+}
+
 function buildStarsButtonText(amountXtr: number): string {
-  return `⭐ ${Math.trunc(amountXtr)}`;
+  return applyPaymentTemplate(
+    config.TELEGRAM_UX_COPY_JSON.payment_ui.stars_payment_button,
+    { amount: Math.trunc(amountXtr) },
+  );
 }
 
 function buildSbpButtonText(amountRub: number): string {
-  return `Оплатить ${Math.trunc(amountRub)} ₽`;
+  return applyPaymentTemplate(
+    config.TELEGRAM_UX_COPY_JSON.payment_ui.sbp_payment_button,
+    { amount: Math.trunc(amountRub) },
+  );
 }
 
 function buildPaymentInputRow(input: {

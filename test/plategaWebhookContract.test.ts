@@ -42,9 +42,20 @@ async function loadWorkflowRaw(): Promise<string> {
     "..",
     "..",
     "Актуальные",
-    "RUS Media Commerce Flow v3.json",
+    "RUS Media Commerce Flow v4.json",
   );
   return readFile(workflowPath, "utf8");
+}
+
+async function loadRouterWorkflow(): Promise<Workflow> {
+  const workflowPath = path.resolve(
+    process.cwd(),
+    "..",
+    "..",
+    "Актуальные",
+    "RUS Telegram Update Router v8 TS.json",
+  );
+  return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
 }
 
 async function loadNormalizeSbpWebhookCode(): Promise<string> {
@@ -77,6 +88,24 @@ async function loadWorkflowNodeCode(nodeName: string): Promise<string> {
   assert.ok(jsCode.length > 0);
 
   return jsCode;
+}
+
+async function runWorkflowCodeNode(
+  nodeName: string,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const jsCode = await loadWorkflowNodeCode(nodeName);
+  const evaluator = new Function("$json", jsCode) as (
+    json: Record<string, unknown>,
+  ) => Array<{ json: Record<string, unknown> }>;
+  const result = evaluator(input);
+
+  assert.ok(Array.isArray(result));
+  assert.equal(result.length, 1);
+  assert.equal(typeof result[0]?.json, "object");
+  assert.ok(result[0]?.json != null);
+
+  return result[0].json;
 }
 
 async function runNormalizeSbpWebhookContract(
@@ -191,6 +220,16 @@ test("Normalize SBP webhook event maps Platega CONFIRMED callback to gateway con
   assert.equal("chat_id" in normalized, false);
 });
 
+test("router workflow sends raw_update to gateway router decision", async () => {
+  const workflow = await loadRouterWorkflow();
+  const node = Array.isArray(workflow.nodes)
+    ? workflow.nodes.find((entry) => entry?.name === "Evaluate router decision")
+    : null;
+  const body = String(node?.parameters?.body ?? "");
+
+  assert.match(body, /raw_update:\s*\$json\.raw_update\s*\?\?\s*null/u);
+});
+
 test("Normalize SBP webhook event ignores non-CONFIRMED Platega callback", async () => {
   const normalized = await runNormalizeSbpWebhookContract(
     {
@@ -301,6 +340,7 @@ test("subscription offer topology refreshes an existing offer message instead of
   const editNode = nodes.find((entry) => entry.name === "Edit subscription offer message");
   const prepareNode = nodes.find((entry) => entry.name === "Prepare refreshed subscription offer result");
   const fallbackNode = nodes.find((entry) => entry.name === "Need subscription edit fallback?");
+  const callbackAnswerNode = nodes.find((entry) => entry.name === "Need subscription offer callback answer?");
 
   assert.equal(editNode?.type, "n8n-nodes-base.httpRequest");
   assert.equal(editNode?.continueOnFail, true);
@@ -311,6 +351,10 @@ test("subscription offer topology refreshes an existing offer message instead of
   assert.match(String(prepareNode?.parameters?.jsCode ?? ""), /message to edit not found/i);
   assert.match(String(prepareNode?.parameters?.jsCode ?? ""), /message can't be edited/i);
   assert.equal(fallbackNode?.type, "n8n-nodes-base.if");
+  assert.match(
+    String(callbackAnswerNode?.parameters?.conditions?.conditions?.[0]?.leftValue ?? ""),
+    /callback_query_id != null/u,
+  );
   assert.deepEqual(
     workflow.connections?.["Subscription offer already sent?"]?.main?.map((output) =>
       output.map((entry) => entry.node)
@@ -335,6 +379,187 @@ test("subscription offer topology refreshes an existing offer message instead of
     [
       ["Send subscription offer message"],
       ["Prepare finalize subscription offer input"],
+    ],
+  );
+});
+
+test("feature payment reveal builder preserves entities and adds only hint italic entity", async () => {
+  const result = await runWorkflowCodeNode("Build feature payment options reveal", {
+    chat_id: 101,
+    target_message_id: 777,
+    inbound_message_id: 777,
+    callback_data: "btn_reveal",
+    message_kind: "text",
+    panel_text: "Original bold",
+    panel_entities_json: [{ type: "bold", offset: 0, length: 8 }],
+    feature_payment_hint_text: "*Hint text",
+    current_reply_markup: {
+      inline_keyboard: [
+        [{ text: "Пропустить прелюдию", callback_data: "btn_reveal" }],
+        [{ text: "Other", callback_data: "btn_other" }],
+      ],
+    },
+    payment_options: [
+      {
+        source: "sbp",
+        checkout_url: "https://pay.example/sbp",
+        button_text: "80 ₽ (СБП)",
+      },
+      {
+        source: "stars",
+        checkout_url: "https://t.me/invoice",
+        button_text: "⭐ 50",
+      },
+    ],
+  });
+
+  assert.equal(result.text, "Original bold\n\n*Hint text");
+  assert.deepEqual(result.entities, [
+    { type: "bold", offset: 0, length: 8 },
+    { type: "italic", offset: 15, length: 10 },
+  ]);
+  assert.deepEqual(result.reply_markup, {
+    inline_keyboard: [
+      [
+        { text: "80 ₽ (СБП)", url: "https://pay.example/sbp" },
+        { text: "⭐ 50", url: "https://t.me/invoice" },
+      ],
+      [{ text: "Other", callback_data: "btn_other" }],
+    ],
+  });
+});
+
+test("subscription offer builder keeps text price-free and toggles only subscription rows", async () => {
+  const result = await runWorkflowCodeNode("Build subscription offer message", {
+    callback_data: "btn_toggle_stars",
+    selected_payment_source: "stars",
+    text: "Subscription body only",
+    payment_ui: {
+      pay_with_stars_button: "⭐ Оплатить звёздами",
+      pay_with_sbp_button: "Оплатить через СБП",
+      subscription_stars_plan_button: "{label} · ⭐ {amount}",
+      subscription_sbp_plan_button: "{label} · {amount} ₽",
+    },
+    payment_source_toggle_tokens: {
+      stars: "btn_toggle_stars",
+      sbp: "btn_toggle_sbp",
+    },
+    current_reply_markup: {
+      inline_keyboard: [
+        [{ text: "Разблокировать чат", callback_data: "btn_scene_unlock" }],
+        [
+          { text: "80 ₽ (СБП)", url: "https://pay.example/scene-sbp" },
+          { text: "⭐ 80", url: "https://t.me/scene-stars" },
+        ],
+        [{ text: "7 дней · 199 ₽", url: "https://pay.example/sub-7-sbp" }],
+        [{ text: "30 дней · 499 ₽", url: "https://pay.example/sub-30-sbp" }],
+        [{ text: "⭐ Оплатить звёздами", callback_data: "btn_toggle_stars" }],
+        [{ text: "Other", callback_data: "btn_other" }],
+      ],
+    },
+    subscription_offer_items: [
+      {
+        sku: "payment_plan_7",
+        payment_kind: "subscription",
+        sort_order: 1,
+        subscription_days: 7,
+        label: "7 дней",
+        payment_options: [
+          {
+            source: "sbp",
+            amount: 199,
+            currency: "RUB",
+            checkout_url: "https://pay.example/sub-7-sbp",
+          },
+          {
+            source: "stars",
+            amount: 100,
+            currency: "XTR",
+            checkout_url: "https://t.me/sub-7-stars",
+          },
+        ],
+      },
+      {
+        sku: "payment_plan_30",
+        payment_kind: "subscription",
+        sort_order: 2,
+        subscription_days: 30,
+        label: "30 дней",
+        payment_options: [
+          {
+            source: "sbp",
+            amount: 499,
+            currency: "RUB",
+            checkout_url: "https://pay.example/sub-30-sbp",
+          },
+          {
+            source: "stars",
+            amount: 300,
+            currency: "XTR",
+            checkout_url: "https://t.me/sub-30-stars",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(result.text, "Subscription body only");
+  assert.deepEqual(result.reply_markup, {
+    inline_keyboard: [
+      [{ text: "Разблокировать чат", callback_data: "btn_scene_unlock" }],
+      [
+        { text: "80 ₽ (СБП)", url: "https://pay.example/scene-sbp" },
+        { text: "⭐ 80", url: "https://t.me/scene-stars" },
+      ],
+      [{ text: "7 дней · ⭐ 100", url: "https://t.me/sub-7-stars" }],
+      [{ text: "30 дней · ⭐ 300", url: "https://t.me/sub-30-stars" }],
+      [{ text: "Оплатить через СБП", callback_data: "btn_toggle_sbp" }],
+      [{ text: "Other", callback_data: "btn_other" }],
+    ],
+  });
+});
+
+test("payment UI reveal topology answers callback and edits text or caption", async () => {
+  const workflow = await loadWorkflow();
+  const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
+  const answerNode = nodes.find((entry) => entry.name === "Answer payment UI callback");
+  const buildNode = nodes.find((entry) => entry.name === "Build feature payment options reveal");
+  const routeNode = nodes.find((entry) => entry.name === "Route feature payment edit target");
+  const editTextNode = nodes.find((entry) => entry.name === "Edit feature payment text");
+  const editCaptionNode = nodes.find((entry) => entry.name === "Edit feature payment caption");
+
+  assert.equal(answerNode?.type, "n8n-nodes-base.httpRequest");
+  assert.match(String(answerNode?.parameters?.url ?? ""), /answerCallbackQuery/u);
+  assert.equal(buildNode?.type, "n8n-nodes-base.code");
+  assert.match(String(buildNode?.parameters?.jsCode ?? ""), /current_reply_markup/u);
+  assert.match(String(buildNode?.parameters?.jsCode ?? ""), /feature_payment_hint_text/u);
+  assert.doesNotMatch(String(buildNode?.parameters?.jsCode ?? ""), /<i>|parse_mode/u);
+  assert.equal(routeNode?.type, "n8n-nodes-base.switch");
+  assert.match(String(editTextNode?.parameters?.url ?? ""), /editMessageText/u);
+  assert.match(String(editCaptionNode?.parameters?.url ?? ""), /editMessageCaption/u);
+  assert.doesNotMatch(String(editTextNode?.parameters?.body ?? ""), /parse_mode/u);
+  assert.match(String(editTextNode?.parameters?.body ?? ""), /entities/u);
+  assert.doesNotMatch(String(editCaptionNode?.parameters?.body ?? ""), /parse_mode/u);
+  assert.match(String(editCaptionNode?.parameters?.body ?? ""), /caption_entities/u);
+  assert.deepEqual(
+    workflow.connections?.["Route operation group"]?.main?.[6]?.map((entry) => entry.node),
+    ["Answer payment UI callback"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Answer payment UI callback"]?.main?.[0]?.map((entry) => entry.node),
+    ["Build feature payment options reveal"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Build feature payment options reveal"]?.main?.[0]?.map((entry) => entry.node),
+    ["Route feature payment edit target"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Route feature payment edit target"]?.main?.map((output) =>
+      output.map((entry) => entry.node)
+    ),
+    [
+      ["Edit feature payment text"],
+      ["Edit feature payment caption"],
     ],
   );
 });

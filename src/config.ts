@@ -70,6 +70,16 @@ const telegramUxCopySchema = z.object({
     fast_scene_skip_button: textSchema,
     scene_unlock_button: textSchema,
   }).optional(),
+  payment_ui: z.object({
+    fast_scene_skip_hint: textSchema,
+    scene_unlock_hint: textSchema,
+    pay_with_stars_button: textSchema,
+    pay_with_sbp_button: textSchema,
+    stars_payment_button: textSchema,
+    sbp_payment_button: textSchema,
+    subscription_stars_plan_button: textSchema,
+    subscription_sbp_plan_button: textSchema,
+  }),
   scene_mode: z.object({
     choice: textSchema,
     roleplay_button: textSchema,

@@ -326,6 +326,7 @@ export class AccessDecisionService {
       route_target: input.route_target ?? null,
       message_type: input.message_type ?? null,
       user_message: input.user_message ?? null,
+      raw_update: input.raw_update ?? null,
       inbound_message_id: input.inbound_message_id ?? null,
       callback_data: input.callback_data ?? null,
       callback_query_id: input.callback_query_id ?? null,

@@ -24,6 +24,7 @@ export type MediaCommerceOperation =
   | "subscription_activated"
   | "scene_access_activated"
   | "feature_offer_required"
+  | "feature_payment_options_revealed"
   | "feature_fulfillment_required"
   | "subscription_offer_ready"
   | "subscription_offer_finalized"
@@ -36,6 +37,18 @@ export type MediaSubscriptionOfferReason =
 
 export type PaymentSource = "stars" | "sbp";
 export type PaymentCurrency = "XTR" | "RUB";
+export type TelegramMessageKind = "text" | "caption";
+
+export interface PaymentUiCopy {
+  fast_scene_skip_hint: string;
+  scene_unlock_hint: string;
+  pay_with_stars_button: string;
+  pay_with_sbp_button: string;
+  stars_payment_button: string;
+  sbp_payment_button: string;
+  subscription_stars_plan_button: string;
+  subscription_sbp_plan_button: string;
+}
 
 export interface MediaPaymentOption {
   token: string;
@@ -182,6 +195,12 @@ export interface MediaCommerceDecisionResponse {
   turns_today?: number | null;
   turn_limit_reset_text?: string | null;
   text?: string | null;
+  message_kind?: TelegramMessageKind | null;
+  current_reply_markup?: unknown;
+  feature_payment_hint_text?: string | null;
+  selected_payment_source?: PaymentSource | null;
+  payment_source_toggle_tokens?: Partial<Record<PaymentSource, string>> | null;
+  payment_ui?: PaymentUiCopy | null;
   offer_message_id?: number | null;
   offer_sent?: boolean;
   offer_reused?: boolean;

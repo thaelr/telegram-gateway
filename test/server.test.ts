@@ -205,6 +205,7 @@ test("router endpoint is registered and uses the same auth and validation wiring
   let receivedChatId: number | null = null;
   let receivedPanelText: string | null = null;
   let receivedPanelEntities: unknown = null;
+  let receivedRawUpdate: unknown = null;
   const app = buildApp({
     logger: false,
     accessDecisionService: {
@@ -212,6 +213,7 @@ test("router endpoint is registered and uses the same auth and validation wiring
         receivedChatId = input.chat_id;
         receivedPanelText = input.panel_text ?? null;
         receivedPanelEntities = input.panel_entities_json ?? null;
+        receivedRawUpdate = input.raw_update ?? null;
         return {
           decision: "noop",
           action: "ignore",
@@ -224,6 +226,7 @@ test("router endpoint is registered and uses the same auth and validation wiring
           idempotency_key: null,
           panel_text: input.panel_text ?? null,
           panel_entities_json: input.panel_entities_json ?? null,
+          raw_update: input.raw_update ?? null,
         };
       },
     },
@@ -250,6 +253,7 @@ test("router endpoint is registered and uses the same auth and validation wiring
       command: "/menu",
       panel_text: "panel caption",
       panel_entities_json: [{ type: "italic", offset: 0, length: 5 }],
+      raw_update: { callback_query: { id: "cbq-1" } },
     },
   });
 
@@ -257,6 +261,8 @@ test("router endpoint is registered and uses the same auth and validation wiring
   assert.equal(receivedChatId, 42);
   assert.equal(receivedPanelText, "panel caption");
   assert.deepEqual(receivedPanelEntities, [{ type: "italic", offset: 0, length: 5 }]);
+  assert.deepEqual(receivedRawUpdate, { callback_query: { id: "cbq-1" } });
   assert.equal(response.json().chat_id, 42);
   assert.equal(response.json().panel_text, "panel caption");
+  assert.deepEqual(response.json().raw_update, { callback_query: { id: "cbq-1" } });
 });

@@ -1216,6 +1216,9 @@ test("feature_offer is routed in TS and returns a ready Stars invoice", async ()
   assert.equal(result.invoice_amount, 50);
   assert.equal(result.invoice_link, "https://t.me/generated-invoice-1");
   assert.equal(findPaymentOption(result.payment_options, "stars")?.checkout_url, "https://t.me/generated-invoice-1");
+  assert.equal(result.token_rows?.length, 1);
+  assert.equal(result.token_rows?.[0]?.action_kind, "reveal_feature_payment_options");
+  assert.equal(result.token_rows?.[0]?.payload_json.action_button_text, "text");
   assert.equal(result.character_i, 2);
   assert.equal(result.scene_mode, "fast");
   assert.equal(result.target_message_id, 777);
@@ -1295,6 +1298,18 @@ test("feature_offer returns Stars and SBP payment options when SBP is enabled", 
     assert.equal(findPaymentOption(result.payment_options, "sbp")?.checkout_url, "https://sbp.example/checkout/1");
     assert.equal(findPaymentOption(result.payment_options, "sbp")?.amount, 80);
     assert.equal(findPaymentOption(result.payment_options, "sbp")?.currency, "RUB");
+    assert.equal(findPaymentOption(result.payment_options, "stars")?.button_text, "star 50");
+    assert.equal(findPaymentOption(result.payment_options, "sbp")?.button_text, "sbp 80");
+    assert.equal(result.token_rows?.[0]?.action_kind, "reveal_feature_payment_options");
+    assert.ok(result.token_rows?.[0]?.expires_at);
+    assert.ok(
+      Date.parse(String(result.token_rows?.[0]?.expires_at)) - Date.now()
+      <= 31 * 60 * 1000,
+    );
+    assert.equal(
+      (result.token_rows?.[0]?.payload_json.payment_options as unknown[])?.length,
+      2,
+    );
     assert.equal(calls.createStarsInvoice, 1);
     assert.equal(calls.createSbpPayment, 1);
   } finally {
@@ -1831,6 +1846,96 @@ test("invalid callback returns noop without media context query", async () => {
   assert.equal(result.callback_valid, false);
   assert.equal(result.callback_answer_text, "text");
   assert.equal(calls.loadMediaContext, 0);
+});
+
+test("feature payment reveal callback returns payment options without creating checkout", async () => {
+  const paymentOptions: MediaPaymentOption[] = [
+    {
+      token: "stars-token",
+      source: "stars",
+      amount: 50,
+      currency: "XTR",
+      checkout_url: "https://t.me/invoice",
+      sku: "payment_action_1",
+      payment_kind: "feature",
+      feature_key: "fast_scene_skip",
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "star 50",
+    },
+    {
+      token: "sbp-token",
+      source: "sbp",
+      amount: 80,
+      currency: "RUB",
+      checkout_url: "https://sbp.example/checkout/1",
+      sku: "payment_action_1",
+      payment_kind: "feature",
+      feature_key: "fast_scene_skip",
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "sbp 80",
+    },
+  ];
+  const { service, calls } = createRepository({
+    async loadCallbackToken(token, chatId) {
+      calls.loadCallbackTokenArgs.push({ token, chatId });
+      return buildLoadedCallbackToken({
+        token: "btn_reveal",
+        action_kind: "reveal_feature_payment_options",
+        payload_json: {
+          action_kind: "reveal_feature_payment_options",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          target_message_id: null,
+          feature_key: "fast_scene_skip",
+          payment_options: paymentOptions,
+          feature_payment_hint_text: "*skip hint",
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "btn_reveal",
+      callback_query_id: "cbq-1",
+      inbound_message_id: 777,
+      panel_text: "stale fallback text",
+      panel_entities_json: [{ type: "code", offset: 0, length: 5 }],
+      raw_update: {
+        callback_query: {
+          message: {
+            message_id: 777,
+            caption: "Offer caption",
+            caption_entities: [{ type: "bold", offset: 0, length: 5 }],
+            reply_markup: {
+              inline_keyboard: [[{ text: "text", callback_data: "btn_reveal" }]],
+            },
+          },
+        },
+      },
+    }),
+  );
+
+  assert.equal(result.operation, "feature_payment_options_revealed");
+  assert.equal(result.callback_valid, true);
+  assert.equal(result.message_kind, "caption");
+  assert.equal(result.target_message_id, 777);
+  assert.equal(result.panel_text, "Offer caption");
+  assert.deepEqual(result.panel_entities_json, [{ type: "bold", offset: 0, length: 5 }]);
+  assert.deepEqual(result.current_reply_markup, {
+    inline_keyboard: [[{ text: "text", callback_data: "btn_reveal" }]],
+  });
+  assert.deepEqual(result.payment_options, paymentOptions);
+  assert.equal(result.feature_payment_hint_text, "*skip hint");
+  assert.equal(calls.loadMediaContext, 0);
+  assert.equal(calls.createStarsInvoice, 0);
+  assert.equal(calls.createSbpPayment, 0);
 });
 
 test("free fast scene skip callback redeems credit and returns existing fulfillment contract", async () => {
@@ -3547,7 +3652,7 @@ test("subscription_offer assigns sticky ab group and stores compact context in p
     assert.equal(first.subscription_offer_items?.[0]?.description, "B description");
     assert.equal(first.subscription_offer_items?.[0]?.label, "B label");
     assert.equal(firstOfferPaymentOption(first.subscription_offer_items?.[0])?.amount, 111);
-    assert.equal(firstOfferPaymentOption(first.subscription_offer_items?.[0])?.button_text, "⭐ 111");
+    assert.equal(firstOfferPaymentOption(first.subscription_offer_items?.[0])?.button_text, "star 111");
     assert.deepEqual(
       (capturedBatches[0]?.[0] as { payload_json?: Record<string, unknown> })?.payload_json?.ab_test,
       first.ab_test,
@@ -3914,6 +4019,170 @@ test("finalize_subscription_offer records ab_delivered event after Telegram send
     version: "v2",
     variant: "B",
   });
+});
+
+test("subscription_offer returns SBP default source and toggle callback tokens when SBP is available", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousSubscriptionPlans = config.MEDIA_SUBSCRIPTION_PLANS_JSON;
+
+  config.SBP_ENABLED = true;
+  config.MEDIA_SUBSCRIPTION_PLANS_JSON = [
+    {
+      sku: "payment_plan_7",
+      days: 7,
+      amount_xtr: 100,
+      amount_rub: 199,
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "text",
+    },
+    {
+      sku: "payment_plan_30",
+      days: 30,
+      amount_xtr: 300,
+      amount_rub: 499,
+      title: "text",
+      description: "text",
+      label: "text",
+      button_text: "text",
+    },
+  ];
+
+  try {
+    const { service, calls } = createRepository({
+      async loadSceneAccessStatus(input) {
+        calls.loadSceneAccessStatus += 1;
+        const source = (input ?? {}) as { chat_id?: number | null };
+        return {
+          chat_id: source.chat_id ?? 101,
+          scene_session_id: null,
+          active_scene_session_id: null,
+          subscription_active: false,
+          scene_access_active: true,
+          scene_is_active: false,
+        };
+      },
+    });
+
+    const result = await service.evaluate(
+      buildRequest({
+        interaction_mode: "subscription_offer",
+        idempotency_key: "telegram:subscription-toggle",
+        subscription_offer_reason: "subscription_command",
+      }),
+    );
+
+    assert.equal(result.operation, "subscription_offer_ready");
+    assert.equal(result.selected_payment_source, "sbp");
+    assert.deepEqual(
+      result.subscription_offer_items?.map((item) => item.sku),
+      ["payment_plan_7", "payment_plan_30"],
+    );
+    assert.equal(firstOfferPaymentOption(result.subscription_offer_items?.[0], "sbp")?.button_text, "sbp 199");
+    assert.equal(firstOfferPaymentOption(result.subscription_offer_items?.[0], "stars")?.button_text, "star 100");
+    const toggleRows = result.token_rows?.filter((row) =>
+      row.action_kind === "subscription_payment_source_toggle") ?? [];
+    assert.equal(toggleRows.length, 2);
+    assert.ok(result.payment_source_toggle_tokens?.stars);
+    assert.ok(result.payment_source_toggle_tokens?.sbp);
+    assert.equal(calls.createStarsInvoice, 2);
+    assert.equal(calls.createSbpPayment, 2);
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_SUBSCRIPTION_PLANS_JSON = previousSubscriptionPlans;
+  }
+});
+
+test("subscription payment source toggle callback reuses stored offer data", async () => {
+  const offerItems: MediaOfferItem[] = [
+    {
+      sku: "payment_plan_7",
+      action_kind: "subscription_payment",
+      payment_kind: "subscription",
+      sort_order: 1,
+      subscription_days: 7,
+      title: "text",
+      description: "text",
+      label: "text",
+      payment_options: [
+        {
+          token: "stars-token",
+          source: "stars",
+          amount: 100,
+          currency: "XTR",
+          checkout_url: "https://t.me/invoice",
+          sku: "payment_plan_7",
+          payment_kind: "subscription",
+          subscription_days: 7,
+          title: "text",
+          description: "text",
+          label: "text",
+          button_text: "star 100",
+        },
+        {
+          token: "sbp-token",
+          source: "sbp",
+          amount: 199,
+          currency: "RUB",
+          checkout_url: "https://sbp.example/checkout/1",
+          sku: "payment_plan_7",
+          payment_kind: "subscription",
+          subscription_days: 7,
+          title: "text",
+          description: "text",
+          label: "text",
+          button_text: "sbp 199",
+        },
+      ],
+    },
+  ];
+  const { service, calls } = createRepository({
+    async loadCallbackToken(token, chatId) {
+      calls.loadCallbackTokenArgs.push({ token, chatId });
+      return buildLoadedCallbackToken({
+        token: "btn_toggle_stars",
+        scene_session_id: null,
+        turn_no: null,
+        action_kind: "subscription_payment_source_toggle",
+        payload_json: {
+          action_kind: "subscription_payment_source_toggle",
+          chat_id: 101,
+          selected_payment_source: "stars",
+          subscription_offer_items: offerItems,
+          token_rows: [],
+          text: "text",
+          offer_message_id: null,
+          payment_source_toggle_tokens: {
+            stars: "btn_toggle_stars",
+            sbp: "btn_toggle_sbp",
+          },
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "btn_toggle_stars",
+      callback_query_id: "cbq-1",
+      inbound_message_id: 777,
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_ready");
+  assert.equal(result.selected_payment_source, "stars");
+  assert.equal(result.offer_message_id, 777);
+  assert.deepEqual(result.subscription_offer_items, offerItems);
+  assert.deepEqual(result.payment_source_toggle_tokens, {
+    stars: "btn_toggle_stars",
+    sbp: "btn_toggle_sbp",
+  });
+  assert.equal(calls.loadMediaContext, 0);
+  assert.equal(calls.createStarsInvoice, 0);
+  assert.equal(calls.createSbpPayment, 0);
 });
 
 test("subscription_offer returns top-level free scene unlock callback when credit is available", async () => {

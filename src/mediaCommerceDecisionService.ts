@@ -39,6 +39,7 @@ import {
   resolvePhotoPlanByAmount,
 } from "./mediaCommerce/plans.js";
 import {
+  INVOICE_TTL_MS,
   extractPanelFromRawUpdate,
   isExpired,
   normalizeBoolean,
@@ -69,10 +70,12 @@ import type {
   MediaPaymentOption,
   MediaSubscriptionOfferReason,
   MediaOfferStats,
+  PaymentUiCopy,
   PaymentCurrency,
   PaymentSource,
   PaidInvoiceToken,
   StoredInvoiceToken,
+  TelegramMessageKind,
 } from "./mediaCommerceTypes.js";
 
 type MediaRepository = Pick<
@@ -114,6 +117,10 @@ type FeaturePaymentAction = Extract<
   ResolvedInvoiceAction,
   { payment_kind: "feature" }
 >;
+
+type PaymentUiActionKind =
+  | "reveal_feature_payment_options"
+  | "subscription_payment_source_toggle";
 
 function normalizePaymentCurrency(
   value: string | null | undefined,
@@ -203,6 +210,103 @@ function buildFreeActionTokenRow(input: {
     status: "active",
     action_kind: input.action_kind,
     expires_at: new Date(Date.now() + FREE_CALLBACK_TTL_MS).toISOString(),
+  };
+}
+
+function buildPaymentUiCopy(): PaymentUiCopy {
+  return { ...config.TELEGRAM_UX_COPY_JSON.payment_ui };
+}
+
+function getFeaturePaymentHint(featureKey: string | null | undefined): string | null {
+  if (featureKey === "fast_scene_skip") {
+    return config.TELEGRAM_UX_COPY_JSON.payment_ui.fast_scene_skip_hint;
+  }
+
+  if (featureKey === "scene_unlock") {
+    return config.TELEGRAM_UX_COPY_JSON.payment_ui.scene_unlock_hint;
+  }
+
+  return null;
+}
+
+function buildPaymentSourceToggleTokenMap(
+  tokenRows: InteractionTokenRow[],
+): Partial<Record<PaymentSource, string>> {
+  return tokenRows.reduce<Partial<Record<PaymentSource, string>>>((acc, row) => {
+    const payload = parseJsonObject(row.payload_json) ?? {};
+    const source = normalizePaymentSource(
+      typeof payload.selected_payment_source === "string"
+        ? payload.selected_payment_source
+        : null,
+    );
+    if (source) {
+      acc[source] = row.token;
+    }
+    return acc;
+  }, {});
+}
+
+function buildPaymentUiTokenRow(input: {
+  action_kind: PaymentUiActionKind;
+  chat_id: number;
+  scene_session_id: string | null;
+  turn_no: number | null;
+  scene_turn_no: number | null;
+  target_message_id?: number | null;
+  feature_key?: "fast_scene_skip" | "scene_unlock" | string | null;
+  action_button_text?: string | null;
+  payment_options?: MediaPaymentOption[];
+  subscription_offer_items?: MediaOfferItem[];
+  token_rows?: InteractionTokenRow[];
+  text?: string | null;
+  offer_message_id?: number | null;
+  selected_payment_source?: PaymentSource | null;
+  payment_source_toggle_tokens?: Partial<Record<PaymentSource, string>> | null;
+  ab_test?: AbTestContext | null;
+  idempotency_key?: string | null;
+}): InteractionTokenRow {
+  const token = buildStableCallbackToken([
+    input.action_kind,
+    input.chat_id,
+    input.scene_session_id,
+    input.turn_no,
+    input.scene_turn_no,
+    input.target_message_id,
+    input.feature_key,
+    input.selected_payment_source,
+    input.idempotency_key,
+  ]);
+
+  return {
+    token,
+    kind: "button_callback",
+    chat_id: input.chat_id,
+    scene_session_id: input.scene_session_id,
+    turn_no: input.turn_no,
+    payload_json: {
+      action_kind: input.action_kind,
+      chat_id: input.chat_id,
+      scene_session_id: input.scene_session_id,
+      turn_no: input.turn_no,
+      scene_turn_no: input.scene_turn_no,
+      target_message_id: input.target_message_id ?? null,
+      feature_key: input.feature_key ?? null,
+      requested_action: input.action_kind,
+      action_button_text: input.action_button_text ?? null,
+      payment_options: input.payment_options ?? [],
+      subscription_offer_items: input.subscription_offer_items ?? [],
+      token_rows: input.token_rows ?? [],
+      text: input.text ?? null,
+      offer_message_id: input.offer_message_id ?? null,
+      selected_payment_source: input.selected_payment_source ?? null,
+      payment_source_toggle_tokens: input.payment_source_toggle_tokens ?? null,
+      feature_payment_hint_text: getFeaturePaymentHint(input.feature_key),
+      payment_ui: buildPaymentUiCopy(),
+      ab_test: input.ab_test ?? null,
+    },
+    status: "active",
+    action_kind: input.action_kind,
+    expires_at: new Date(Date.now() + INVOICE_TTL_MS).toISOString(),
   };
 }
 
@@ -1236,6 +1340,36 @@ export class MediaCommerceDecisionService {
       storedFeatureInvoices.map((row) => this.ensureStoredPaymentReady(row, "featureOffer")),
     );
     const featureInvoice = selectLegacyPrimaryRow(featureInvoices);
+    const featurePaymentOptions = featureInvoices
+      .map((row) => buildPaymentOption(row))
+      .sort((left, right) => getSourceSortOrder(left.source) - getSourceSortOrder(right.source));
+    const revealTokenRows =
+      actionPlan && featurePaymentOptions.length > 0
+        ? [
+            buildPaymentUiTokenRow({
+              action_kind: "reveal_feature_payment_options",
+              chat_id: chatId,
+              scene_session_id: normalizeString(input.scene_session_id),
+              turn_no: normalizeNonNegativeInteger(input.turn_no),
+              scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
+              target_message_id: normalizePositiveInteger(input.target_message_id),
+              feature_key: featureKey,
+              action_button_text: actionPlan.button_text,
+              payment_options: featurePaymentOptions,
+              idempotency_key: [
+                "feature-ui",
+                chatId,
+                normalizeString(input.scene_session_id) ?? "no-scene",
+                normalizeNonNegativeInteger(input.turn_no) ?? "no-turn",
+                normalizeNonNegativeInteger(input.scene_turn_no) ?? "no-scene-turn",
+                featureKey,
+              ].join(":"),
+            }),
+          ]
+        : [];
+    const revealTokenRowsInserted = revealTokenRows.length > 0
+      ? await this.repository.upsertCallbackTokens(revealTokenRows)
+      : 0;
 
     return {
       ...base,
@@ -1264,6 +1398,9 @@ export class MediaCommerceDecisionService {
       invoice_button_text:
         featureInvoice?.invoice_button_text ?? actionPlan?.button_text ?? null,
       invoice_payload_json: featureInvoice?.payload_json ?? null,
+      token_rows: revealTokenRows,
+      token_rows_prepared: revealTokenRows.length,
+      token_rows_inserted: revealTokenRowsInserted,
       ...buildTopLevelPaymentFields(featureInvoices),
       reason: "feature_offer_required",
     };
@@ -1286,9 +1423,13 @@ export class MediaCommerceDecisionService {
         typeof payload.action_kind === "string" ? payload.action_kind : null,
       );
     const rawPanel = extractPanelFromRawUpdate(input.raw_update);
-    const panelText = normalizeString(input.panel_text) ?? rawPanel.panel_text;
+    const panelText =
+      rawPanel.panel_text
+      ?? (typeof input.panel_text === "string" && input.panel_text.length > 0
+        ? input.panel_text
+        : null);
     const panelEntities =
-      parseJsonArray(input.panel_entities_json) ?? rawPanel.panel_entities_json;
+      rawPanel.panel_entities_json ?? parseJsonArray(input.panel_entities_json);
 
     const valid =
       Boolean(callbackRow?.found && callbackRow?.token)
@@ -1341,6 +1482,8 @@ export class MediaCommerceDecisionService {
         normalizePositiveInteger(payload.base_price_xtr) ?? base.base_price_xtr,
       panel_text: panelText,
       panel_entities_json: panelEntities,
+      message_kind: rawPanel.message_kind,
+      current_reply_markup: rawPanel.reply_markup,
     } satisfies MediaCommerceDecisionResponse;
 
     if (
@@ -1366,6 +1509,30 @@ export class MediaCommerceDecisionService {
         callbackBase,
         callbackRow.token,
         callbackBase.chat_id,
+      );
+    }
+
+    if (
+      actionKind === "reveal_feature_payment_options"
+      && callbackBase.chat_id
+      && callbackRow?.found
+      && callbackRow.token
+    ) {
+      return this.evaluateRevealFeaturePaymentOptionsCallback(
+        callbackBase,
+        payload,
+      );
+    }
+
+    if (
+      actionKind === "subscription_payment_source_toggle"
+      && callbackBase.chat_id
+      && callbackRow?.found
+      && callbackRow.token
+    ) {
+      return this.evaluateSubscriptionPaymentSourceToggleCallback(
+        callbackBase,
+        payload,
       );
     }
 
@@ -1409,6 +1576,115 @@ export class MediaCommerceDecisionService {
     }
 
     return this.applyMediaActionDecision(callbackBase, context);
+  }
+
+  private evaluateRevealFeaturePaymentOptionsCallback(
+    base: MediaCommerceDecisionResponse,
+    payload: Record<string, unknown>,
+  ): MediaCommerceDecisionResponse {
+    if (base.callback_valid !== true) {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: false,
+        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_show_alert: false,
+        reason: "callback_invalid",
+      };
+    }
+
+    const paymentOptions = Array.isArray(payload.payment_options)
+      ? payload.payment_options.filter(
+        (option): option is MediaPaymentOption =>
+          option != null
+          && typeof option === "object"
+          && !Array.isArray(option)
+          && typeof (option as { checkout_url?: unknown }).checkout_url === "string",
+      )
+      : [];
+    const featureKey = normalizeString(
+      typeof payload.feature_key === "string" ? payload.feature_key : null,
+    );
+
+    return {
+      ...base,
+      operation: "feature_payment_options_revealed",
+      callback_valid: true,
+      callback_answer_text: "",
+      payment_options: paymentOptions,
+      feature_key: featureKey,
+      feature_payment_hint_text:
+        normalizeString(
+          typeof payload.feature_payment_hint_text === "string"
+            ? payload.feature_payment_hint_text
+            : null,
+        ) ?? getFeaturePaymentHint(featureKey),
+      payment_ui: buildPaymentUiCopy(),
+      reason: "feature_payment_options_revealed",
+    };
+  }
+
+  private evaluateSubscriptionPaymentSourceToggleCallback(
+    base: MediaCommerceDecisionResponse,
+    payload: Record<string, unknown>,
+  ): MediaCommerceDecisionResponse {
+    if (base.callback_valid !== true) {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: false,
+        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_show_alert: false,
+        reason: "callback_invalid",
+      };
+    }
+
+    const selectedPaymentSource = normalizePaymentSource(
+      typeof payload.selected_payment_source === "string"
+        ? payload.selected_payment_source
+        : null,
+    );
+    const offerItems = Array.isArray(payload.subscription_offer_items)
+      ? payload.subscription_offer_items.filter(
+        (item): item is MediaOfferItem =>
+          item != null
+          && typeof item === "object"
+          && !Array.isArray(item)
+          && Array.isArray((item as { payment_options?: unknown }).payment_options),
+      )
+      : [];
+    const tokenRows = Array.isArray(payload.token_rows)
+      ? payload.token_rows.filter(
+        (row): row is InteractionTokenRow =>
+          row != null
+          && typeof row === "object"
+          && !Array.isArray(row)
+          && typeof (row as { token?: unknown }).token === "string",
+      )
+      : [];
+
+    return {
+      ...base,
+      operation: "subscription_offer_ready",
+      callback_valid: true,
+      callback_answer_text: "",
+      selected_payment_source: selectedPaymentSource,
+      subscription_offer_items: offerItems,
+      token_rows: tokenRows,
+      token_rows_prepared: tokenRows.length,
+      text: normalizeString(typeof payload.text === "string" ? payload.text : null),
+      offer_message_id:
+        normalizePositiveInteger(payload.offer_message_id)
+        ?? base.target_message_id
+        ?? base.inbound_message_id
+        ?? null,
+      payment_source_toggle_tokens:
+        parseJsonObject(payload.payment_source_toggle_tokens) as
+          | Partial<Record<PaymentSource, string>>
+          | null,
+      payment_ui: buildPaymentUiCopy(),
+      reason: "subscription_payment_source_toggled",
+    };
   }
 
   private async evaluateFreeFastSceneSkipCallback(
@@ -1689,6 +1965,29 @@ export class MediaCommerceDecisionService {
     ]);
     invoiceToken = linkedInvoiceToken;
     sceneUnlockInvoiceRows = linkedSceneUnlockRows;
+    const sceneUnlockOfferItem = buildOfferItem(sceneUnlockInvoiceRows);
+    const sceneUnlockRevealTokenRows =
+      sceneUnlockOfferItem && sceneUnlockPlan
+        ? [
+            buildPaymentUiTokenRow({
+              action_kind: "reveal_feature_payment_options",
+              chat_id: context.chat_id,
+              scene_session_id: context.scene_session_id,
+              turn_no: context.turn_no,
+              scene_turn_no: context.scene_turn_no,
+              target_message_id: context.target_message_id,
+              feature_key: "scene_unlock",
+              action_button_text: sceneUnlockPlan.button_text,
+              payment_options: sceneUnlockOfferItem.payment_options,
+              idempotency_key: `scene-unlock-ui:${context.chat_id}:${context.scene_session_id ?? "no-scene"}`,
+            }),
+          ]
+        : [];
+    if (sceneUnlockRevealTokenRows.length > 0) {
+      tokenRowsInserted += await this.repository.upsertCallbackTokens(
+        sceneUnlockRevealTokenRows,
+      );
+    }
 
     return {
       ...base,
@@ -1702,8 +2001,8 @@ export class MediaCommerceDecisionService {
       current_uuid: decision.current_uuid,
       photo_url: decision.photo_url,
       selected_uuid: decision.selected_uuid,
-      token_rows: allTokenRows,
-      token_rows_prepared: allTokenRows.length,
+      token_rows: [...allTokenRows, ...sceneUnlockRevealTokenRows],
+      token_rows_prepared: allTokenRows.length + sceneUnlockRevealTokenRows.length,
       token_rows_inserted: tokenRowsInserted,
       log_event_type: decision.log_event_type,
       access_mode: decision.access_mode,
@@ -1730,9 +2029,7 @@ export class MediaCommerceDecisionService {
       invoice_button_text:
         invoiceToken?.invoice_button_text ?? decision.invoice_button_text,
       ...buildTopLevelPaymentFields(invoiceToken ? [invoiceToken] : []),
-      scene_unlock_offer_item: sceneUnlockInvoiceRows.length > 0
-        ? buildOfferItem(sceneUnlockInvoiceRows)
-        : null,
+      scene_unlock_offer_item: sceneUnlockOfferItem,
       fulfillment_invoice_token: decision.fulfillment_invoice_token,
       caption_text: decision.caption_text,
       caption_entities_json: decision.caption_entities_json,
@@ -2783,14 +3080,11 @@ export class MediaCommerceDecisionService {
     const upsertedRows = await this.repository.upsertInvoiceTokens(
       invoiceInputs,
     );
-    const tokenRowsInserted = freeSceneUnlockTokenRows.length > 0
-      ? await this.repository.upsertCallbackTokens(freeSceneUnlockTokenRows)
-      : 0;
     const tokenList = upsertedRows.map((row) => row.token);
     const rows = await Promise.all(
       upsertedRows.map((row) =>
         this.ensureStoredPaymentReady(row, "subscription")),
-    );
+      );
 
     const sortedRows = rows
       .slice()
@@ -2803,11 +3097,79 @@ export class MediaCommerceDecisionService {
           || getSourceSortOrder(normalizePaymentSource(left.payment_source))
           - getSourceSortOrder(normalizePaymentSource(right.payment_source)),
       );
+    const subscriptionOfferItems = groupOfferItems(sortedRows);
+    const sceneUnlockOfferItem =
+      subscriptionOfferItems.find((item) => item.feature_key === "scene_unlock")
+      ?? null;
+    const paidSceneUnlockRevealTokenRows =
+      sceneUnlockOfferItem != null
+        ? [
+            buildPaymentUiTokenRow({
+              action_kind: "reveal_feature_payment_options",
+              chat_id: chatId,
+              scene_session_id: activeSceneSessionId,
+              turn_no: null,
+              scene_turn_no: null,
+              target_message_id: null,
+              feature_key: "scene_unlock",
+              action_button_text: sceneUnlockPlan?.button_text ?? sceneUnlockOfferItem.label,
+              payment_options: sceneUnlockOfferItem.payment_options,
+              idempotency_key: `subscription-scene-unlock-ui:${effectiveIdempotencyKey}:${activeSceneSessionId ?? "no-scene"}`,
+            }),
+          ]
+        : [];
+    const hasSbpSubscriptionOption = subscriptionOfferItems.some((item) =>
+      item.payment_kind === "subscription"
+      && item.payment_options.some((option) => option.source === "sbp"));
+    const hasStarsSubscriptionOption = subscriptionOfferItems.some((item) =>
+      item.payment_kind === "subscription"
+      && item.payment_options.some((option) => option.source === "stars"));
+    const defaultPaymentSource: PaymentSource =
+      hasSbpSubscriptionOption ? "sbp" : "stars";
     const offerMessageId =
       sortedRows
         .map((row) => normalizePositiveInteger(row.telegram_invoice_message_id))
         .find((value) => value != null)
       ?? null;
+    const subscriptionPaymentToggleTokenRows =
+      hasSbpSubscriptionOption && hasStarsSubscriptionOption
+        ? (["stars", "sbp"] as const).map((source) =>
+            buildPaymentUiTokenRow({
+              action_kind: "subscription_payment_source_toggle",
+              chat_id: chatId,
+              scene_session_id: activeSceneSessionId,
+              turn_no: null,
+              scene_turn_no: null,
+              target_message_id: offerMessageId,
+              subscription_offer_items: subscriptionOfferItems,
+              token_rows: [
+                ...freeSceneUnlockTokenRows,
+                ...paidSceneUnlockRevealTokenRows,
+              ],
+              text: offerText,
+              offer_message_id: offerMessageId,
+              selected_payment_source: source,
+              idempotency_key: `subscription-source-ui:${effectiveIdempotencyKey}`,
+              ab_test: abContext,
+            }))
+        : [];
+    const paymentSourceToggleTokens = buildPaymentSourceToggleTokenMap(
+      subscriptionPaymentToggleTokenRows,
+    );
+    const tokenRows = [
+      ...freeSceneUnlockTokenRows,
+      ...paidSceneUnlockRevealTokenRows,
+      ...subscriptionPaymentToggleTokenRows.map((row) => ({
+        ...row,
+        payload_json: {
+          ...row.payload_json,
+          payment_source_toggle_tokens: paymentSourceToggleTokens,
+        },
+      })),
+    ];
+    const tokenRowsInserted = tokenRows.length > 0
+      ? await this.repository.upsertCallbackTokens(tokenRows)
+      : 0;
 
     return {
       ...base,
@@ -2821,12 +3183,15 @@ export class MediaCommerceDecisionService {
       turn_limit: turnLimit,
       turns_today: turnsToday,
       turn_limit_reset_text: turnLimitResetText,
-      token_rows: freeSceneUnlockTokenRows,
-      token_rows_prepared: freeSceneUnlockTokenRows.length,
+      token_rows: tokenRows,
+      token_rows_prepared: tokenRows.length,
       token_rows_inserted: tokenRowsInserted,
       text: offerText,
       ab_test: abContext,
-      subscription_offer_items: groupOfferItems(sortedRows),
+      subscription_offer_items: subscriptionOfferItems,
+      selected_payment_source: defaultPaymentSource,
+      payment_source_toggle_tokens: paymentSourceToggleTokens,
+      payment_ui: buildPaymentUiCopy(),
       subscription_invoice_tokens: tokenList,
       reason:
         offerMessageId != null

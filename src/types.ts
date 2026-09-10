@@ -57,6 +57,7 @@ export interface AccessDecisionRequest {
   route_target?: string | null;
   message_type?: string | null;
   user_message?: string | null;
+  raw_update?: unknown | null;
   inbound_message_id?: number | null;
   character_i?: number | null;
   scene_mode?: string | null;
@@ -90,6 +91,7 @@ export interface AccessDecisionResponse {
   route_target?: string | null;
   message_type?: string | null;
   user_message?: string | null;
+  raw_update?: unknown | null;
   inbound_message_id?: number | null;
   callback_data?: string | null;
   callback_query_id?: string | null;

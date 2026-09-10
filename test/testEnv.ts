@@ -24,6 +24,16 @@ export const testTelegramUxCopy = {
     fast_scene_skip_button: "free skip {count}",
     scene_unlock_button: "free unlock",
   },
+  payment_ui: {
+    fast_scene_skip_hint: "*skip hint",
+    scene_unlock_hint: "*unlock hint",
+    pay_with_stars_button: "pay stars",
+    pay_with_sbp_button: "pay sbp",
+    stars_payment_button: "star {amount}",
+    sbp_payment_button: "sbp {amount}",
+    subscription_stars_plan_button: "{label} star {amount}",
+    subscription_sbp_plan_button: "{label} sbp {amount}",
+  },
   scene_mode: {
     choice: "text",
     roleplay_button: "text",
