@@ -4308,6 +4308,69 @@ test("subscription_offer does not include scene pass without active scene", asyn
   ]);
 });
 
+test("subscription_offer does not include scene unlock when request is outside current scene", async () => {
+  const { service, calls } = createRepository({
+    async loadSceneAccessStatus() {
+      calls.loadSceneAccessStatus += 1;
+      return {
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        active_scene_session_id: "scene-1",
+        subscription_active: false,
+        scene_access_active: false,
+        scene_is_active: true,
+      };
+    },
+    async loadFreeCredits(chatId) {
+      calls.loadFreeCredits += 1;
+      return {
+        chat_id: chatId,
+        active_scene_session_id: "scene-1",
+        free_fast_scene_skips: 0,
+        free_scene_unlocks: 1,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      scene_session_id: null,
+      scene_turn_no: null,
+      active_scene_session_id: "scene-1",
+      idempotency_key: "telegram:outside-scene",
+      subscription_offer_reason: "subscription_command",
+      turns_today: 0,
+      turn_limit: 20,
+      turn_limit_reset_text: "00:00 МСК",
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_ready");
+  assert.deepEqual(result.subscription_invoice_tokens, [
+    "telegram:outside-scene:payment_plan_2",
+    "telegram:outside-scene:payment_plan_3",
+  ]);
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => item.sku),
+    ["payment_plan_2", "payment_plan_3"],
+  );
+  assert.equal(
+    result.subscription_offer_items?.some((item) => item.feature_key === "scene_unlock"),
+    false,
+  );
+  assert.equal(
+    result.token_rows?.some((row) =>
+      row.action_kind === "free_scene_unlock"
+      || (
+        row.action_kind === "reveal_feature_payment_options"
+        && row.payload_json.feature_key === "scene_unlock"
+      )),
+    false,
+  );
+  assert.equal(calls.createStarsInvoice, 2);
+});
+
 test("subscription_offer does not include scene pass after purchase", async () => {
   const { service } = createRepository({
     async loadSceneAccessStatus() {

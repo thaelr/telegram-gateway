@@ -3008,15 +3008,20 @@ export class MediaCommerceDecisionService {
     ]);
     const subscriptionActive = offerAccessStatus?.subscription_active === true;
     const sceneAccessActive = offerAccessStatus?.scene_access_active === true;
+    const requestSceneSessionId = normalizeString(input.scene_session_id);
+    const requestSceneTurnNo = normalizeNonNegativeInteger(input.scene_turn_no);
+    const inActiveScene =
+      Boolean(requestSceneSessionId)
+      && requestSceneTurnNo != null
+      && requestSceneTurnNo >= 0;
     const activeSceneSessionId =
-      normalizeString(offerAccessStatus?.active_scene_session_id)
-      ?? normalizeString(freeCredits?.active_scene_session_id)
-      ?? null;
+      inActiveScene ? requestSceneSessionId : null;
     const freeSceneUnlockButton =
       config.TELEGRAM_UX_COPY_JSON.free_actions?.scene_unlock_button;
     const freeSceneUnlockTokenRows =
       !subscriptionActive
       && !sceneAccessActive
+      && inActiveScene
       && activeSceneSessionId
       && abParams.scene_unlock?.enabled !== false
       && freeSceneUnlockButton
@@ -3027,7 +3032,7 @@ export class MediaCommerceDecisionService {
               chat_id: chatId,
               scene_session_id: activeSceneSessionId,
               turn_no: null,
-              scene_turn_no: null,
+              scene_turn_no: requestSceneTurnNo,
               target_message_id: null,
               feature_key: "scene_unlock",
               action_button_text: freeSceneUnlockButton,
@@ -3038,6 +3043,7 @@ export class MediaCommerceDecisionService {
     const sceneUnlockPlan =
       !subscriptionActive
       && !sceneAccessActive
+      && inActiveScene
       && activeSceneSessionId
       && freeSceneUnlockTokenRows.length === 0
         ? applySceneUnlockOverride(

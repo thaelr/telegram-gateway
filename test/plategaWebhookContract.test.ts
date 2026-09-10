@@ -95,10 +95,14 @@ async function runWorkflowCodeNode(
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const jsCode = await loadWorkflowNodeCode(nodeName);
-  const evaluator = new Function("$json", jsCode) as (
+  const evaluator = new Function("$json", "$items", jsCode) as (
     json: Record<string, unknown>,
+    items: (nodeName: string) => Array<{ json: Record<string, unknown> }>,
   ) => Array<{ json: Record<string, unknown> }>;
-  const result = evaluator(input);
+  const result = evaluator(input, (sourceNodeName: string) => {
+    assert.equal(sourceNodeName, "Evaluate media commerce decision");
+    return [{ json: input }];
+  });
 
   assert.ok(Array.isArray(result));
   assert.equal(result.length, 1);
