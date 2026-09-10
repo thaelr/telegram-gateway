@@ -1,3 +1,14 @@
+import { createHash } from "node:crypto";
+import {
+  buildAssignment,
+  chooseVariant,
+  findActiveExperiment,
+  parseAbTestAssignment,
+  toAbTestContext,
+  type AbTestContext,
+  type AbTestSelection,
+  type SubscriptionOfferExperimentParams,
+} from "./abTesting.js";
 import { config } from "./config.js";
 import {
   buildCallbackTokenRow,
@@ -52,9 +63,11 @@ import {
 import type {
   MediaCommerceDecisionResponse,
   MediaCommerceRoute,
+  InteractionTokenRow,
   MediaContext,
   MediaOfferItem,
   MediaPaymentOption,
+  MediaSubscriptionOfferReason,
   MediaOfferStats,
   PaymentCurrency,
   PaymentSource,
@@ -78,11 +91,17 @@ type MediaRepository = Pick<
   | "activateSubscription"
   | "activateSceneAccess"
   | "loadSceneAccessStatus"
+  | "loadFreeCredits"
+  | "redeemFreeFastSceneSkip"
+  | "redeemFreeSceneUnlock"
   | "storePhotoEvent"
   | "storeInvoiceLinks"
   | "claimSbpCheckoutCreation"
   | "releaseSbpCheckoutCreation"
   | "loadStoredInvoiceTokens"
+  | "loadAbTestAssignment"
+  | "storeAbTestAssignment"
+  | "recordAbTestDelivered"
   | "storeSubscriptionOfferMessageId"
 >;
 
@@ -114,6 +133,177 @@ function sleep(ms: number): Promise<void> {
 
 const SBP_CHECKOUT_WAIT_TIMEOUT_MS = 24_000;
 const SBP_CHECKOUT_WAIT_BACKOFF_MS = [200, 400, 800, 1000, 1500, 2000] as const;
+const FREE_CALLBACK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function replaceCount(template: string, count: number): string {
+  return template.replaceAll("{count}", String(count));
+}
+
+function buildStableCallbackToken(parts: Array<string | number | null | undefined>): string {
+  const hash = createHash("sha256")
+    .update(parts.map((part) => String(part ?? "")).join("\u001f"))
+    .digest("hex")
+    .slice(0, 32);
+
+  return `btn_${hash}`;
+}
+
+function buildFreeActionTokenRow(input: {
+  action_kind: "free_fast_scene_skip" | "free_scene_unlock";
+  chat_id: number;
+  scene_session_id: string;
+  turn_no: number | null;
+  scene_turn_no: number | null;
+  character_i?: number | null;
+  scene_mode?: string | null;
+  media_signature?: string | null;
+  target_message_id?: number | null;
+  current_uuid?: string | null;
+  base_price_xtr?: number | null;
+  feature_key: "fast_scene_skip" | "scene_unlock";
+  action_button_text: string;
+  ab_test?: AbTestContext | null;
+}): InteractionTokenRow {
+  const token = buildStableCallbackToken([
+    input.action_kind,
+    input.chat_id,
+    input.scene_session_id,
+    input.turn_no,
+    input.scene_turn_no,
+    input.target_message_id,
+    input.feature_key,
+  ]);
+
+  return {
+    token,
+    kind: "button_callback",
+    chat_id: input.chat_id,
+    scene_session_id: input.scene_session_id,
+    turn_no: input.turn_no,
+    payload_json: {
+      action_kind: input.action_kind,
+      chat_id: input.chat_id,
+      scene_session_id: input.scene_session_id,
+      turn_no: input.turn_no,
+      scene_turn_no: input.scene_turn_no,
+      character_i: input.character_i ?? null,
+      scene_mode: input.scene_mode ?? null,
+      media_signature: input.media_signature ?? null,
+      target_message_id: input.target_message_id ?? null,
+      current_uuid: input.current_uuid ?? null,
+      base_price_xtr: input.base_price_xtr ?? 0,
+      feature_key: input.feature_key,
+      requested_action:
+        input.feature_key === "fast_scene_skip"
+          ? "fast_scene_skip_free"
+          : "scene_unlock_free",
+      action_button_text: input.action_button_text,
+      ab_test: input.ab_test ?? null,
+    },
+    status: "active",
+    action_kind: input.action_kind,
+    expires_at: new Date(Date.now() + FREE_CALLBACK_TTL_MS).toISOString(),
+  };
+}
+
+function buildAbTokenSuffix(selection: AbTestSelection | null): string | null {
+  if (!selection) {
+    return null;
+  }
+
+  return createHash("sha256")
+    .update([
+      selection.assignment_key,
+      selection.config.version,
+      selection.assignment.variant,
+    ].join("\u001f"))
+    .digest("hex")
+    .slice(0, 12);
+}
+
+function applySubscriptionPlanOverrides<T extends {
+  sku: string;
+  amount_xtr: number;
+  amount_rub?: number | null;
+  days?: number;
+  title: string;
+  description: string;
+  label: string;
+  button_text: string;
+}>(
+  plans: T[],
+  params: SubscriptionOfferExperimentParams,
+): T[] {
+  const overrides = new Map(
+    (params.plans ?? []).map((override) => [override.sku, override]),
+  );
+
+  return plans.flatMap((plan) => {
+    const override = overrides.get(plan.sku);
+    if (override?.enabled === false) {
+      return [];
+    }
+
+    return [{
+      ...plan,
+      days: override?.days ?? plan.days,
+      amount_xtr: override?.amount_xtr ?? plan.amount_xtr,
+      amount_rub:
+        "amount_rub" in (override ?? {})
+          ? override?.amount_rub ?? null
+          : plan.amount_rub ?? null,
+      title: override?.title ?? plan.title,
+      description: override?.description ?? plan.description,
+      label: override?.label ?? plan.label,
+      button_text: override?.button_text ?? plan.button_text,
+    } as T];
+  });
+}
+
+function applySceneUnlockOverride<T extends {
+  amount_xtr: number;
+  amount_rub?: number | null;
+  title: string;
+  description: string;
+  label: string;
+  button_text: string;
+}>(
+  plan: T | null,
+  params: SubscriptionOfferExperimentParams,
+): T | null {
+  if (!plan || params.scene_unlock?.enabled === false) {
+    return null;
+  }
+
+  const override = params.scene_unlock;
+  return {
+    ...plan,
+    amount_xtr: override?.amount_xtr ?? plan.amount_xtr,
+    amount_rub:
+      override && "amount_rub" in override
+        ? override.amount_rub ?? null
+        : plan.amount_rub ?? null,
+    title: override?.title ?? plan.title,
+    description: override?.description ?? plan.description,
+    label: override?.label ?? plan.label,
+    button_text: override?.button_text ?? plan.button_text,
+  };
+}
+
+function resolveSubscriptionOfferText(
+  params: SubscriptionOfferExperimentParams,
+  reason: MediaSubscriptionOfferReason | null,
+): string | null {
+  if (reason === "daily_turn_limit") {
+    return params.daily_limit_offer_text ?? params.text ?? null;
+  }
+
+  if (reason === "subscription_command") {
+    return params.command_offer_text ?? params.text ?? null;
+  }
+
+  return params.text ?? null;
+}
 
 export class MediaCommerceOperationError extends Error {
   constructor(
@@ -744,8 +934,36 @@ export class MediaCommerceDecisionService {
 
     if (priceRequired > 0) {
       const photoPlan = resolvePhotoPlanByAmount(priceRequired);
+      const canOfferSceneUnlock =
+        !subscriptionActive && !sceneAccessActive && Boolean(stats.scene_session_id);
+      const freeCredits = canOfferSceneUnlock
+        ? await this.repository.loadFreeCredits(stats.chat_id)
+        : null;
+      const freeSceneUnlockButton =
+        config.TELEGRAM_UX_COPY_JSON.free_actions?.scene_unlock_button;
+      const freeSceneUnlockTokenRows =
+        canOfferSceneUnlock
+        && stats.scene_session_id
+        && freeSceneUnlockButton
+        && Math.max(0, Number(freeCredits?.free_scene_unlocks ?? 0)) > 0
+          ? [
+              buildFreeActionTokenRow({
+                action_kind: "free_scene_unlock",
+                chat_id: stats.chat_id,
+                scene_session_id: stats.scene_session_id,
+                turn_no: stats.turn_no,
+                scene_turn_no: stats.scene_turn_no,
+                media_signature: mediaSignature,
+                target_message_id: null,
+                current_uuid: null,
+                base_price_xtr: basePrice,
+                feature_key: "scene_unlock",
+                action_button_text: freeSceneUnlockButton,
+              }),
+            ]
+          : [];
       const sceneUnlockPlan =
-        !subscriptionActive && !sceneAccessActive && stats.scene_session_id
+        canOfferSceneUnlock && freeSceneUnlockTokenRows.length === 0
           ? resolveActionPlanByFeatureKey("scene_unlock")
           : null;
       const invoicePayload = {
@@ -797,6 +1015,9 @@ export class MediaCommerceDecisionService {
             }),
           )
           : [];
+      const tokenRowsInserted = freeSceneUnlockTokenRows.length > 0
+        ? await this.repository.upsertCallbackTokens(freeSceneUnlockTokenRows)
+        : 0;
       const photoLinkWasReused = normalizeString(storedInvoice?.invoice_link) != null;
       const [
         linkedInvoice,
@@ -848,6 +1069,9 @@ export class MediaCommerceDecisionService {
           linkedInvoice?.invoice_button_text ?? photoPlan.button_text,
         invoice_payload_json: invoicePayload,
         ...topLevelPayment,
+        token_rows: freeSceneUnlockTokenRows,
+        token_rows_prepared: freeSceneUnlockTokenRows.length,
+        token_rows_inserted: tokenRowsInserted,
         scene_unlock_offer_item: linkedSceneUnlockInvoice.length > 0
           ? buildOfferItem(linkedSceneUnlockInvoice)
           : null,
@@ -937,6 +1161,50 @@ export class MediaCommerceDecisionService {
     }
 
     const featureKey = normalizeString(input.feature_key) ?? "fast_scene_skip";
+    const freeFastSkipButton =
+      config.TELEGRAM_UX_COPY_JSON.free_actions?.fast_scene_skip_button;
+    const freeCredits =
+      featureKey === "fast_scene_skip" && freeFastSkipButton
+        ? await this.repository.loadFreeCredits(chatId)
+        : null;
+    const sceneSessionId =
+      normalizeString(input.scene_session_id)
+      ?? normalizeString(freeCredits?.active_scene_session_id);
+    if (featureKey === "fast_scene_skip" && sceneSessionId && freeFastSkipButton) {
+      const freeFastSkips = Math.max(0, Number(freeCredits?.free_fast_scene_skips ?? 0));
+      if (freeFastSkips > 0) {
+        const tokenRow = buildFreeActionTokenRow({
+          action_kind: "free_fast_scene_skip",
+          chat_id: chatId,
+          scene_session_id: sceneSessionId,
+          turn_no: normalizeNonNegativeInteger(input.turn_no),
+          scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
+          character_i: normalizePositiveInteger(input.character_i),
+          scene_mode: normalizeString(input.scene_mode),
+          media_signature: normalizeString(input.media_signature),
+          target_message_id: normalizePositiveInteger(input.target_message_id),
+          current_uuid: normalizeLowerString(input.current_uuid),
+          base_price_xtr: normalizePositiveInteger(input.base_price_xtr),
+          feature_key: "fast_scene_skip",
+          action_button_text: replaceCount(freeFastSkipButton, freeFastSkips),
+        });
+        const insertedCount = await this.repository.upsertCallbackTokens([tokenRow]);
+
+        return {
+          ...base,
+          operation: "feature_offer_required",
+          chat_id: chatId,
+          scene_session_id: sceneSessionId,
+          feature_key: featureKey,
+          token_rows: [tokenRow],
+          token_rows_prepared: 1,
+          token_rows_inserted: insertedCount,
+          payment_options: [],
+          reason: "free_fast_scene_skip_available",
+        };
+      }
+    }
+
     const actionPlan = resolveActionPlanByFeatureKey(featureKey);
     const storedFeatureInvoices = actionPlan
       ? await this.repository.upsertInvoiceTokens(
@@ -1075,6 +1343,32 @@ export class MediaCommerceDecisionService {
       panel_entities_json: panelEntities,
     } satisfies MediaCommerceDecisionResponse;
 
+    if (
+      actionKind === "free_fast_scene_skip"
+      && callbackBase.chat_id
+      && callbackRow?.found
+      && callbackRow.token
+    ) {
+      return this.evaluateFreeFastSceneSkipCallback(
+        callbackBase,
+        callbackRow.token,
+        callbackBase.chat_id,
+      );
+    }
+
+    if (
+      actionKind === "free_scene_unlock"
+      && callbackBase.chat_id
+      && callbackRow?.found
+      && callbackRow.token
+    ) {
+      return this.evaluateFreeSceneUnlockCallback(
+        callbackBase,
+        callbackRow.token,
+        callbackBase.chat_id,
+      );
+    }
+
     if (!valid || !callbackBase.chat_id) {
       return {
         ...callbackBase,
@@ -1115,6 +1409,145 @@ export class MediaCommerceDecisionService {
     }
 
     return this.applyMediaActionDecision(callbackBase, context);
+  }
+
+  private async evaluateFreeFastSceneSkipCallback(
+    base: MediaCommerceDecisionResponse,
+    token: string,
+    chatId: number,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const redeemed = await this.runRepositoryOperation(
+      "callback.freeFastSceneSkip.redeem",
+      {
+        chat_id: chatId,
+        payment_kind: "feature",
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.redeemFreeFastSceneSkip(token, chatId),
+    );
+    const payload = parseJsonObject(redeemed?.payload_json) ?? {};
+
+    if (redeemed?.redeemed === true || redeemed?.already_consumed === true) {
+      return {
+        ...base,
+        operation: "feature_fulfillment_required",
+        callback_valid: true,
+        callback_answer_text: "",
+        chat_id:
+          normalizePositiveInteger(redeemed.chat_id)
+          ?? normalizePositiveInteger(payload.chat_id)
+          ?? chatId,
+        scene_session_id:
+          normalizeString(redeemed.scene_session_id)
+          ?? normalizeString(
+            typeof payload.scene_session_id === "string"
+              ? payload.scene_session_id
+              : null,
+          ),
+        turn_no:
+          normalizeNonNegativeInteger(payload.turn_no)
+          ?? normalizeNonNegativeInteger(redeemed.turn_no),
+        scene_turn_no: normalizeNonNegativeInteger(payload.scene_turn_no),
+        character_i: normalizePositiveInteger(payload.character_i),
+        scene_mode: normalizeString(
+          typeof payload.scene_mode === "string" ? payload.scene_mode : null,
+        ),
+        media_signature: normalizeString(
+          typeof payload.media_signature === "string"
+            ? payload.media_signature
+            : null,
+        ),
+        target_message_id:
+          normalizePositiveInteger(payload.target_message_id)
+          ?? base.target_message_id
+          ?? null,
+        payment_kind: "feature",
+        payment_token: token,
+        feature_key: "fast_scene_skip",
+        reason: redeemed.already_consumed
+          ? "free_fast_scene_skip_already_consumed"
+          : "free_fast_scene_skip_redeemed",
+      };
+    }
+
+    return {
+      ...base,
+      operation: "noop",
+      callback_valid: false,
+      callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      callback_show_alert: false,
+      payment_kind: "feature",
+      payment_token: token,
+      feature_key: "fast_scene_skip",
+      reason: redeemed?.reason ?? "free_fast_scene_skip_invalid",
+    };
+  }
+
+  private async evaluateFreeSceneUnlockCallback(
+    base: MediaCommerceDecisionResponse,
+    token: string,
+    chatId: number,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const redeemed = await this.runRepositoryOperation(
+      "callback.freeSceneUnlock.redeem",
+      {
+        chat_id: chatId,
+        payment_kind: "feature",
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.redeemFreeSceneUnlock(token, chatId),
+    );
+    const payload = parseJsonObject(redeemed?.payload_json) ?? {};
+
+    if (redeemed?.redeemed === true || redeemed?.already_fulfilled === true) {
+      return {
+        ...base,
+        operation: "scene_access_activated",
+        text: config.TELEGRAM_UX_COPY_JSON.callbacks.scene_access_activated,
+        callback_valid: true,
+        callback_answer_text: "",
+        chat_id:
+          normalizePositiveInteger(redeemed.chat_id)
+          ?? normalizePositiveInteger(payload.chat_id)
+          ?? chatId,
+        scene_session_id:
+          normalizeString(redeemed.scene_session_id)
+          ?? normalizeString(
+            typeof payload.scene_session_id === "string"
+              ? payload.scene_session_id
+              : null,
+          ),
+        turn_no:
+          normalizeNonNegativeInteger(payload.turn_no)
+          ?? normalizeNonNegativeInteger(redeemed.turn_no),
+        scene_turn_no: normalizeNonNegativeInteger(payload.scene_turn_no),
+        target_message_id:
+          normalizePositiveInteger(payload.target_message_id)
+          ?? base.target_message_id
+          ?? null,
+        payment_kind: "feature",
+        payment_token: token,
+        feature_key: "scene_unlock",
+        stored_count: redeemed.redeemed ? 1 : 0,
+        reason: redeemed.already_fulfilled
+          ? "already_active"
+          : "free_scene_unlock_redeemed",
+      };
+    }
+
+    return {
+      ...base,
+      operation: "noop",
+      callback_valid: false,
+      callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      callback_show_alert: false,
+      payment_kind: "feature",
+      payment_token: token,
+      feature_key: "scene_unlock",
+      reason: redeemed?.reason ?? "free_scene_unlock_invalid",
+    };
   }
 
   private async applyMediaActionDecision(
@@ -1168,11 +1601,42 @@ export class MediaCommerceDecisionService {
           decision.invoice_payload_json as NonNullable<typeof decision.invoice_payload_json>,
       })
       : null;
-    const sceneUnlockPlan =
+    const canOfferSceneUnlock =
       decision.invoice_kind === "photo"
       && context.subscription_active !== true
       && context.scene_access_active !== true
+      && Boolean(context.scene_session_id)
+      && Boolean(base.chat_id);
+    const freeCredits = canOfferSceneUnlock && base.chat_id
+      ? await this.repository.loadFreeCredits(base.chat_id as number)
+      : null;
+    const freeSceneUnlockButton =
+      config.TELEGRAM_UX_COPY_JSON.free_actions?.scene_unlock_button;
+    const freeSceneUnlockTokenRows =
+      canOfferSceneUnlock
       && context.scene_session_id
+      && base.chat_id
+      && freeSceneUnlockButton
+      && Math.max(0, Number(freeCredits?.free_scene_unlocks ?? 0)) > 0
+        ? [
+            buildFreeActionTokenRow({
+              action_kind: "free_scene_unlock",
+              chat_id: base.chat_id as number,
+              scene_session_id: context.scene_session_id,
+              turn_no: context.turn_no,
+              scene_turn_no: context.scene_turn_no,
+              media_signature: context.media_signature,
+              target_message_id: context.target_message_id,
+              current_uuid: decision.current_uuid,
+              base_price_xtr: Number(context.base_price_xtr ?? 10),
+              feature_key: "scene_unlock",
+              action_button_text: freeSceneUnlockButton,
+            }),
+          ]
+        : [];
+    const sceneUnlockPlan =
+      canOfferSceneUnlock
+      && freeSceneUnlockTokenRows.length === 0
         ? resolveActionPlanByFeatureKey("scene_unlock")
         : null;
     const sceneUnlockInvoiceInput =
@@ -1187,16 +1651,18 @@ export class MediaCommerceDecisionService {
         })
         : [];
 
-    if (decision.token_rows.length > 0 && shouldUpsertPhotoInvoice) {
+    const allTokenRows = [...decision.token_rows, ...freeSceneUnlockTokenRows];
+
+    if (allTokenRows.length > 0 && shouldUpsertPhotoInvoice) {
       const [insertedCount, storedInvoice] = await Promise.all([
-        this.repository.upsertCallbackTokens(decision.token_rows),
+        this.repository.upsertCallbackTokens(allTokenRows),
         this.repository.upsertInvoiceToken(photoInvoiceInput as NonNullable<typeof photoInvoiceInput>),
       ]);
       tokenRowsInserted = insertedCount;
       invoiceToken = storedInvoice;
     } else {
-      tokenRowsInserted = decision.token_rows.length > 0
-        ? await this.repository.upsertCallbackTokens(decision.token_rows)
+      tokenRowsInserted = allTokenRows.length > 0
+        ? await this.repository.upsertCallbackTokens(allTokenRows)
         : 0;
 
       if (shouldUpsertPhotoInvoice) {
@@ -1236,8 +1702,8 @@ export class MediaCommerceDecisionService {
       current_uuid: decision.current_uuid,
       photo_url: decision.photo_url,
       selected_uuid: decision.selected_uuid,
-      token_rows: decision.token_rows,
-      token_rows_prepared: decision.token_rows.length,
+      token_rows: allTokenRows,
+      token_rows_prepared: allTokenRows.length,
       token_rows_inserted: tokenRowsInserted,
       log_event_type: decision.log_event_type,
       access_mode: decision.access_mode,
@@ -2134,6 +2600,62 @@ export class MediaCommerceDecisionService {
     };
   }
 
+  private async resolveAbTestSelection(
+    chatId: number,
+    key: "subscription_offer",
+  ): Promise<AbTestSelection | null> {
+    const experiment = findActiveExperiment(config.EXPERIMENTS, key);
+    if (!experiment) {
+      return null;
+    }
+
+    const buildSelection = (
+      assignment: NonNullable<ReturnType<typeof parseAbTestAssignment>>,
+    ): AbTestSelection | null => {
+      const params = experiment.variants[assignment.variant];
+      if (!params) {
+        console.error("[media_commerce] ab_test_variant_missing", {
+          chat_id: chatId,
+          key,
+          starts_at: experiment.starts_at,
+          version: experiment.version,
+          variant: assignment.variant,
+        });
+        return null;
+      }
+
+      return {
+        assignment_key: experiment.assignment_key,
+        config: experiment,
+        assignment,
+        params,
+      };
+    };
+
+    const existingAssignment = parseAbTestAssignment(
+      await this.repository.loadAbTestAssignment(
+        chatId,
+        experiment.assignment_key,
+      ),
+    );
+    if (existingAssignment) {
+      return buildSelection(existingAssignment);
+    }
+
+    const assignment = buildAssignment({
+      variant: chooseVariant(experiment.distribution),
+    });
+    const storedAssignment = parseAbTestAssignment(
+      await this.repository.storeAbTestAssignment(
+        chatId,
+        experiment.assignment_key,
+        assignment,
+      ),
+    ) ?? assignment;
+
+    return buildSelection(storedAssignment);
+  }
+
   private async evaluateSubscriptionOffer(
     input: MediaCommerceDecisionRequest,
   ): Promise<MediaCommerceDecisionResponse> {
@@ -2156,57 +2678,114 @@ export class MediaCommerceDecisionService {
       normalizeNonNegativeInteger(input.turns_today) ?? turnLimit;
     const turnLimitResetText =
       normalizeString(input.turn_limit_reset_text) ?? config.TURN_LIMIT_RESET_TEXT;
-    const offerAccessStatus = await this.runRepositoryOperation(
-      "subscription.loadSceneAccessStatus",
-      {
-        chat_id: chatId,
-        payment_kind: null,
-        sku: null,
-        invoice_status: null,
-      },
-      () => this.repository.loadSceneAccessStatus({
-        chat_id: chatId,
-        scene_session_id: null,
-      }),
+    const abSelection = await this.resolveAbTestSelection(
+      chatId,
+      "subscription_offer",
     );
+    const abContext = toAbTestContext(abSelection);
+    const abParams = abSelection?.params ?? {};
+    const abTokenSuffix = buildAbTokenSuffix(abSelection);
+    const effectiveIdempotencyKey =
+      abTokenSuffix != null
+        ? `${idempotencyKey}:ab_${abTokenSuffix}`
+        : idempotencyKey;
+    const offerText = resolveSubscriptionOfferText(
+      abParams,
+      subscriptionOfferReason,
+    );
+    const [offerAccessStatus, freeCredits] = await Promise.all([
+      this.runRepositoryOperation(
+        "subscription.loadSceneAccessStatus",
+        {
+          chat_id: chatId,
+          payment_kind: null,
+          sku: null,
+          invoice_status: null,
+        },
+        () => this.repository.loadSceneAccessStatus({
+          chat_id: chatId,
+          scene_session_id: null,
+        }),
+      ),
+      this.repository.loadFreeCredits(chatId),
+    ]);
     const subscriptionActive = offerAccessStatus?.subscription_active === true;
     const sceneAccessActive = offerAccessStatus?.scene_access_active === true;
     const activeSceneSessionId =
       normalizeString(offerAccessStatus?.active_scene_session_id)
+      ?? normalizeString(freeCredits?.active_scene_session_id)
       ?? null;
+    const freeSceneUnlockButton =
+      config.TELEGRAM_UX_COPY_JSON.free_actions?.scene_unlock_button;
+    const freeSceneUnlockTokenRows =
+      !subscriptionActive
+      && !sceneAccessActive
+      && activeSceneSessionId
+      && abParams.scene_unlock?.enabled !== false
+      && freeSceneUnlockButton
+      && Math.max(0, Number(freeCredits?.free_scene_unlocks ?? 0)) > 0
+        ? [
+            buildFreeActionTokenRow({
+              action_kind: "free_scene_unlock",
+              chat_id: chatId,
+              scene_session_id: activeSceneSessionId,
+              turn_no: null,
+              scene_turn_no: null,
+              target_message_id: null,
+              feature_key: "scene_unlock",
+              action_button_text: freeSceneUnlockButton,
+              ab_test: abContext,
+            }),
+          ]
+        : [];
     const sceneUnlockPlan =
-      !subscriptionActive && !sceneAccessActive && activeSceneSessionId
-        ? resolveActionPlanByFeatureKey("scene_unlock")
+      !subscriptionActive
+      && !sceneAccessActive
+      && activeSceneSessionId
+      && freeSceneUnlockTokenRows.length === 0
+        ? applySceneUnlockOverride(
+          resolveActionPlanByFeatureKey("scene_unlock"),
+          abParams,
+        )
         : null;
+    const subscriptionPlans = applySubscriptionPlanOverrides(
+      resolveSubscriptionPlans(),
+      abParams,
+    );
     const invoiceInputs = [
       ...(sceneUnlockPlan && activeSceneSessionId
         ? buildSceneUnlockPaymentInputs({
           chat_id: chatId,
           scene_session_id: activeSceneSessionId,
-          idempotency_key: idempotencyKey,
+          idempotency_key: effectiveIdempotencyKey,
           subscription_offer_reason: subscriptionOfferReason,
           turn_limit: turnLimit,
           turns_today: turnsToday,
           turn_limit_reset_text: turnLimitResetText,
           plan: sceneUnlockPlan,
+          ab_test: abContext,
         })
         : []),
-      ...resolveSubscriptionPlans().flatMap((plan, index) =>
+      ...subscriptionPlans.flatMap((plan, index) =>
         buildSubscriptionPaymentInputs({
           chat_id: chatId,
-          idempotency_key: idempotencyKey,
+          idempotency_key: effectiveIdempotencyKey,
           subscription_offer_reason: subscriptionOfferReason,
           turn_limit: turnLimit,
           turns_today: turnsToday,
           turn_limit_reset_text: turnLimitResetText,
           sort_order: index + 1,
           plan,
+          ab_test: abContext,
         })),
     ];
 
     const upsertedRows = await this.repository.upsertInvoiceTokens(
       invoiceInputs,
     );
+    const tokenRowsInserted = freeSceneUnlockTokenRows.length > 0
+      ? await this.repository.upsertCallbackTokens(freeSceneUnlockTokenRows)
+      : 0;
     const tokenList = upsertedRows.map((row) => row.token);
     const rows = await Promise.all(
       upsertedRows.map((row) =>
@@ -2234,6 +2813,7 @@ export class MediaCommerceDecisionService {
       ...base,
       operation: "subscription_offer_ready",
       chat_id: chatId,
+      scene_session_id: activeSceneSessionId,
       offer_message_id: offerMessageId,
       offer_sent: false,
       offer_reused: offerMessageId != null,
@@ -2241,6 +2821,11 @@ export class MediaCommerceDecisionService {
       turn_limit: turnLimit,
       turns_today: turnsToday,
       turn_limit_reset_text: turnLimitResetText,
+      token_rows: freeSceneUnlockTokenRows,
+      token_rows_prepared: freeSceneUnlockTokenRows.length,
+      token_rows_inserted: tokenRowsInserted,
+      text: offerText,
+      ab_test: abContext,
       subscription_offer_items: groupOfferItems(sortedRows),
       subscription_invoice_tokens: tokenList,
       reason:
@@ -2322,6 +2907,46 @@ export class MediaCommerceDecisionService {
         offerMessageId,
       ),
     );
+    const abTest = parseJsonObject(input.ab_test) ?? {};
+    const abTestKey = normalizeString(
+      typeof abTest.key === "string" ? abTest.key : null,
+    );
+    const abTestStartsAt = normalizeString(
+      typeof abTest.starts_at === "string" ? abTest.starts_at : null,
+    );
+    const abTestVersion = normalizeString(
+      typeof abTest.version === "string" ? abTest.version : null,
+    );
+    const abTestVariant = normalizeString(
+      typeof abTest.variant === "string" ? abTest.variant : null,
+    );
+    const deliveredAbTest =
+      abTestKey && abTestStartsAt && abTestVersion && abTestVariant
+        ? {
+            key: abTestKey,
+            starts_at: abTestStartsAt,
+            version: abTestVersion,
+            variant: abTestVariant,
+          }
+        : null;
+    const abDeliveredEventsInserted = deliveredAbTest
+      ? await this.runRepositoryOperation(
+        "subscription.recordAbTestDelivered",
+        {
+          chat_id: chatId,
+          payment_kind: null,
+          sku: null,
+          invoice_status: null,
+        },
+        () => this.repository.recordAbTestDelivered({
+          chat_id: chatId,
+          scene_session_id: normalizeString(input.scene_session_id),
+          turn_no: normalizeNonNegativeInteger(input.turn_no),
+          scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
+          ab_test: deliveredAbTest,
+        }),
+      )
+      : 0;
 
     return {
       ...base,
@@ -2332,6 +2957,8 @@ export class MediaCommerceDecisionService {
       offer_sent: updatedCount > 0,
       offer_reused: false,
       stored_count: updatedCount,
+      inserted_count: abDeliveredEventsInserted,
+      ab_test: deliveredAbTest,
       reason:
         updatedCount > 0
           ? "subscription_offer_message_stored"

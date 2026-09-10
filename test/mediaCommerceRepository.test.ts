@@ -490,6 +490,78 @@ test("releaseSbpCheckoutCreation delegates to media_release_sbp_checkout_creatio
   assert.match(calls[0]?.sql ?? "", /public\.media_release_sbp_checkout_creation/u);
 });
 
+test("loadFreeCredits reads balances from chat_state", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      chat_id: 101,
+      active_scene_session_id: "scene-1",
+      free_fast_scene_skips: 2,
+      free_scene_unlocks: 1,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.loadFreeCredits(101);
+
+  assert.equal(result?.chat_id, 101);
+  assert.equal(result?.active_scene_session_id, "scene-1");
+  assert.equal(result?.free_fast_scene_skips, 2);
+  assert.equal(result?.free_scene_unlocks, 1);
+  assert.match(calls[0]?.sql ?? "", /FROM public\.chat_state cs/u);
+});
+
+test("redeemFreeFastSceneSkip delegates to media_redeem_free_fast_scene_skip", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      token: "free-skip-token",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      payload_json: { action_kind: "free_fast_scene_skip" },
+      action_kind: "free_fast_scene_skip",
+      status: "active",
+      redeemed: true,
+      already_consumed: false,
+      already_fulfilled: false,
+      remaining_credits: 0,
+      reason: "redeemed",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.redeemFreeFastSceneSkip("free-skip-token", 101);
+
+  assert.equal(result?.redeemed, true);
+  assert.equal(result?.action_kind, "free_fast_scene_skip");
+  assert.match(calls[0]?.sql ?? "", /FROM public\.media_redeem_free_fast_scene_skip\(/u);
+});
+
+test("redeemFreeSceneUnlock delegates to media_redeem_free_scene_unlock", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      token: "free-unlock-token",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      payload_json: { action_kind: "free_scene_unlock" },
+      action_kind: "free_scene_unlock",
+      status: "fulfilled",
+      redeemed: true,
+      already_consumed: false,
+      already_fulfilled: false,
+      remaining_credits: 0,
+      reason: "redeemed",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.redeemFreeSceneUnlock("free-unlock-token", 101);
+
+  assert.equal(result?.redeemed, true);
+  assert.equal(result?.action_kind, "free_scene_unlock");
+  assert.match(calls[0]?.sql ?? "", /FROM public\.media_redeem_free_scene_unlock\(/u);
+});
+
 test("loadStoredInvoiceTokens delegates to media_load_stored_invoice_tokens", async () => {
   const { query, calls } = createTaggedQueryStub([[
     {
@@ -536,6 +608,75 @@ test("storeSubscriptionOfferMessageId delegates to media_store_subscription_offe
   assert.equal(result, 2);
   assert.match(calls[0]?.sql ?? "", /public\.media_store_subscription_offer_message_id/u);
   assertJsonbParameter(calls[0]?.values[0], ["inv-1", "inv-2"]);
+});
+
+test("loadAbTestAssignment reads one assignment from chat_state json", async () => {
+  const assignment = {
+    variant: "B",
+    assigned_at: "2026-09-10T10:00:00.000Z",
+  };
+  const { query, calls } = createTaggedQueryStub([[{ assignment }]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.loadAbTestAssignment(
+    101,
+    "subscription_offer|2020-01-01T00:00:00+00:00",
+  );
+
+  assert.deepEqual(result, assignment);
+  assert.match(calls[0]?.sql ?? "", /cs\.ab_tests_json ->/u);
+  assert.match(calls[0]?.sql ?? "", /WHERE cs\.chat_id =/u);
+});
+
+test("storeAbTestAssignment stores assignment only when the run key is absent", async () => {
+  const assignment = {
+    variant: "B",
+    assigned_at: "2026-09-10T10:00:00.000Z",
+  };
+  const { query, calls } = createTaggedQueryStub([[{ assignment }]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.storeAbTestAssignment(
+    101,
+    "subscription_offer|2020-01-01T00:00:00+00:00",
+    assignment,
+  );
+
+  assert.deepEqual(result, assignment);
+  assert.match(calls[0]?.sql ?? "", /jsonb_set/u);
+  assert.match(calls[0]?.sql ?? "", /NOT \(/u);
+  assert.match(calls[0]?.sql ?? "", /\? \$\d+::text/u);
+  assertJsonbParameter(calls[0]?.values[1], assignment);
+});
+
+test("recordAbTestDelivered writes minimal internal event into chat_messages", async () => {
+  const { query, calls } = createTaggedQueryStub([[{ inserted_count: 1 }]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.recordAbTestDelivered({
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    ab_test: {
+      key: "subscription_offer",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      version: "v2",
+      variant: "B",
+    },
+  });
+
+  assert.equal(result, 1);
+  assert.match(calls[0]?.sql ?? "", /INSERT INTO public\.chat_messages/u);
+  assert.match(calls[0]?.sql ?? "", /'ab_delivered'/u);
+  assert.match(calls[0]?.sql ?? "", /'internal'/u);
+  assert.match(calls[0]?.sql ?? "", /ON CONFLICT \(source, chat_id, source_event_id\)/u);
+  assertJsonbParameter(calls[0]?.values[5], {
+    key: "subscription_offer",
+    starts_at: "2020-01-01T00:00:00+00:00",
+    version: "v2",
+    variant: "B",
+  });
 });
 
 test("storePrecheckoutResult marks rejected invoice_sent token as failed in atomic SQL", async () => {

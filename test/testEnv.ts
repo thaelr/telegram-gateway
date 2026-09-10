@@ -17,6 +17,12 @@ export const testTelegramUxCopy = {
   },
   paysupport: {
     message_html: "text",
+    free_fast_scene_skips_line: "fast skips: {count}",
+    free_scene_unlocks_line: "scene unlocks: {count}",
+  },
+  free_actions: {
+    fast_scene_skip_button: "free skip {count}",
+    scene_unlock_button: "free unlock",
   },
   scene_mode: {
     choice: "text",

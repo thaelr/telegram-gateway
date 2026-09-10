@@ -64,6 +64,8 @@ function buildAccessContext(overrides: Partial<AccessContext> = {}): AccessConte
     subscription_active: false,
     active_scene_session_id: null,
     scene_access_active: false,
+    free_fast_scene_skips: 0,
+    free_scene_unlocks: 0,
     turns_today: 0,
     scene_turn_no: -1,
     selected_character_i: null,

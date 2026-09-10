@@ -61,6 +61,7 @@ export const mediaCommerceRequestSchema = z.object({
   turn_limit_reset_text: z.string().trim().nullable().optional(),
   idempotency_key: z.string().trim().nullable().optional(),
   offer_message_id: z.coerce.number().int().positive().nullable().optional(),
+  ab_test: z.unknown().nullable().optional(),
   subscription_invoice_tokens: z
     .array(z.string().trim().min(1))
     .nullable()

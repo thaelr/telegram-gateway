@@ -90,6 +90,8 @@ function buildAccessContext(
     subscription_active: false,
     active_scene_session_id: null,
     scene_access_active: false,
+    free_fast_scene_skips: 0,
+    free_scene_unlocks: 0,
     turns_today: 0,
     scene_turn_no: -1,
     selected_character_i: 1,
@@ -517,6 +519,83 @@ test("scene message is classified by event_type without route_target", async () 
   assert.equal(result.decision, "allow_scene");
   assert.equal(result.allowed, true);
   assert.equal(calls.length, 1);
+});
+
+test("paysupport appends both free credit lines from ux copy", async () => {
+  const { service } = createService(
+    buildAccessContext({
+      free_fast_scene_skips: 2,
+      free_scene_unlocks: 1,
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/paysupport",
+      event_type: "command.received",
+      message_type: "command",
+    }),
+  );
+
+  assert.equal(result.action, "send_paysupport_message");
+  assert.equal(result.text, "text\nfast skips: 2\nscene unlocks: 1");
+  assert.equal(result.parse_mode, "HTML");
+});
+
+test("paysupport omits zero free credit lines", async () => {
+  const { service } = createService(
+    buildAccessContext({
+      free_fast_scene_skips: 3,
+      free_scene_unlocks: 0,
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/paysupport",
+      event_type: "command.received",
+      message_type: "command",
+    }),
+  );
+
+  assert.equal(result.text, "text\nfast skips: 3");
+});
+
+test("paysupport shows base message only when free credits are zero", async () => {
+  const { service } = createService();
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/paysupport",
+      event_type: "command.received",
+      message_type: "command",
+    }),
+  );
+
+  assert.equal(result.text, "text");
+});
+
+test("paysupport shows free credits even with active subscription", async () => {
+  const { service } = createService(
+    buildAccessContext({
+      subscription_active: true,
+      subscription_sku: "payment_plan_2",
+      subscription_until: "2026-09-30T10:00:00.000Z",
+      free_fast_scene_skips: 1,
+      free_scene_unlocks: 1,
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/paysupport",
+      event_type: "command.received",
+      message_type: "command",
+    }),
+  );
+
+  assert.equal(result.action, "send_paysupport_message");
+  assert.equal(result.text, "text\nfast skips: 1\nscene unlocks: 1");
 });
 
 test("scene mode callback is not blocked by daily limit", async () => {

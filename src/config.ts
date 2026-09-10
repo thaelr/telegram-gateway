@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { loadExperimentConfigsFromEnv } from "./abTesting.js";
 
 const invoicePlanSchema = z.object({
   sku: z.string().min(1),
@@ -62,7 +63,13 @@ const telegramUxCopySchema = z.object({
   }),
   paysupport: z.object({
     message_html: textSchema,
+    free_fast_scene_skips_line: textSchema.optional(),
+    free_scene_unlocks_line: textSchema.optional(),
   }),
+  free_actions: z.object({
+    fast_scene_skip_button: textSchema,
+    scene_unlock_button: textSchema,
+  }).optional(),
   scene_mode: z.object({
     choice: textSchema,
     roleplay_button: textSchema,
@@ -254,4 +261,5 @@ if (normalizedSbpConfig.SBP_ENABLED) {
 export const config = {
   ...parsedEnv,
   ...normalizedSbpConfig,
+  EXPERIMENTS: loadExperimentConfigsFromEnv(process.env),
 };

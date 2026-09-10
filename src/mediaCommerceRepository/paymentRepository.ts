@@ -2,8 +2,10 @@ import type { PaidInvoiceToken } from "../mediaCommerceTypes.js";
 import type {
   ActivateSceneAccessInput,
   ActivateSubscriptionInput,
+  LoadFreeCreditsResult,
   MarkInvoicePaidInput,
   QueryClient,
+  RedeemFreeActionResult,
   SceneAccessStatus,
   SceneAccessStatusInput,
   StorePrecheckoutResultInput,
@@ -94,6 +96,51 @@ export class MediaPaymentRepository {
        AND css.scene_session_id = COALESCE(${input.scene_session_id}::text, cs.active_scene_session_id)
       WHERE cs.chat_id = ${input.chat_id}::bigint
       LIMIT 1
+    `;
+
+    return rows[0] ?? null;
+  }
+
+  async loadFreeCredits(chatId: number): Promise<LoadFreeCreditsResult | null> {
+    const rows = await this.query<LoadFreeCreditsResult[]>`
+      SELECT
+        cs.chat_id,
+        cs.active_scene_session_id,
+        COALESCE(cs.free_fast_scene_skips, 0)::integer AS free_fast_scene_skips,
+        COALESCE(cs.free_scene_unlocks, 0)::integer AS free_scene_unlocks
+      FROM public.chat_state cs
+      WHERE cs.chat_id = ${chatId}::bigint
+      LIMIT 1
+    `;
+
+    return rows[0] ?? null;
+  }
+
+  async redeemFreeFastSceneSkip(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<RedeemFreeActionResult | null> {
+    const rows = await this.query<RedeemFreeActionResult[]>`
+      SELECT *
+      FROM public.media_redeem_free_fast_scene_skip(
+        ${token}::text,
+        ${chatId}::bigint
+      )
+    `;
+
+    return rows[0] ?? null;
+  }
+
+  async redeemFreeSceneUnlock(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<RedeemFreeActionResult | null> {
+    const rows = await this.query<RedeemFreeActionResult[]>`
+      SELECT *
+      FROM public.media_redeem_free_scene_unlock(
+        ${token}::text,
+        ${chatId}::bigint
+      )
     `;
 
     return rows[0] ?? null;

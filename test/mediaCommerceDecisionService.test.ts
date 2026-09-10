@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type {
+  AbTestAssignment,
   InteractionTokenRow,
   LoadedCallbackToken,
+  FreeActionRedeemResult,
+  FreeCredits,
   LoadedInvoiceToken,
   MediaContext,
   MediaOfferItem,
@@ -101,6 +104,10 @@ const { MediaCommerceDecisionService } = await import(
 );
 const { config } = await import("../src/config.js");
 const { SbpPaymentError } = await import("../src/payments/sbp.js");
+const {
+  buildAssignment,
+  loadExperimentConfigsFromEnv,
+} = await import("../src/abTesting.js");
 
 type MockRepository = {
   loadOfferStats: (
@@ -162,6 +169,17 @@ type MockRepository = {
     scene_access_active: boolean;
     scene_is_active: boolean;
   } | null>;
+  loadFreeCredits: (
+    chatId: number,
+  ) => Promise<FreeCredits | null>;
+  redeemFreeFastSceneSkip: (
+    token: string | null,
+    chatId: number | null,
+  ) => Promise<FreeActionRedeemResult | null>;
+  redeemFreeSceneUnlock: (
+    token: string | null,
+    chatId: number | null,
+  ) => Promise<FreeActionRedeemResult | null>;
   storePhotoEvent: (
     input: unknown,
   ) => Promise<{
@@ -193,10 +211,22 @@ type MockRepository = {
   loadStoredInvoiceTokens: (
     tokens: string[],
   ) => Promise<StoredInvoiceToken[]>;
+  loadAbTestAssignment: (
+    chatId: number,
+    assignmentKey: string,
+  ) => Promise<AbTestAssignment | null>;
+  storeAbTestAssignment: (
+    chatId: number,
+    assignmentKey: string,
+    assignment: AbTestAssignment,
+  ) => Promise<AbTestAssignment | null>;
   storeSubscriptionOfferMessageId: (
     tokens: string[],
     chatId: number,
     offerMessageId: number,
+  ) => Promise<number>;
+  recordAbTestDelivered: (
+    input: unknown,
   ) => Promise<number>;
 };
 
@@ -517,6 +547,12 @@ function createRepository(
     activateSubscription: 0,
     activateSceneAccess: 0,
     loadSceneAccessStatus: 0,
+    loadFreeCredits: 0,
+    redeemFreeFastSceneSkip: 0,
+    redeemFreeSceneUnlock: 0,
+    loadAbTestAssignment: 0,
+    storeAbTestAssignment: 0,
+    recordAbTestDelivered: 0,
   };
 
   const repository: MockRepository = {
@@ -696,6 +732,68 @@ function createRepository(
         scene_is_active: true,
       };
     },
+    async loadFreeCredits(chatId) {
+      calls.loadFreeCredits += 1;
+      return {
+        chat_id: chatId,
+        active_scene_session_id: "scene-1",
+        free_fast_scene_skips: 0,
+        free_scene_unlocks: 0,
+      };
+    },
+    async redeemFreeFastSceneSkip(token, chatId) {
+      calls.redeemFreeFastSceneSkip += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: {
+          action_kind: "free_fast_scene_skip",
+          chat_id: chatId,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          character_i: 2,
+          scene_mode: "fast",
+          media_signature: "hotel_corridor_close",
+          target_message_id: 777,
+          feature_key: "fast_scene_skip",
+        },
+        action_kind: "free_fast_scene_skip",
+        status: "active",
+        redeemed: true,
+        already_consumed: false,
+        already_fulfilled: false,
+        remaining_credits: 0,
+        reason: "redeemed",
+      };
+    },
+    async redeemFreeSceneUnlock(token, chatId) {
+      calls.redeemFreeSceneUnlock += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: {
+          action_kind: "free_scene_unlock",
+          chat_id: chatId,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          target_message_id: 777,
+          feature_key: "scene_unlock",
+        },
+        action_kind: "free_scene_unlock",
+        status: "fulfilled",
+        redeemed: true,
+        already_consumed: false,
+        already_fulfilled: false,
+        remaining_credits: 0,
+        reason: "redeemed",
+      };
+    },
     async storePhotoEvent() {
       return {
         chat_id: 101,
@@ -759,8 +857,20 @@ function createRepository(
         }),
       );
     },
+    async loadAbTestAssignment() {
+      calls.loadAbTestAssignment += 1;
+      return null;
+    },
+    async storeAbTestAssignment(_chatId, _assignmentKey, assignment) {
+      calls.storeAbTestAssignment += 1;
+      return assignment;
+    },
     async storeSubscriptionOfferMessageId() {
       return 2;
+    },
+    async recordAbTestDelivered() {
+      calls.recordAbTestDelivered += 1;
+      return 1;
     },
     ...overrides,
   };
@@ -802,6 +912,19 @@ async function withPromotions<T>(
     return await run();
   } finally {
     config.MEDIA_PROMOTIONS_JSON = previous;
+  }
+}
+
+async function withExperiments<T>(
+  experiments: typeof config.EXPERIMENTS,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = config.EXPERIMENTS;
+  config.EXPERIMENTS = experiments;
+  try {
+    return await run();
+  } finally {
+    config.EXPERIMENTS = previous;
   }
 }
 
@@ -954,6 +1077,40 @@ test("prepare_offer adds scene unlock invoice under paid photo offers", async ()
   assert.equal(result.scene_unlock_offer_item?.feature_key, "scene_unlock");
 });
 
+test("prepare_offer returns free scene unlock callback instead of paid scene unlock when credit is available", async () => {
+  const { service, calls } = createRepository({
+    async loadOfferStats() {
+      return buildOfferStats({
+        delivered_in_scene: 3,
+        unseen_available: 2,
+      });
+    },
+    async loadFreeCredits(chatId) {
+      calls.loadFreeCredits += 1;
+      return {
+        chat_id: chatId,
+        active_scene_session_id: "scene-1",
+        free_fast_scene_skips: 0,
+        free_scene_unlocks: 1,
+      };
+    },
+    async upsertInvoiceTokens() {
+      assert.fail("free scene unlock must suppress paid scene unlock invoice rows");
+    },
+  });
+
+  const result = await service.evaluate(buildRequest());
+
+  assert.equal(result.operation, "prepare_offer_ready");
+  assert.equal(result.invoice_link, "https://t.me/generated-invoice-1");
+  assert.equal(result.scene_unlock_offer_item, null);
+  assert.equal(result.token_rows?.length, 1);
+  assert.equal(result.token_rows?.[0]?.action_kind, "free_scene_unlock");
+  assert.equal(result.token_rows?.[0]?.payload_json.action_button_text, "free unlock");
+  assert.equal(calls.createStarsInvoice, 1);
+  assert.equal(calls.loadFreeCredits, 1);
+});
+
 test("prepare_offer makes paid photos free after scene pass", async () => {
   const { service } = createRepository({
     async loadOfferStats() {
@@ -1063,6 +1220,43 @@ test("feature_offer is routed in TS and returns a ready Stars invoice", async ()
   assert.equal(result.scene_mode, "fast");
   assert.equal(result.target_message_id, 777);
   assert.equal(calls.createStarsInvoice, 1);
+});
+
+test("feature_offer returns free fast scene skip callback when credit is available", async () => {
+  const { service, calls } = createRepository({
+    async loadFreeCredits(chatId) {
+      calls.loadFreeCredits += 1;
+      return {
+        chat_id: chatId,
+        active_scene_session_id: "scene-1",
+        free_fast_scene_skips: 2,
+        free_scene_unlocks: 0,
+      };
+    },
+    async upsertInvoiceTokens() {
+      assert.fail("free fast scene skip offer must not create payment rows");
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "feature_offer",
+      character_i: 2,
+      scene_mode: "fast",
+      target_message_id: 777,
+    }),
+  );
+
+  assert.equal(result.operation, "feature_offer_required");
+  assert.equal(result.reason, "free_fast_scene_skip_available");
+  assert.equal(result.payment_options?.length, 0);
+  assert.equal(result.token_rows?.length, 1);
+  assert.equal(result.token_rows?.[0]?.action_kind, "free_fast_scene_skip");
+  assert.equal(result.token_rows?.[0]?.payload_json.action_button_text, "free skip 2");
+  assert.equal(result.token_rows_inserted, 1);
+  assert.equal(calls.loadFreeCredits, 1);
+  assert.equal(calls.createStarsInvoice, 0);
+  assert.equal(calls.createSbpPayment, 0);
 });
 
 test("feature_offer returns Stars and SBP payment options when SBP is enabled", async () => {
@@ -1637,6 +1831,357 @@ test("invalid callback returns noop without media context query", async () => {
   assert.equal(result.callback_valid, false);
   assert.equal(result.callback_answer_text, "text");
   assert.equal(calls.loadMediaContext, 0);
+});
+
+test("free fast scene skip callback redeems credit and returns existing fulfillment contract", async () => {
+  const { service, calls } = createRepository({
+    async loadCallbackToken(token, chatId) {
+      calls.loadCallbackTokenArgs.push({ token, chatId });
+      return buildLoadedCallbackToken({
+        token: "free-skip-token",
+        action_kind: "free_fast_scene_skip",
+        payload_json: {
+          action_kind: "free_fast_scene_skip",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          character_i: 2,
+          scene_mode: "fast",
+          media_signature: "hotel_corridor_close",
+          target_message_id: 777,
+          feature_key: "fast_scene_skip",
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "free-skip-token",
+      inbound_message_id: 777,
+    }),
+  );
+
+  assert.equal(result.operation, "feature_fulfillment_required");
+  assert.equal(result.feature_key, "fast_scene_skip");
+  assert.equal(result.payment_token, "free-skip-token");
+  assert.equal(result.character_i, 2);
+  assert.equal(result.scene_mode, "fast");
+  assert.equal(result.reason, "free_fast_scene_skip_redeemed");
+  assert.equal(calls.redeemFreeFastSceneSkip, 1);
+  assert.equal(calls.loadMediaContext, 0);
+});
+
+test("free fast scene skip callback retry after consumed credit and scene switch returns fulfillment again", async () => {
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "free-skip-token",
+        action_kind: "free_fast_scene_skip",
+        payload_json: {
+          action_kind: "free_fast_scene_skip",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          character_i: 2,
+          scene_mode: "fast",
+          skip_scene_session_id: "fast-scene-2",
+          target_message_id: 777,
+          feature_key: "fast_scene_skip",
+        },
+      });
+    },
+    async redeemFreeFastSceneSkip(token, chatId) {
+      calls.redeemFreeFastSceneSkip += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: {
+          action_kind: "free_fast_scene_skip",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          character_i: 2,
+          scene_mode: "fast",
+          skip_scene_session_id: "fast-scene-2",
+          target_message_id: 777,
+          feature_key: "fast_scene_skip",
+        },
+        action_kind: "free_fast_scene_skip",
+        status: "active",
+        redeemed: false,
+        already_consumed: true,
+        already_fulfilled: false,
+        remaining_credits: 0,
+        reason: "already_consumed",
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "free-skip-token",
+      inbound_message_id: 777,
+    }),
+  );
+
+  assert.equal(result.operation, "feature_fulfillment_required");
+  assert.equal(result.reason, "free_fast_scene_skip_already_consumed");
+  assert.equal(result.payment_token, "free-skip-token");
+  assert.equal(calls.redeemFreeFastSceneSkip, 1);
+  assert.equal(calls.loadMediaContext, 0);
+});
+
+test("fulfilled free fast scene skip callback does not trigger fulfillment again", async () => {
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "free-skip-token",
+        status: "fulfilled",
+        action_kind: "free_fast_scene_skip",
+        payload_json: {
+          action_kind: "free_fast_scene_skip",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          feature_key: "fast_scene_skip",
+        },
+      });
+    },
+    async redeemFreeFastSceneSkip(token, chatId) {
+      calls.redeemFreeFastSceneSkip += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: {
+          action_kind: "free_fast_scene_skip",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          feature_key: "fast_scene_skip",
+        },
+        action_kind: "free_fast_scene_skip",
+        status: "fulfilled",
+        redeemed: false,
+        already_consumed: false,
+        already_fulfilled: true,
+        remaining_credits: 0,
+        reason: "already_fulfilled",
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "free-skip-token",
+    }),
+  );
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.reason, "already_fulfilled");
+  assert.equal(calls.redeemFreeFastSceneSkip, 1);
+  assert.equal(calls.loadMediaContext, 0);
+});
+
+test("stale free fast scene skip callback does not trigger fulfillment", async () => {
+  const { service } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "free-skip-token",
+        action_kind: "free_fast_scene_skip",
+        payload_json: {
+          action_kind: "free_fast_scene_skip",
+          chat_id: 101,
+          scene_session_id: "old-scene",
+          feature_key: "fast_scene_skip",
+        },
+      });
+    },
+    async redeemFreeFastSceneSkip(token, chatId) {
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "old-scene",
+        turn_no: 5,
+        payload_json: {
+          action_kind: "free_fast_scene_skip",
+          chat_id: 101,
+          scene_session_id: "old-scene",
+          feature_key: "fast_scene_skip",
+        },
+        action_kind: "free_fast_scene_skip",
+        status: "active",
+        redeemed: false,
+        already_consumed: false,
+        already_fulfilled: false,
+        remaining_credits: 1,
+        reason: "stale_scene",
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "free-skip-token",
+    }),
+  );
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.reason, "stale_scene");
+  assert.equal(result.feature_key, "fast_scene_skip");
+});
+
+test("free scene unlock callback activates scene access through existing contract", async () => {
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "free-unlock-token",
+        action_kind: "free_scene_unlock",
+        payload_json: {
+          action_kind: "free_scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          target_message_id: 777,
+          feature_key: "scene_unlock",
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "free-unlock-token",
+      inbound_message_id: 777,
+    }),
+  );
+
+  assert.equal(result.operation, "scene_access_activated");
+  assert.equal(result.feature_key, "scene_unlock");
+  assert.equal(result.payment_token, "free-unlock-token");
+  assert.equal(result.target_message_id, 777);
+  assert.equal(result.reason, "free_scene_unlock_redeemed");
+  assert.equal(calls.redeemFreeSceneUnlock, 1);
+  assert.equal(calls.loadMediaContext, 0);
+});
+
+test("free scene unlock duplicate fulfilled callback is idempotent", async () => {
+  const { service } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "free-unlock-token",
+        status: "fulfilled",
+        action_kind: "free_scene_unlock",
+        payload_json: {
+          action_kind: "free_scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          target_message_id: 777,
+          feature_key: "scene_unlock",
+        },
+      });
+    },
+    async redeemFreeSceneUnlock(token, chatId) {
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: {
+          action_kind: "free_scene_unlock",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          target_message_id: 777,
+          feature_key: "scene_unlock",
+        },
+        action_kind: "free_scene_unlock",
+        status: "fulfilled",
+        redeemed: false,
+        already_consumed: false,
+        already_fulfilled: true,
+        remaining_credits: 0,
+        reason: "already_fulfilled",
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "free-unlock-token",
+    }),
+  );
+
+  assert.equal(result.operation, "scene_access_activated");
+  assert.equal(result.reason, "already_active");
+  assert.equal(result.payment_token, "free-unlock-token");
+});
+
+test("stale free scene unlock callback does not activate access", async () => {
+  const { service } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "free-unlock-token",
+        action_kind: "free_scene_unlock",
+        payload_json: {
+          action_kind: "free_scene_unlock",
+          chat_id: 101,
+          scene_session_id: "old-scene",
+          feature_key: "scene_unlock",
+        },
+      });
+    },
+    async redeemFreeSceneUnlock(token, chatId) {
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "old-scene",
+        turn_no: 5,
+        payload_json: {
+          action_kind: "free_scene_unlock",
+          chat_id: 101,
+          scene_session_id: "old-scene",
+          feature_key: "scene_unlock",
+        },
+        action_kind: "free_scene_unlock",
+        status: "active",
+        redeemed: false,
+        already_consumed: false,
+        already_fulfilled: false,
+        remaining_credits: 1,
+        reason: "stale_scene",
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "free-unlock-token",
+    }),
+  );
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.reason, "stale_scene");
+  assert.equal(result.feature_key, "scene_unlock");
 });
 
 test("callback photo request returns next media step with ready invoice links", async () => {
@@ -2880,6 +3425,578 @@ test("subscription_offer creates missing invoice links internally", async () => 
   assert.equal(calls.createStarsInvoice, 3);
 });
 
+test("subscription_offer assigns sticky ab group and stores compact context in payment tokens", async () => {
+  const [experiment] = loadExperimentConfigsFromEnv({
+    EXP_SUBSCRIPTION_OFFER_SEP_JSON: JSON.stringify({
+      key: "subscription_offer",
+      version: "v1",
+      description: "Subscription offer B",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      ends_at: "2100-01-01T00:00:00+00:00",
+      distribution: { B: 100 },
+      variants: {
+        B: {
+          command_offer_text: "B command offer",
+          scene_unlock: { enabled: false },
+          plans: [
+            {
+              sku: "payment_plan_2",
+              amount_xtr: 111,
+              title: "B title",
+              description: "B description",
+              label: "B label",
+              button_text: "B button",
+            },
+            {
+              sku: "payment_plan_3",
+              enabled: false,
+            },
+          ],
+        },
+      },
+    }),
+  });
+  const assignments = new Map<string, AbTestAssignment>();
+  const capturedBatches: unknown[][] = [];
+  let loadAssignments = 0;
+  let storeAssignments = 0;
+  const { service } = createRepository({
+    async loadAbTestAssignment(_chatId, assignmentKey) {
+      loadAssignments += 1;
+      return assignments.get(assignmentKey) ?? null;
+    },
+    async storeAbTestAssignment(_chatId, assignmentKey, assignment) {
+      storeAssignments += 1;
+      const existing = assignments.get(assignmentKey) ?? null;
+      if (existing) return existing;
+      assignments.set(assignmentKey, assignment);
+      return assignment;
+    },
+    async upsertInvoiceTokens(inputs) {
+      const batch = Array.isArray(inputs) ? inputs : [];
+      capturedBatches.push(batch);
+      return batch.map((input) => {
+        const row = input as {
+          token: string;
+          sku: string;
+          amount_xtr: number;
+          payload_json: Record<string, unknown>;
+          invoice_title: string;
+          invoice_description: string;
+          invoice_label: string;
+          invoice_button_text: string;
+        };
+
+        return buildStoredInvoiceToken({
+          token: row.token,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          payload_json: row.payload_json,
+          invoice_title: row.invoice_title,
+          invoice_description: row.invoice_description,
+          invoice_label: row.invoice_label,
+          invoice_button_text: row.invoice_button_text,
+          invoice_link: "https://t.me/ab-invoice",
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+        });
+      });
+    },
+  });
+
+  await withExperiments([experiment!], async () => {
+    const first = await service.evaluate(
+      buildRequest({
+        interaction_mode: "subscription_offer",
+        idempotency_key: "telegram:ab",
+        subscription_offer_reason: "subscription_command",
+      }),
+    );
+    const second = await service.evaluate(
+      buildRequest({
+        interaction_mode: "subscription_offer",
+        idempotency_key: "telegram:ab",
+        subscription_offer_reason: "subscription_command",
+      }),
+    );
+
+    assert.equal(first.operation, "subscription_offer_ready");
+    assert.equal(first.text, "B command offer");
+    assert.deepEqual(first.ab_test, {
+      key: "subscription_offer",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      version: "v1",
+      variant: "B",
+    });
+    assert.deepEqual(
+      assignments.get("subscription_offer|2020-01-01T00:00:00+00:00"),
+      {
+        variant: "B",
+        assigned_at: assignments
+          .get("subscription_offer|2020-01-01T00:00:00+00:00")?.assigned_at,
+      },
+    );
+    assert.deepEqual(
+      first.subscription_offer_items?.map((item) => item.sku),
+      ["payment_plan_2"],
+    );
+    assert.equal(first.subscription_invoice_tokens?.[0]?.includes(":ab_"), true);
+    assert.deepEqual(second.subscription_invoice_tokens, first.subscription_invoice_tokens);
+    assert.equal(first.subscription_offer_items?.[0]?.title, "B title");
+    assert.equal(first.subscription_offer_items?.[0]?.description, "B description");
+    assert.equal(first.subscription_offer_items?.[0]?.label, "B label");
+    assert.equal(firstOfferPaymentOption(first.subscription_offer_items?.[0])?.amount, 111);
+    assert.equal(firstOfferPaymentOption(first.subscription_offer_items?.[0])?.button_text, "⭐ 111");
+    assert.deepEqual(
+      (capturedBatches[0]?.[0] as { payload_json?: Record<string, unknown> })?.payload_json?.ab_test,
+      first.ab_test,
+    );
+    assert.equal(loadAssignments, 2);
+    assert.equal(storeAssignments, 1);
+  });
+});
+
+test("subscription_offer keeps assigned group but uses current experiment version params", async () => {
+  const [changedExperiment] = loadExperimentConfigsFromEnv({
+    EXP_SUBSCRIPTION_OFFER_SEP_JSON: JSON.stringify({
+      key: "subscription_offer",
+      version: "v2",
+      description: "Changed B",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      ends_at: "2100-01-01T00:00:00+00:00",
+      distribution: { B: 100 },
+      variants: {
+        B: {
+          command_offer_text: "new B copy",
+          scene_unlock: { enabled: false },
+          plans: [
+            {
+              sku: "payment_plan_2",
+              amount_xtr: 999,
+              button_text: "new B button",
+            },
+          ],
+        },
+      },
+    }),
+  });
+  const savedAssignment = buildAssignment({
+    variant: "B",
+    assigned_at: "2026-09-10T10:00:00.000Z",
+  });
+  const { service } = createRepository({
+    async loadAbTestAssignment() {
+      return savedAssignment;
+    },
+    async storeAbTestAssignment() {
+      throw new Error("existing assignment must not be overwritten");
+    },
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input) => {
+        const row = input as {
+          token: string;
+          sku: string;
+          amount_xtr: number;
+          payload_json: Record<string, unknown>;
+          invoice_button_text: string;
+        };
+        return buildStoredInvoiceToken({
+          token: row.token,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          payload_json: row.payload_json,
+          invoice_button_text: row.invoice_button_text,
+          invoice_link: "https://t.me/new-ab-invoice",
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+        });
+      });
+    },
+  });
+
+  await withExperiments([changedExperiment!], async () => {
+    const result = await service.evaluate(
+      buildRequest({
+        interaction_mode: "subscription_offer",
+        idempotency_key: "telegram:ab-changed",
+        subscription_offer_reason: "subscription_command",
+      }),
+    );
+
+    assert.deepEqual(result.ab_test, {
+      key: "subscription_offer",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      version: "v2",
+      variant: "B",
+    });
+    assert.equal(result.text, "new B copy");
+    assert.equal(firstOfferPaymentOption(result.subscription_offer_items?.[0])?.amount, 999);
+  });
+});
+
+test("subscription_offer logs and skips ab when saved variant is missing from current config", async () => {
+  const [experiment] = loadExperimentConfigsFromEnv({
+    EXP_SUBSCRIPTION_OFFER_SEP_JSON: JSON.stringify({
+      key: "subscription_offer",
+      version: "v2",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      ends_at: "2100-01-01T00:00:00+00:00",
+      distribution: { A: 100 },
+      variants: {
+        A: {
+          command_offer_text: "A command offer",
+        },
+      },
+    }),
+  });
+  const savedAssignment = buildAssignment({
+    variant: "B",
+    assigned_at: "2026-09-10T10:00:00.000Z",
+  });
+  const capturedErrors: unknown[][] = [];
+  const previousConsoleError = console.error;
+  const { service } = createRepository({
+    async loadAbTestAssignment() {
+      return savedAssignment;
+    },
+    async storeAbTestAssignment() {
+      throw new Error("missing variant must not reassign user");
+    },
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input) => {
+        const row = input as {
+          token: string;
+          sku: string;
+          amount_xtr: number;
+          payload_json: Record<string, unknown>;
+        };
+        return buildStoredInvoiceToken({
+          token: row.token,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          payload_json: row.payload_json,
+          invoice_link: "https://t.me/default-invoice",
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+        });
+      });
+    },
+  });
+
+  console.error = (...args: unknown[]) => {
+    capturedErrors.push(args);
+  };
+  try {
+    await withExperiments([experiment!], async () => {
+      const result = await service.evaluate(
+        buildRequest({
+          interaction_mode: "subscription_offer",
+          idempotency_key: "telegram:ab-missing-variant",
+          subscription_offer_reason: "subscription_command",
+        }),
+      );
+
+      assert.equal(result.operation, "subscription_offer_ready");
+      assert.equal(result.ab_test, null);
+      assert.equal(result.text, null);
+      assert.equal(
+        result.subscription_invoice_tokens?.some((token) => token.includes(":ab_")),
+        false,
+      );
+      assert.equal(capturedErrors.length, 1);
+      assert.equal(capturedErrors[0]?.[0], "[media_commerce] ab_test_variant_missing");
+      assert.deepEqual(capturedErrors[0]?.[1], {
+        chat_id: 101,
+        key: "subscription_offer",
+        starts_at: "2020-01-01T00:00:00+00:00",
+        version: "v2",
+        variant: "B",
+      });
+    });
+  } finally {
+    console.error = previousConsoleError;
+  }
+});
+
+test("subscription_offer version change creates a new payment token and keeps ab snapshot per token", async () => {
+  const buildExperiment = (version: "v1" | "v2", amountXtr: number) =>
+    loadExperimentConfigsFromEnv({
+      EXP_SUBSCRIPTION_OFFER_SEP_JSON: JSON.stringify({
+        key: "subscription_offer",
+        version,
+        starts_at: "2020-01-01T00:00:00+00:00",
+        ends_at: "2100-01-01T00:00:00+00:00",
+        distribution: { B: 100 },
+        variants: {
+          B: {
+            scene_unlock: { enabled: false },
+            plans: [
+              {
+                sku: "payment_plan_2",
+                amount_xtr: amountXtr,
+              },
+              {
+                sku: "payment_plan_3",
+                enabled: false,
+              },
+            ],
+          },
+        },
+      }),
+    })[0]!;
+
+  const savedAssignment = buildAssignment({
+    variant: "B",
+    assigned_at: "2026-09-10T10:00:00.000Z",
+  });
+  const capturedBatches: unknown[][] = [];
+  const { service } = createRepository({
+    async loadAbTestAssignment() {
+      return savedAssignment;
+    },
+    async storeAbTestAssignment() {
+      throw new Error("existing assignment must not be overwritten");
+    },
+    async upsertInvoiceTokens(inputs) {
+      const batch = Array.isArray(inputs) ? inputs : [];
+      capturedBatches.push(batch);
+      return batch.map((input) => {
+        const row = input as {
+          token: string;
+          sku: string;
+          amount_xtr: number;
+          payload_json: Record<string, unknown>;
+        };
+        return buildStoredInvoiceToken({
+          token: row.token,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          payload_json: row.payload_json,
+          invoice_link: `https://t.me/${row.token}`,
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+        });
+      });
+    },
+  });
+
+  const request = buildRequest({
+    interaction_mode: "subscription_offer",
+    idempotency_key: "telegram:same-idempotency",
+    subscription_offer_reason: "subscription_command",
+  });
+
+  const first = await withExperiments([buildExperiment("v1", 111)], async () =>
+    service.evaluate(request),
+  );
+  const second = await withExperiments([buildExperiment("v2", 222)], async () =>
+    service.evaluate(request),
+  );
+
+  const firstToken = first.subscription_invoice_tokens?.[0];
+  const secondToken = second.subscription_invoice_tokens?.[0];
+  assert.ok(firstToken);
+  assert.ok(secondToken);
+  assert.notEqual(firstToken, secondToken);
+  assert.equal(first.subscription_offer_items?.[0]?.sku, "payment_plan_2");
+  assert.equal(second.subscription_offer_items?.[0]?.sku, "payment_plan_2");
+  assert.deepEqual(
+    (capturedBatches[0]?.[0] as { payload_json?: Record<string, unknown> })?.payload_json?.ab_test,
+    {
+      key: "subscription_offer",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      version: "v1",
+      variant: "B",
+    },
+  );
+  assert.deepEqual(
+    (capturedBatches[1]?.[0] as { payload_json?: Record<string, unknown> })?.payload_json?.ab_test,
+    {
+      key: "subscription_offer",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      version: "v2",
+      variant: "B",
+    },
+  );
+});
+
+test("subscription_offer ignores inactive ab experiment without loading assignments", async () => {
+  const [experiment] = loadExperimentConfigsFromEnv({
+    EXP_SUBSCRIPTION_OFFER_SEP_JSON: JSON.stringify({
+      key: "subscription_offer",
+      version: "v1",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      ends_at: "2020-02-01T00:00:00+00:00",
+      distribution: { B: 100 },
+      variants: {
+        B: {
+          command_offer_text: "expired B",
+        },
+      },
+    }),
+  });
+  const { service } = createRepository({
+    async loadAbTestAssignment() {
+      throw new Error("inactive experiment must not load assignments");
+    },
+    async storeAbTestAssignment() {
+      throw new Error("inactive experiment must not store assignments");
+    },
+  });
+
+  await withExperiments([experiment!], async () => {
+    const result = await service.evaluate(
+      buildRequest({
+        interaction_mode: "subscription_offer",
+        idempotency_key: "telegram:ab-expired",
+        subscription_offer_reason: "subscription_command",
+      }),
+    );
+
+    assert.equal(result.ab_test, null);
+    assert.equal(result.text, null);
+  });
+});
+
+test("finalize_subscription_offer records ab_delivered event after Telegram send", async () => {
+  let capturedDelivery: unknown = null;
+  const { service, calls } = createRepository({
+    async recordAbTestDelivered(input) {
+      calls.recordAbTestDelivered += 1;
+      capturedDelivery = input;
+      return 1;
+    },
+    async storeSubscriptionOfferMessageId() {
+      return 1;
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "finalize_subscription_offer",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 9,
+      scene_turn_no: 4,
+      offer_message_id: 777,
+      subscription_invoice_tokens: ["token-1", "token-2"],
+      ab_test: {
+        key: "subscription_offer",
+        starts_at: "2020-01-01T00:00:00+00:00",
+        version: "v2",
+        variant: "B",
+      },
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_finalized");
+  assert.equal(calls.recordAbTestDelivered, 1);
+  assert.deepEqual(capturedDelivery, {
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 9,
+    scene_turn_no: 4,
+    ab_test: {
+      key: "subscription_offer",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      version: "v2",
+      variant: "B",
+    },
+  });
+  assert.equal(result.inserted_count, 1);
+  assert.deepEqual(result.ab_test, {
+    key: "subscription_offer",
+    starts_at: "2020-01-01T00:00:00+00:00",
+    version: "v2",
+    variant: "B",
+  });
+});
+
+test("subscription_offer returns top-level free scene unlock callback when credit is available", async () => {
+  const { service, calls } = createRepository({
+    async loadFreeCredits(chatId) {
+      calls.loadFreeCredits += 1;
+      return {
+        chat_id: chatId,
+        active_scene_session_id: "scene-1",
+        free_fast_scene_skips: 0,
+        free_scene_unlocks: 1,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      idempotency_key: "telegram:1",
+      subscription_offer_reason: "subscription_command",
+      turns_today: 0,
+      turn_limit: 20,
+      turn_limit_reset_text: "00:00 МСК",
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_ready");
+  assert.deepEqual(result.subscription_invoice_tokens, [
+    "telegram:1:payment_plan_2",
+    "telegram:1:payment_plan_3",
+  ]);
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => item.sku),
+    ["payment_plan_2", "payment_plan_3"],
+  );
+  assert.equal(result.token_rows?.length, 1);
+  assert.equal(result.token_rows?.[0]?.action_kind, "free_scene_unlock");
+  assert.equal(result.token_rows?.[0]?.payload_json.action_button_text, "free unlock");
+  assert.equal(result.token_rows_inserted, 1);
+  assert.equal(calls.createStarsInvoice, 2);
+});
+
+test("subscription_offer does not return free scene unlock callback for active subscription", async () => {
+  const { service, calls } = createRepository({
+    async loadSceneAccessStatus() {
+      calls.loadSceneAccessStatus += 1;
+      return {
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        active_scene_session_id: "scene-1",
+        subscription_active: true,
+        scene_access_active: false,
+        scene_is_active: true,
+      };
+    },
+    async loadFreeCredits(chatId) {
+      calls.loadFreeCredits += 1;
+      return {
+        chat_id: chatId,
+        active_scene_session_id: "scene-1",
+        free_fast_scene_skips: 0,
+        free_scene_unlocks: 1,
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      idempotency_key: "telegram:1",
+      subscription_offer_reason: "subscription_command",
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_ready");
+  assert.equal(result.token_rows?.length, 0);
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => item.sku),
+    ["payment_plan_2", "payment_plan_3"],
+  );
+  assert.equal(calls.loadFreeCredits, 1);
+});
+
 test("subscription_offer does not include scene pass without active scene", async () => {
   const { service } = createRepository({
     async loadSceneAccessStatus() {
@@ -2890,6 +4007,14 @@ test("subscription_offer does not include scene pass without active scene", asyn
         subscription_active: false,
         scene_access_active: false,
         scene_is_active: false,
+      };
+    },
+    async loadFreeCredits(chatId) {
+      return {
+        chat_id: chatId,
+        active_scene_session_id: null,
+        free_fast_scene_skips: 0,
+        free_scene_unlocks: 0,
       };
     },
   });
@@ -3101,7 +4226,7 @@ test("subscription_offer persists freshly created links without reload loop", as
   assert.equal(calls.createStarsInvoice, 3);
   assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.offer_reused, false);
-  assert.equal(result.text, undefined);
+  assert.equal(result.text, null);
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
     [
@@ -3172,7 +4297,7 @@ test("subscription_offer reuses stored invoice links from batch upsert without r
   assert.equal(calls.loadStoredInvoiceTokens, 0);
   assert.equal(calls.createStarsInvoice, 0);
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.equal(result.text, undefined);
+  assert.equal(result.text, null);
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
     [

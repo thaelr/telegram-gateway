@@ -1,6 +1,9 @@
 import type { JSONValue } from "postgres";
+import type { AbTestAssignment, AbTestContext } from "../abTesting.js";
 import { sql } from "../db.js";
 import type {
+  FreeActionRedeemResult,
+  FreeCredits,
   MediaContext,
   MediaFinalizeResult,
   MediaOfferStats,
@@ -122,6 +125,14 @@ export type ActivateSceneAccessInput = {
   scene_access_sku: string | null;
 };
 
+export type LoadAbTestAssignmentResult = {
+  assignment: AbTestAssignment | null;
+};
+
+export type RecordAbTestDeliveredInput = SceneTurnRef & {
+  ab_test: AbTestContext;
+};
+
 export type SceneAccessStatusInput = {
   chat_id: number;
   scene_session_id: string | null;
@@ -135,6 +146,10 @@ export type SceneAccessStatus = {
   scene_access_active: boolean;
   scene_is_active: boolean;
 };
+
+export type LoadFreeCreditsResult = FreeCredits;
+
+export type RedeemFreeActionResult = FreeActionRedeemResult;
 
 export type StorePhotoEventInput = SceneTurnRef & {
   event_type: string | null;

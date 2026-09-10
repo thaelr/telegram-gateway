@@ -1,3 +1,7 @@
+import type { AbTestContext } from "./abTesting.js";
+
+export type { AbTestAssignment, AbTestContext } from "./abTesting.js";
+
 export type MediaCommerceRoute =
   | "prepare_offer"
   | "finalize_offer"
@@ -109,6 +113,7 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
   original_amount_rub?: number | null;
   promo_key?: string | null;
   action_button_text?: string | null;
+  ab_test?: AbTestContext | null;
 }
 
 export interface MediaCommerceDecisionResponse {
@@ -180,6 +185,7 @@ export interface MediaCommerceDecisionResponse {
   offer_message_id?: number | null;
   offer_sent?: boolean;
   offer_reused?: boolean;
+  ab_test?: AbTestContext | null;
   scene_unlock_offer_item?: MediaOfferItem | null;
   subscription_offer_items?: MediaOfferItem[];
   subscription_invoice_tokens?: string[] | null;
@@ -220,6 +226,13 @@ export interface MediaOfferStats {
   scene_access_active: boolean;
 }
 
+export interface FreeCredits {
+  chat_id: number | null;
+  active_scene_session_id: string | null;
+  free_fast_scene_skips: number;
+  free_scene_unlocks: number;
+}
+
 export interface LoadedCallbackToken {
   requested_token: string | null;
   token: string | null;
@@ -232,6 +245,21 @@ export interface LoadedCallbackToken {
   action_kind: string | null;
   expires_at: string | null;
   found: boolean;
+}
+
+export interface FreeActionRedeemResult {
+  token: string | null;
+  chat_id: number | null;
+  scene_session_id: string | null;
+  turn_no: number | null;
+  payload_json: Record<string, unknown> | null;
+  action_kind: string | null;
+  status: string | null;
+  redeemed: boolean;
+  already_consumed: boolean;
+  already_fulfilled: boolean;
+  remaining_credits: number | null;
+  reason: string | null;
 }
 
 export interface MediaUnlockedItem {

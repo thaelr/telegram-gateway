@@ -279,6 +279,26 @@ function formatSubscriptionStatusText(context: AccessContext): string {
     );
 }
 
+function replaceCount(template: string, count: number): string {
+  return template.replaceAll("{count}", String(count));
+}
+
+function formatPaysupportText(context: AccessContext): string {
+  const copy = config.TELEGRAM_UX_COPY_JSON.paysupport;
+  const lines = [copy.message_html];
+  const fastSkips = Math.max(0, Number(context.free_fast_scene_skips ?? 0));
+  const sceneUnlocks = Math.max(0, Number(context.free_scene_unlocks ?? 0));
+
+  if (fastSkips > 0 && copy.free_fast_scene_skips_line) {
+    lines.push(replaceCount(copy.free_fast_scene_skips_line, fastSkips));
+  }
+  if (sceneUnlocks > 0 && copy.free_scene_unlocks_line) {
+    lines.push(replaceCount(copy.free_scene_unlocks_line, sceneUnlocks));
+  }
+
+  return lines.join("\n");
+}
+
 export class AccessDecisionService {
   constructor(private readonly repository: AccessRepository) {}
 
@@ -347,6 +367,8 @@ export class AccessDecisionService {
       subscription_until: accessContext.subscription_until,
       active_scene_session_id: accessContext.active_scene_session_id,
       scene_access_active: accessContext.scene_access_active,
+      free_fast_scene_skips: accessContext.free_fast_scene_skips,
+      free_scene_unlocks: accessContext.free_scene_unlocks,
       turns_today: accessContext.turns_today,
       turn_limit: config.TURN_LIMIT,
       turn_limit_reset_text: config.TURN_LIMIT_RESET_TEXT,
@@ -419,6 +441,20 @@ export class AccessDecisionService {
         allowed: true,
         subscription_offer_reason: "subscription_command",
         reason: "subscription_inactive",
+      };
+    }
+
+    if (classification.intent === "paysupport") {
+      return {
+        ...passthrough,
+        ...contextFields,
+        decision: "noop",
+        action: "send_paysupport_message",
+        allowed: true,
+        text: formatPaysupportText(accessContext),
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reason: "paysupport",
       };
     }
 

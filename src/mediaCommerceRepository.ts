@@ -1,10 +1,13 @@
 import { sql } from "./db.js";
+import type { AbTestAssignment } from "./abTesting.js";
 import type {
   InteractionTokenRow,
   LoadedCallbackToken,
   LoadedInvoiceToken,
   MediaContext,
   MediaFinalizeResult,
+  FreeActionRedeemResult,
+  FreeCredits,
   MediaOfferStats,
   PaidInvoiceToken,
   StoredInvoiceToken,
@@ -19,6 +22,7 @@ import {
   type LoadOfferStatsInput,
   type MarkInvoicePaidInput,
   type QueryClient,
+  type RecordAbTestDeliveredInput,
   type SceneAccessStatus,
   type SceneAccessStatusInput,
   type SbpCheckoutCreationClaim,
@@ -122,6 +126,24 @@ export class MediaCommerceRepository {
     return this.paymentRepository.loadSceneAccessStatus(input);
   }
 
+  async loadFreeCredits(chatId: number): Promise<FreeCredits | null> {
+    return this.paymentRepository.loadFreeCredits(chatId);
+  }
+
+  async redeemFreeFastSceneSkip(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<FreeActionRedeemResult | null> {
+    return this.paymentRepository.redeemFreeFastSceneSkip(token, chatId);
+  }
+
+  async redeemFreeSceneUnlock(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<FreeActionRedeemResult | null> {
+    return this.paymentRepository.redeemFreeSceneUnlock(token, chatId);
+  }
+
   async storePhotoEvent(input: StorePhotoEventInput): Promise<MediaFinalizeResult> {
     return this.mediaEventRepository.storePhotoEvent(input);
   }
@@ -154,6 +176,31 @@ export class MediaCommerceRepository {
 
   async loadStoredInvoiceTokens(tokens: string[]): Promise<StoredInvoiceToken[]> {
     return this.tokenRepository.loadStoredInvoiceTokens(tokens);
+  }
+
+  async loadAbTestAssignment(
+    chatId: number,
+    assignmentKey: string,
+  ): Promise<AbTestAssignment | null> {
+    return this.tokenRepository.loadAbTestAssignment(chatId, assignmentKey);
+  }
+
+  async storeAbTestAssignment(
+    chatId: number,
+    assignmentKey: string,
+    assignment: AbTestAssignment,
+  ): Promise<AbTestAssignment | null> {
+    return this.tokenRepository.storeAbTestAssignment(
+      chatId,
+      assignmentKey,
+      assignment,
+    );
+  }
+
+  async recordAbTestDelivered(
+    input: RecordAbTestDeliveredInput,
+  ): Promise<number> {
+    return this.mediaEventRepository.recordAbTestDelivered(input);
   }
 
   async storeSubscriptionOfferMessageId(

@@ -1,4 +1,5 @@
 import type {
+  AbTestAssignment,
   InteractionTokenRow,
   LoadedCallbackToken,
   LoadedInvoiceToken,
@@ -9,6 +10,7 @@ import {
   asJsonValue,
   type QueryClient,
   parseJsonObject,
+  type LoadAbTestAssignmentResult,
   type SbpCheckoutCreationClaim,
   type UpsertInvoiceTokenBatchInput,
   type UpsertInvoiceTokenInput,
@@ -256,6 +258,57 @@ export class MediaInteractionTokenRepository {
         ${sql.json(asJsonValue(tokens))}
       )
     `;
+  }
+
+  async loadAbTestAssignment(
+    chatId: number,
+    assignmentKey: string,
+  ): Promise<AbTestAssignment | null> {
+    const rows = await this.query<LoadAbTestAssignmentResult[]>`
+      SELECT
+        CASE
+          WHEN jsonb_typeof(cs.ab_tests_json -> ${assignmentKey}::text) = 'object'
+            THEN cs.ab_tests_json -> ${assignmentKey}::text
+          ELSE NULL
+        END AS assignment
+      FROM public.chat_state cs
+      WHERE cs.chat_id = ${chatId}::bigint
+      LIMIT 1
+    `;
+
+    return rows[0]?.assignment ?? null;
+  }
+
+  async storeAbTestAssignment(
+    chatId: number,
+    assignmentKey: string,
+    assignment: AbTestAssignment,
+  ): Promise<AbTestAssignment | null> {
+    const rows = await this.query<LoadAbTestAssignmentResult[]>`
+      WITH updated AS (
+        UPDATE public.chat_state cs
+        SET ab_tests_json = jsonb_set(
+          COALESCE(cs.ab_tests_json, '{}'::jsonb),
+          ARRAY[${assignmentKey}::text],
+          ${sql.json(asJsonValue(assignment))},
+          TRUE
+        )
+        WHERE cs.chat_id = ${chatId}::bigint
+          AND NOT (
+            COALESCE(cs.ab_tests_json, '{}'::jsonb) ? ${assignmentKey}::text
+          )
+        RETURNING cs.ab_tests_json -> ${assignmentKey}::text AS assignment
+      )
+      SELECT assignment FROM updated
+      UNION ALL
+      SELECT cs.ab_tests_json -> ${assignmentKey}::text AS assignment
+      FROM public.chat_state cs
+      WHERE cs.chat_id = ${chatId}::bigint
+        AND NOT EXISTS (SELECT 1 FROM updated)
+      LIMIT 1
+    `;
+
+    return rows[0]?.assignment ?? null;
   }
 
   async storeSubscriptionOfferMessageId(

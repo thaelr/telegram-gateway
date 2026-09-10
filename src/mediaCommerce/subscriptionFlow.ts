@@ -1,6 +1,7 @@
 import { config, type MediaActionPlan } from "../config.js";
 import type { UpsertInvoiceTokenInput } from "../mediaCommerceRepository/shared.js";
 import type {
+  AbTestContext,
   InvoiceTokenPayload,
   MediaSubscriptionOfferReason,
   PaymentCurrency,
@@ -126,6 +127,7 @@ export function buildSceneUnlockPaymentInputs(input: {
     original_amount_rub?: number | null;
     promo_key?: string | null;
   };
+  ab_test?: AbTestContext | null;
 }) {
   const payloadJson: InvoiceTokenPayload = {
     action_kind: "feature_payment",
@@ -149,6 +151,7 @@ export function buildSceneUnlockPaymentInputs(input: {
     original_amount_rub: input.plan.original_amount_rub ?? input.plan.amount_rub ?? null,
     promo_key: input.plan.promo_key ?? null,
     sort_order: 0,
+    ab_test: input.ab_test ?? null,
   };
   const baseToken = `${input.idempotency_key}:${input.scene_session_id}:${input.plan.sku}`;
 
@@ -183,6 +186,7 @@ export function buildFeaturePaymentInputs(input: {
     original_amount_rub?: number | null;
     promo_key?: string | null;
   };
+  ab_test?: AbTestContext | null;
 }) {
   const payloadJson: InvoiceTokenPayload = {
     action_kind: "feature_payment",
@@ -201,6 +205,7 @@ export function buildFeaturePaymentInputs(input: {
     original_amount_xtr: input.plan.original_amount_xtr ?? input.plan.amount_xtr,
     original_amount_rub: input.plan.original_amount_rub ?? input.plan.amount_rub ?? null,
     promo_key: input.plan.promo_key ?? null,
+    ab_test: input.ab_test ?? null,
   };
   const baseToken = `${input.idempotency_key}:${input.plan.sku}`;
 
@@ -266,6 +271,7 @@ export function buildSubscriptionPaymentInputs(input: {
     original_amount_rub?: number | null;
     promo_key?: string | null;
   };
+  ab_test?: AbTestContext | null;
 }) {
   const payloadJson: InvoiceTokenPayload = {
     action_kind: "subscription_payment",
@@ -289,6 +295,7 @@ export function buildSubscriptionPaymentInputs(input: {
     original_amount_rub: input.plan.original_amount_rub ?? input.plan.amount_rub ?? null,
     promo_key: input.plan.promo_key ?? null,
     sort_order: input.sort_order,
+    ab_test: input.ab_test ?? null,
   };
   const baseToken = `${input.idempotency_key}:${input.plan.sku}`;
 

@@ -109,6 +109,8 @@ export interface AccessDecisionResponse {
   subscription_until?: string | null;
   active_scene_session_id?: string | null;
   scene_access_active?: boolean;
+  free_fast_scene_skips?: number | null;
+  free_scene_unlocks?: number | null;
   turns_today?: number | null;
   turn_limit?: number | null;
   turn_limit_reset_text?: string | null;
@@ -136,6 +138,8 @@ export interface AccessContext {
   subscription_active: boolean;
   active_scene_session_id: string | null;
   scene_access_active: boolean;
+  free_fast_scene_skips: number;
+  free_scene_unlocks: number;
   turns_today: number;
   scene_turn_no: number;
   selected_character_i: number | null;
