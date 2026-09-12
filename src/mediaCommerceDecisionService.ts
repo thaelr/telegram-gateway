@@ -2700,25 +2700,7 @@ export class MediaCommerceDecisionService {
 
     const resolvedAction = actionResolution.action;
     const existingStatus = normalizeString(loaded.status);
-    if (
-      !hasExpectedPaymentDetails(
-        loaded.amount,
-        loaded.currency ?? "RUB",
-        normalizeString(input.payment_currency),
-        normalizeNonNegativeInteger(input.payment_total_amount),
-      )
-    ) {
-      return {
-        ...base,
-        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
-        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
-        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
-        payment_source: "sbp",
-        payment_kind: resolvedAction.payment_kind,
-        feature_key: resolvedAction.feature_key,
-        reason: "payment_details_mismatch",
-      };
-    }
+
 
     if (existingStatus === "fulfilled") {
       return {
