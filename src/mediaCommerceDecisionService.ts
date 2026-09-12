@@ -53,6 +53,7 @@ import {
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
 import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema.js";
 import { getRequestContext } from "./requestContext.js";
+import { formatFreeBalances } from "./freeBalanceFormatter.js";
 import {
   TelegramStarsPaymentAdapter,
   type StarsInvoiceClient,
@@ -86,6 +87,7 @@ type MediaRepository = Pick<
   | "upsertInvoiceTokens"
   | "loadCallbackToken"
   | "loadMediaContext"
+  | "loadPhotoByUuid"
   | "storePanel"
   | "loadInvoiceToken"
   | "loadInvoiceTokenByExternalPaymentId"
@@ -97,7 +99,9 @@ type MediaRepository = Pick<
   | "loadFreeCredits"
   | "redeemFreeFastSceneSkip"
   | "redeemFreeSceneUnlock"
+  | "redeemFreePhotoUnlock"
   | "storePhotoEvent"
+  | "finalizeFreePhotoUnlock"
   | "storeInvoiceLinks"
   | "claimSbpCheckoutCreation"
   | "releaseSbpCheckoutCreation"
@@ -156,7 +160,7 @@ function buildStableCallbackToken(parts: Array<string | number | null | undefine
 }
 
 function buildFreeActionTokenRow(input: {
-  action_kind: "free_fast_scene_skip" | "free_scene_unlock";
+  action_kind: "free_fast_scene_skip" | "free_scene_unlock" | "free_photo_unlock";
   chat_id: number;
   scene_session_id: string;
   turn_no: number | null;
@@ -167,8 +171,11 @@ function buildFreeActionTokenRow(input: {
   target_message_id?: number | null;
   current_uuid?: string | null;
   base_price_xtr?: number | null;
-  feature_key: "fast_scene_skip" | "scene_unlock";
+  feature_key: "fast_scene_skip" | "scene_unlock" | "photo_unlock";
   action_button_text: string;
+  requested_action?: string | null;
+  panel_text?: string | null;
+  panel_entities_json?: unknown[] | null;
   ab_test?: AbTestContext | null;
 }): InteractionTokenRow {
   const token = buildStableCallbackToken([
@@ -201,10 +208,15 @@ function buildFreeActionTokenRow(input: {
       base_price_xtr: input.base_price_xtr ?? 0,
       feature_key: input.feature_key,
       requested_action:
-        input.feature_key === "fast_scene_skip"
+        input.requested_action
+        ?? (input.feature_key === "fast_scene_skip"
           ? "fast_scene_skip_free"
-          : "scene_unlock_free",
+          : input.feature_key === "scene_unlock"
+            ? "scene_unlock_free"
+            : "photo_request"),
       action_button_text: input.action_button_text,
+      panel_text: input.panel_text ?? null,
+      panel_entities_json: input.panel_entities_json ?? [],
       ab_test: input.ab_test ?? null,
     },
     status: "active",
@@ -259,6 +271,7 @@ function buildPaymentUiTokenRow(input: {
   subscription_offer_items?: MediaOfferItem[];
   token_rows?: InteractionTokenRow[];
   text?: string | null;
+  free_balance_text?: string | null;
   offer_message_id?: number | null;
   selected_payment_source?: PaymentSource | null;
   payment_source_toggle_tokens?: Partial<Record<PaymentSource, string>> | null;
@@ -297,6 +310,7 @@ function buildPaymentUiTokenRow(input: {
       subscription_offer_items: input.subscription_offer_items ?? [],
       token_rows: input.token_rows ?? [],
       text: input.text ?? null,
+      free_balance_text: input.free_balance_text ?? null,
       offer_message_id: input.offer_message_id ?? null,
       selected_payment_source: input.selected_payment_source ?? null,
       payment_source_toggle_tokens: input.payment_source_toggle_tokens ?? null,
@@ -970,6 +984,179 @@ export class MediaCommerceDecisionService {
     }
   }
 
+  private async buildSceneUnlockEntryTokenRows(input: {
+    chat_id: number;
+    scene_session_id: string | null;
+    turn_no: number | null;
+    scene_turn_no: number | null;
+    media_signature?: string | null;
+    target_message_id?: number | null;
+    current_uuid?: string | null;
+    base_price_xtr?: number | null;
+    subscription_active: boolean;
+    scene_access_active: boolean;
+    ab_selection?: AbTestSelection | null;
+  }): Promise<InteractionTokenRow[]> {
+    if (
+      input.subscription_active
+      || input.scene_access_active
+      || !input.scene_session_id
+    ) {
+      return [];
+    }
+
+    const abSelection = input.ab_selection === undefined
+      ? await this.resolveAbTestSelection(input.chat_id, "subscription_offer")
+      : input.ab_selection;
+    if (abSelection?.params.scene_unlock?.enabled === false) {
+      return [];
+    }
+
+    return [
+      buildFreeActionTokenRow({
+        action_kind: "free_scene_unlock",
+        chat_id: input.chat_id,
+        scene_session_id: input.scene_session_id,
+        turn_no: input.turn_no,
+        scene_turn_no: input.scene_turn_no,
+        media_signature: input.media_signature,
+        target_message_id: input.target_message_id,
+        current_uuid: input.current_uuid,
+        base_price_xtr: input.base_price_xtr,
+        feature_key: "scene_unlock",
+        action_button_text: config.TELEGRAM_UX_COPY_JSON.media.scene_unlock_button,
+        ab_test: toAbTestContext(abSelection),
+      }),
+    ];
+  }
+
+  private async buildSceneUnlockPaymentOptionsAtClick(input: {
+    token: string;
+    chat_id: number;
+    scene_session_id: string;
+    target_message_id: number | null;
+  }): Promise<MediaPaymentOption[]> {
+    const abSelection = await this.resolveAbTestSelection(
+      input.chat_id,
+      "subscription_offer",
+    );
+    const plan = applySceneUnlockOverride(
+      resolveActionPlanByFeatureKey("scene_unlock"),
+      abSelection?.params ?? {},
+    );
+    if (!plan) {
+      return [];
+    }
+
+    const rows = await this.repository.upsertInvoiceTokens(
+      buildSceneUnlockPaymentInputs({
+        chat_id: input.chat_id,
+        scene_session_id: input.scene_session_id,
+        idempotency_key: `scene-unlock-click:${input.token}`,
+        turn_limit: config.TURN_LIMIT,
+        target_message_id: input.target_message_id,
+        plan,
+        ab_test: toAbTestContext(abSelection),
+      }),
+    );
+    const readyRows = await Promise.all(
+      rows.map((row) => this.ensureStoredPaymentReady(row, "sceneUnlock.click")),
+    );
+
+    return buildOfferItem(readyRows)?.payment_options ?? [];
+  }
+
+  private buildPhotoUnlockEntryTokenRow(input: {
+    chat_id: number;
+    scene_session_id: string;
+    turn_no: number | null;
+    scene_turn_no: number | null;
+    media_signature: string | null;
+    target_message_id: number | null;
+    current_uuid: string | null;
+    base_price_xtr: number;
+    requested_action: string;
+    panel_text?: string | null;
+    panel_entities_json?: unknown[] | null;
+  }): InteractionTokenRow {
+    return buildFreeActionTokenRow({
+      action_kind: "free_photo_unlock",
+      chat_id: input.chat_id,
+      scene_session_id: input.scene_session_id,
+      turn_no: input.turn_no,
+      scene_turn_no: input.scene_turn_no,
+      media_signature: input.media_signature,
+      target_message_id: input.target_message_id,
+      current_uuid: input.current_uuid,
+      base_price_xtr: input.base_price_xtr,
+      feature_key: "photo_unlock",
+      requested_action: input.requested_action,
+      panel_text: input.panel_text,
+      panel_entities_json: input.panel_entities_json,
+      action_button_text: config.TELEGRAM_UX_COPY_JSON.media.get_photo_button,
+    });
+  }
+
+  private async buildPhotoPaymentOptionsAtClick(input: {
+    token: string;
+    chat_id: number;
+    scene_session_id: string;
+    turn_no: number | null;
+    scene_turn_no: number | null;
+    media_signature: string | null;
+    target_message_id: number | null;
+    current_uuid: string | null;
+    base_price_xtr: number;
+    requested_action: string;
+    panel_text: string | null;
+    panel_entities_json: unknown[];
+  }): Promise<MediaPaymentOption[]> {
+    const plan = resolvePhotoPlanByAmount(input.base_price_xtr);
+    const stored = await this.repository.upsertInvoiceToken(
+      buildPhotoInvoiceInput({
+        token: `photo-unlock-click:${input.token}`,
+        chat_id: input.chat_id,
+        scene_session_id: input.scene_session_id,
+        turn_no: input.turn_no,
+        scene_turn_no: input.scene_turn_no,
+        media_signature: input.media_signature,
+        target_message_id: input.target_message_id,
+        current_uuid: input.current_uuid,
+        base_price_xtr: input.base_price_xtr,
+        amount_xtr: plan.amount_xtr,
+        original_amount_xtr: plan.original_amount_xtr,
+        promo_key: plan.promo_key,
+        invoice_sku: plan.sku,
+        invoice_title: plan.title,
+        invoice_description: plan.description,
+        invoice_label: plan.label,
+        invoice_button_text: plan.button_text,
+        payload_json: {
+          action_kind: "photo_payment",
+          chat_id: input.chat_id,
+          scene_session_id: input.scene_session_id,
+          turn_no: input.turn_no,
+          scene_turn_no: input.scene_turn_no,
+          media_signature: input.media_signature,
+          target_message_id: input.target_message_id,
+          current_uuid: input.current_uuid,
+          base_price_xtr: input.base_price_xtr,
+          requested_action: input.requested_action,
+          panel_text: input.panel_text,
+          panel_entities_json: input.panel_entities_json,
+          idempotency_key: `photo-unlock-click:${input.token}`,
+          original_amount_xtr: plan.original_amount_xtr,
+          promo_key: plan.promo_key,
+        },
+      }),
+    );
+    const ready = stored
+      ? await this.ensureStarsInvoiceLink(stored, "photoUnlock.click")
+      : null;
+
+    return ready ? buildTopLevelPaymentFields([ready]).payment_options ?? [] : [];
+  }
+
   private async evaluatePrepareOffer(
     input: MediaCommerceDecisionRequest,
   ): Promise<MediaCommerceDecisionResponse> {
@@ -1014,7 +1201,6 @@ export class MediaCommerceDecisionService {
       base_price_xtr: basePrice,
     });
     const mediaSignature = normalizeString(stats.media_signature);
-
     if (
       !stats.should_offer
       || !mediaSignature
@@ -1036,42 +1222,24 @@ export class MediaCommerceDecisionService {
       };
     }
 
+    const sceneUnlockTokenRows = await this.buildSceneUnlockEntryTokenRows({
+      chat_id: stats.chat_id,
+      scene_session_id: stats.scene_session_id,
+      turn_no: stats.turn_no,
+      scene_turn_no: stats.scene_turn_no,
+      media_signature: mediaSignature,
+      target_message_id: null,
+      current_uuid: null,
+      base_price_xtr: basePrice,
+      subscription_active: subscriptionActive,
+      scene_access_active: sceneAccessActive,
+    });
+
     if (priceRequired > 0) {
-      const photoPlan = resolvePhotoPlanByAmount(priceRequired);
-      const canOfferSceneUnlock =
-        !subscriptionActive && !sceneAccessActive && Boolean(stats.scene_session_id);
-      const freeCredits = canOfferSceneUnlock
-        ? await this.repository.loadFreeCredits(stats.chat_id)
-        : null;
-      const freeSceneUnlockButton =
-        config.TELEGRAM_UX_COPY_JSON.free_actions?.scene_unlock_button;
-      const freeSceneUnlockTokenRows =
-        canOfferSceneUnlock
-        && stats.scene_session_id
-        && freeSceneUnlockButton
-        && Math.max(0, Number(freeCredits?.free_scene_unlocks ?? 0)) > 0
-          ? [
-              buildFreeActionTokenRow({
-                action_kind: "free_scene_unlock",
-                chat_id: stats.chat_id,
-                scene_session_id: stats.scene_session_id,
-                turn_no: stats.turn_no,
-                scene_turn_no: stats.scene_turn_no,
-                media_signature: mediaSignature,
-                target_message_id: null,
-                current_uuid: null,
-                base_price_xtr: basePrice,
-                feature_key: "scene_unlock",
-                action_button_text: freeSceneUnlockButton,
-              }),
-            ]
-          : [];
-      const sceneUnlockPlan =
-        canOfferSceneUnlock && freeSceneUnlockTokenRows.length === 0
-          ? resolveActionPlanByFeatureKey("scene_unlock")
-          : null;
-      const invoicePayload = {
-        action_kind: "photo_payment",
+      if (!stats.scene_session_id) {
+        return { ...base, reason: "scene_session_id_required" };
+      }
+      const photoUnlockTokenRow = this.buildPhotoUnlockEntryTokenRow({
         chat_id: stats.chat_id,
         scene_session_id: stats.scene_session_id,
         turn_no: stats.turn_no,
@@ -1081,65 +1249,9 @@ export class MediaCommerceDecisionService {
         current_uuid: null,
         base_price_xtr: basePrice,
         requested_action: "photo_request",
-        original_amount_xtr: photoPlan.original_amount_xtr,
-        promo_key: photoPlan.promo_key,
-      } satisfies Record<string, unknown>;
-
-      const storedInvoice = await this.repository.upsertInvoiceToken(
-        buildPhotoInvoiceInput({
-          chat_id: stats.chat_id,
-          scene_session_id: stats.scene_session_id,
-          turn_no: stats.turn_no,
-          scene_turn_no: stats.scene_turn_no,
-          media_signature: mediaSignature,
-          target_message_id: null,
-          current_uuid: null,
-          base_price_xtr: basePrice,
-          amount_xtr: photoPlan.amount_xtr,
-          original_amount_xtr: photoPlan.original_amount_xtr,
-          promo_key: photoPlan.promo_key,
-          invoice_sku: photoPlan.sku,
-          invoice_title: photoPlan.title,
-          invoice_description: photoPlan.description,
-          invoice_label: photoPlan.label,
-          invoice_button_text: photoPlan.button_text,
-          payload_json: invoicePayload,
-        }),
-      );
-      const storedSceneUnlockInvoice =
-        sceneUnlockPlan && stats.scene_session_id
-          ? await this.repository.upsertInvoiceTokens(
-            buildSceneUnlockPaymentInputs({
-              chat_id: stats.chat_id,
-              scene_session_id: stats.scene_session_id,
-              idempotency_key: `scene:${stats.chat_id}:${stats.scene_session_id}`,
-              turn_limit: config.TURN_LIMIT,
-              target_message_id: null,
-              plan: sceneUnlockPlan,
-            }),
-          )
-          : [];
-      const tokenRowsInserted = freeSceneUnlockTokenRows.length > 0
-        ? await this.repository.upsertCallbackTokens(freeSceneUnlockTokenRows)
-        : 0;
-      const photoLinkWasReused = normalizeString(storedInvoice?.invoice_link) != null;
-      const [
-        linkedInvoice,
-        linkedSceneUnlockInvoice,
-      ] = await Promise.all([
-        storedInvoice
-          ? this.ensureStoredPaymentReady(storedInvoice, "prepareOffer.photo")
-          : Promise.resolve(null),
-        storedSceneUnlockInvoice.length > 0
-          ? Promise.all(
-            storedSceneUnlockInvoice.map((row) =>
-              this.ensureStoredPaymentReady(row, "prepareOffer.sceneUnlock")),
-          )
-          : Promise.resolve([]),
-      ]);
-      const topLevelPayment = linkedInvoice
-        ? buildTopLevelPaymentFields([linkedInvoice])
-        : buildTopLevelPaymentFields([]);
+      });
+      const tokenRows = [photoUnlockTokenRow, ...sceneUnlockTokenRows];
+      const tokenRowsInserted = await this.repository.upsertCallbackTokens(tokenRows);
 
       return {
         ...base,
@@ -1150,36 +1262,13 @@ export class MediaCommerceDecisionService {
         media_signature: mediaSignature,
         base_price_xtr: basePrice,
         price_required: priceRequired,
-        operation: "prepare_offer_ready",
+        operation: "prepare_offer_callback",
         has_media_offer: true,
-        invoice_kind: "photo",
-        invoice_sku: linkedInvoice?.sku ?? photoPlan.sku,
-        invoice_amount: linkedInvoice?.amount_xtr ?? photoPlan.amount_xtr,
-        original_invoice_amount:
-          normalizePositiveInteger(linkedInvoice?.payload_json.original_amount_xtr)
-          ?? photoPlan.original_amount_xtr,
-        promo_key:
-          normalizeString(
-            typeof linkedInvoice?.payload_json.promo_key === "string"
-              ? linkedInvoice.payload_json.promo_key
-              : null,
-          )
-          ?? photoPlan.promo_key,
-        invoice_title: linkedInvoice?.invoice_title ?? photoPlan.title,
-        invoice_description:
-          linkedInvoice?.invoice_description ?? photoPlan.description,
-        invoice_label: linkedInvoice?.invoice_label ?? photoPlan.label,
-        invoice_button_text:
-          linkedInvoice?.invoice_button_text ?? photoPlan.button_text,
-        invoice_payload_json: invoicePayload,
-        ...topLevelPayment,
-        token_rows: freeSceneUnlockTokenRows,
-        token_rows_prepared: freeSceneUnlockTokenRows.length,
+        token_rows: tokenRows,
+        token_rows_prepared: tokenRows.length,
         token_rows_inserted: tokenRowsInserted,
-        scene_unlock_offer_item: linkedSceneUnlockInvoice.length > 0
-          ? buildOfferItem(linkedSceneUnlockInvoice)
-          : null,
-        reason: photoLinkWasReused ? "invoice_link_reused" : "invoice_link_created",
+        scene_unlock_offer_item: null,
+        reason: "photo_unlock_entry_ready",
       };
     }
 
@@ -1196,7 +1285,8 @@ export class MediaCommerceDecisionService {
       requested_action: "photo_request",
       button_text: config.TELEGRAM_UX_COPY_JSON.media.get_photo_button,
     });
-    const insertedCount = await this.repository.upsertCallbackTokens([tokenRow]);
+    const tokenRows = [tokenRow, ...sceneUnlockTokenRows];
+    const insertedCount = await this.repository.upsertCallbackTokens(tokenRows);
 
     return {
       ...base,
@@ -1209,8 +1299,8 @@ export class MediaCommerceDecisionService {
       price_required: 0,
       operation: "prepare_offer_callback",
       has_media_offer: true,
-      token_rows: [tokenRow],
-      token_rows_prepared: 1,
+      token_rows: tokenRows,
+      token_rows_prepared: tokenRows.length,
       token_rows_inserted: insertedCount,
       reason: "free_offer_ready",
     };
@@ -1513,6 +1603,19 @@ export class MediaCommerceDecisionService {
     }
 
     if (
+      actionKind === "free_photo_unlock"
+      && callbackBase.chat_id
+      && callbackRow?.found
+      && callbackRow.token
+    ) {
+      return this.evaluateFreePhotoUnlockCallback(
+        callbackBase,
+        callbackRow.token,
+        callbackBase.chat_id,
+      );
+    }
+
+    if (
       actionKind === "reveal_feature_payment_options"
       && callbackBase.chat_id
       && callbackRow?.found
@@ -1673,6 +1776,11 @@ export class MediaCommerceDecisionService {
       token_rows: tokenRows,
       token_rows_prepared: tokenRows.length,
       text: normalizeString(typeof payload.text === "string" ? payload.text : null),
+      free_balance_text: normalizeString(
+        typeof payload.free_balance_text === "string"
+          ? payload.free_balance_text
+          : null,
+      ),
       offer_message_id:
         normalizePositiveInteger(payload.offer_message_id)
         ?? base.target_message_id
@@ -1813,6 +1921,65 @@ export class MediaCommerceDecisionService {
       };
     }
 
+    if (redeemed?.reason === "free_credit_unavailable") {
+      const resolvedChatId =
+        normalizePositiveInteger(redeemed.chat_id)
+        ?? normalizePositiveInteger(payload.chat_id)
+        ?? chatId;
+      const resolvedSceneSessionId =
+        normalizeString(redeemed.scene_session_id)
+        ?? normalizeString(
+          typeof payload.scene_session_id === "string"
+            ? payload.scene_session_id
+            : null,
+        );
+      const resolvedTargetMessageId =
+        normalizePositiveInteger(payload.target_message_id)
+        ?? base.target_message_id
+        ?? null;
+      if (!resolvedSceneSessionId) {
+        return {
+          ...base,
+          operation: "noop",
+          callback_valid: false,
+          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_show_alert: false,
+          reason: "scene_session_id_required",
+        };
+      }
+      const paymentOptions = await this.buildSceneUnlockPaymentOptionsAtClick({
+        token,
+        chat_id: resolvedChatId,
+        scene_session_id: resolvedSceneSessionId,
+        target_message_id: resolvedTargetMessageId,
+      });
+      if (paymentOptions.length === 0) {
+        return {
+          ...base,
+          operation: "noop",
+          callback_valid: false,
+          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_show_alert: false,
+          reason: "scene_unlock_plan_missing",
+        };
+      }
+
+      return this.evaluateRevealFeaturePaymentOptionsCallback(
+        {
+          ...base,
+          callback_valid: true,
+          callback_answer_text: "",
+          chat_id: resolvedChatId,
+          scene_session_id: resolvedSceneSessionId,
+          target_message_id: resolvedTargetMessageId,
+        },
+        {
+          ...payload,
+          payment_options: paymentOptions,
+        },
+      );
+    }
+
     return {
       ...base,
       operation: "noop",
@@ -1823,6 +1990,195 @@ export class MediaCommerceDecisionService {
       payment_token: token,
       feature_key: "scene_unlock",
       reason: redeemed?.reason ?? "free_scene_unlock_invalid",
+    };
+  }
+
+  private async evaluateFreePhotoUnlockCallback(
+    base: MediaCommerceDecisionResponse,
+    token: string,
+    chatId: number,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const redeemed = await this.runRepositoryOperation(
+      "callback.freePhotoUnlock.redeem",
+      {
+        chat_id: chatId,
+        payment_kind: "photo",
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.redeemFreePhotoUnlock(token, chatId),
+    );
+    const payload = parseJsonObject(redeemed?.payload_json) ?? {};
+    const sceneSessionId =
+      normalizeString(redeemed?.scene_session_id)
+      ?? normalizeString(
+        typeof payload.scene_session_id === "string"
+          ? payload.scene_session_id
+          : null,
+      );
+    const requestedAction = normalizeString(
+      typeof payload.requested_action === "string"
+        ? payload.requested_action
+        : null,
+    ) ?? "photo_request";
+
+    const usedFreeCredit =
+      redeemed?.redeemed === true || redeemed?.reason === "already_consumed";
+    if (redeemed?.reason === "already_fulfilled") {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: true,
+        callback_answer_text: "",
+        payment_kind: "photo",
+        payment_token: token,
+        feature_key: "photo_unlock",
+        reason: "already_fulfilled",
+      };
+    }
+    if (
+      (usedFreeCredit || redeemed?.reason === "free_credit_not_required")
+      && sceneSessionId
+    ) {
+      const boundPhotoUuid = usedFreeCredit
+        ? normalizeLowerString(
+            typeof payload.free_photo_uuid === "string"
+              ? payload.free_photo_uuid
+              : null,
+          )
+        : null;
+      if (usedFreeCredit && !boundPhotoUuid) {
+        return { ...base, operation: "noop", reason: "free_photo_uuid_missing" };
+      }
+      const context = await this.repository.loadMediaContext({
+        chat_id: chatId,
+        scene_session_id: sceneSessionId,
+        turn_no:
+          normalizeNonNegativeInteger(payload.turn_no)
+          ?? normalizeNonNegativeInteger(redeemed.turn_no),
+        scene_turn_no: normalizeNonNegativeInteger(payload.scene_turn_no),
+        media_signature: normalizeString(
+          typeof payload.media_signature === "string"
+            ? payload.media_signature
+            : null,
+        ),
+        current_uuid: normalizeLowerString(
+          typeof payload.current_uuid === "string" ? payload.current_uuid : null,
+        ),
+        target_message_id:
+          normalizePositiveInteger(payload.target_message_id)
+          ?? base.target_message_id
+          ?? null,
+        base_price_xtr: normalizePositiveInteger(payload.base_price_xtr) ?? 10,
+        action_kind: requestedAction,
+        requested_action: requestedAction,
+        invoice_token: token,
+        force_deliver_after_payment: usedFreeCredit,
+        paid_access_mode: usedFreeCredit ? "free_credit" : null,
+        callback_valid: true,
+        panel_text: normalizeString(
+          typeof payload.panel_text === "string" ? payload.panel_text : base.panel_text,
+        ),
+        panel_entities_json:
+          parseJsonArray(payload.panel_entities_json)
+          ?? base.panel_entities_json
+          ?? [],
+      });
+      if (!context) {
+        return { ...base, operation: "noop", reason: "media_context_not_found" };
+      }
+
+      if (boundPhotoUuid) {
+        const boundPhoto = await this.repository.loadPhotoByUuid(boundPhotoUuid);
+        if (!boundPhoto?.photo_url) {
+          return {
+            ...base,
+            operation: "noop",
+            callback_valid: false,
+            reason: "free_photo_not_found",
+          };
+        }
+        context.next_unseen_json = boundPhoto;
+      }
+
+      const response = await this.applyMediaActionDecision(
+        {
+          ...base,
+          callback_valid: true,
+          callback_answer_text: "",
+          payment_kind: "photo",
+          payment_token: token,
+        },
+        context,
+      );
+      return usedFreeCredit
+        ? {
+            ...response,
+            action_kind: "free_photo_unlock",
+            fulfillment_invoice_token: token,
+          }
+        : response;
+    }
+
+    if (redeemed?.reason === "free_credit_unavailable" && sceneSessionId) {
+      const paymentOptions = await this.buildPhotoPaymentOptionsAtClick({
+        token,
+        chat_id: chatId,
+        scene_session_id: sceneSessionId,
+        turn_no:
+          normalizeNonNegativeInteger(payload.turn_no)
+          ?? normalizeNonNegativeInteger(redeemed.turn_no),
+        scene_turn_no: normalizeNonNegativeInteger(payload.scene_turn_no),
+        media_signature: normalizeString(
+          typeof payload.media_signature === "string"
+            ? payload.media_signature
+            : null,
+        ),
+        target_message_id:
+          normalizePositiveInteger(payload.target_message_id)
+          ?? base.target_message_id
+          ?? null,
+        current_uuid: normalizeLowerString(
+          typeof payload.current_uuid === "string" ? payload.current_uuid : null,
+        ),
+        base_price_xtr: normalizePositiveInteger(payload.base_price_xtr) ?? 10,
+        requested_action: requestedAction,
+        panel_text: normalizeString(
+          typeof payload.panel_text === "string" ? payload.panel_text : base.panel_text,
+        ),
+        panel_entities_json:
+          parseJsonArray(payload.panel_entities_json)
+          ?? base.panel_entities_json
+          ?? [],
+      });
+
+      return this.evaluateRevealFeaturePaymentOptionsCallback(
+        {
+          ...base,
+          callback_valid: true,
+          callback_answer_text: "",
+          payment_kind: "photo",
+          payment_token: token,
+          scene_session_id: sceneSessionId,
+        },
+        {
+          ...payload,
+          feature_key: "photo_unlock",
+          payment_options: paymentOptions,
+        },
+      );
+    }
+
+    return {
+      ...base,
+      operation: "noop",
+      callback_valid: false,
+      callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      callback_show_alert: false,
+      payment_kind: "photo",
+      payment_token: token,
+      feature_key: "photo_unlock",
+      reason: redeemed?.reason ?? "free_photo_unlock_invalid",
     };
   }
 
@@ -1841,22 +2197,33 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    let invoiceToken: StoredInvoiceToken | null = null;
-    let sceneUnlockInvoiceRows: StoredInvoiceToken[] = [];
     let tokenRowsInserted = 0;
-    const shouldUpsertPhotoInvoice =
+    const shouldOfferPhotoUnlock =
       decision.invoice_kind === "photo"
-      && decision.invoice_sku
-      && decision.invoice_amount
-      && decision.original_invoice_amount
-      && decision.invoice_title
-      && decision.invoice_description
-      && decision.invoice_label
-      && decision.invoice_button_text
-      && decision.invoice_payload_json
-      && base.chat_id;
-    const photoInvoiceInput = shouldUpsertPhotoInvoice
-      ? buildPhotoInvoiceInput({
+      && Boolean(base.chat_id)
+      && Boolean(context.scene_session_id);
+    const requestedPhotoAction = normalizeString(
+      decision.invoice_payload_json?.requested_action,
+    ) ?? "photo_regen";
+    const photoUnlockTokenRows = shouldOfferPhotoUnlock
+      ? [
+          this.buildPhotoUnlockEntryTokenRow({
+            chat_id: base.chat_id as number,
+            scene_session_id: context.scene_session_id as string,
+            turn_no: context.turn_no,
+            scene_turn_no: context.scene_turn_no,
+            media_signature: context.media_signature,
+            target_message_id: context.target_message_id,
+            current_uuid: decision.current_uuid,
+            base_price_xtr: Number(context.base_price_xtr ?? 10),
+            requested_action: requestedPhotoAction,
+            panel_text: decision.caption_text,
+            panel_entities_json: decision.caption_entities_json,
+          }),
+        ]
+      : [];
+    const sceneUnlockTokenRows = base.chat_id
+      ? await this.buildSceneUnlockEntryTokenRows({
         chat_id: base.chat_id as number,
         scene_session_id: context.scene_session_id,
         turn_no: context.turn_no,
@@ -1865,129 +2232,19 @@ export class MediaCommerceDecisionService {
         target_message_id: context.target_message_id,
         current_uuid: decision.current_uuid,
         base_price_xtr: Number(context.base_price_xtr ?? 10),
-        amount_xtr: decision.invoice_amount as number,
-        original_amount_xtr: decision.original_invoice_amount as number,
-        promo_key: decision.promo_key,
-        invoice_sku: decision.invoice_sku as string,
-        invoice_title: decision.invoice_title as string,
-        invoice_description: decision.invoice_description as string,
-        invoice_label: decision.invoice_label as string,
-        invoice_button_text: decision.invoice_button_text as string,
-        payload_json:
-          decision.invoice_payload_json as NonNullable<typeof decision.invoice_payload_json>,
+        subscription_active: context.subscription_active === true,
+        scene_access_active: context.scene_access_active === true,
       })
-      : null;
-    const canOfferSceneUnlock =
-      decision.invoice_kind === "photo"
-      && context.subscription_active !== true
-      && context.scene_access_active !== true
-      && Boolean(context.scene_session_id)
-      && Boolean(base.chat_id);
-    const freeCredits = canOfferSceneUnlock && base.chat_id
-      ? await this.repository.loadFreeCredits(base.chat_id as number)
-      : null;
-    const freeSceneUnlockButton =
-      config.TELEGRAM_UX_COPY_JSON.free_actions?.scene_unlock_button;
-    const freeSceneUnlockTokenRows =
-      canOfferSceneUnlock
-      && context.scene_session_id
-      && base.chat_id
-      && freeSceneUnlockButton
-      && Math.max(0, Number(freeCredits?.free_scene_unlocks ?? 0)) > 0
-        ? [
-            buildFreeActionTokenRow({
-              action_kind: "free_scene_unlock",
-              chat_id: base.chat_id as number,
-              scene_session_id: context.scene_session_id,
-              turn_no: context.turn_no,
-              scene_turn_no: context.scene_turn_no,
-              media_signature: context.media_signature,
-              target_message_id: context.target_message_id,
-              current_uuid: decision.current_uuid,
-              base_price_xtr: Number(context.base_price_xtr ?? 10),
-              feature_key: "scene_unlock",
-              action_button_text: freeSceneUnlockButton,
-            }),
-          ]
-        : [];
-    const sceneUnlockPlan =
-      canOfferSceneUnlock
-      && freeSceneUnlockTokenRows.length === 0
-        ? resolveActionPlanByFeatureKey("scene_unlock")
-        : null;
-    const sceneUnlockInvoiceInput =
-      sceneUnlockPlan && context.scene_session_id && base.chat_id
-        ? buildSceneUnlockPaymentInputs({
-          chat_id: base.chat_id as number,
-          scene_session_id: context.scene_session_id,
-          idempotency_key: `scene:${base.chat_id}:${context.scene_session_id}`,
-          turn_limit: config.TURN_LIMIT,
-          target_message_id: context.target_message_id,
-          plan: sceneUnlockPlan,
-        })
-        : [];
+      : [];
 
-    const allTokenRows = [...decision.token_rows, ...freeSceneUnlockTokenRows];
-
-    if (allTokenRows.length > 0 && shouldUpsertPhotoInvoice) {
-      const [insertedCount, storedInvoice] = await Promise.all([
-        this.repository.upsertCallbackTokens(allTokenRows),
-        this.repository.upsertInvoiceToken(photoInvoiceInput as NonNullable<typeof photoInvoiceInput>),
-      ]);
-      tokenRowsInserted = insertedCount;
-      invoiceToken = storedInvoice;
-    } else {
-      tokenRowsInserted = allTokenRows.length > 0
-        ? await this.repository.upsertCallbackTokens(allTokenRows)
-        : 0;
-
-      if (shouldUpsertPhotoInvoice) {
-        invoiceToken = await this.repository.upsertInvoiceToken(
-          photoInvoiceInput as NonNullable<typeof photoInvoiceInput>,
-        );
-      }
-    }
-    if (sceneUnlockInvoiceInput.length > 0) {
-      sceneUnlockInvoiceRows = await this.repository.upsertInvoiceTokens(
-        sceneUnlockInvoiceInput,
-      );
-    }
-    const [linkedInvoiceToken, linkedSceneUnlockRows] = await Promise.all([
-      invoiceToken
-        ? this.ensureStoredPaymentReady(invoiceToken, "photo.nextPhoto")
-        : Promise.resolve(null),
-      sceneUnlockInvoiceRows.length > 0
-        ? Promise.all(
-          sceneUnlockInvoiceRows.map((row) =>
-            this.ensureStoredPaymentReady(row, "photo.sceneUnlock")),
-        )
-        : Promise.resolve([]),
-    ]);
-    invoiceToken = linkedInvoiceToken;
-    sceneUnlockInvoiceRows = linkedSceneUnlockRows;
-    const sceneUnlockOfferItem = buildOfferItem(sceneUnlockInvoiceRows);
-    const sceneUnlockRevealTokenRows =
-      sceneUnlockOfferItem && sceneUnlockPlan
-        ? [
-            buildPaymentUiTokenRow({
-              action_kind: "reveal_feature_payment_options",
-              chat_id: context.chat_id,
-              scene_session_id: context.scene_session_id,
-              turn_no: context.turn_no,
-              scene_turn_no: context.scene_turn_no,
-              target_message_id: context.target_message_id,
-              feature_key: "scene_unlock",
-              action_button_text: sceneUnlockPlan.button_text,
-              payment_options: sceneUnlockOfferItem.payment_options,
-              idempotency_key: `scene-unlock-ui:${context.chat_id}:${context.scene_session_id ?? "no-scene"}`,
-            }),
-          ]
-        : [];
-    if (sceneUnlockRevealTokenRows.length > 0) {
-      tokenRowsInserted += await this.repository.upsertCallbackTokens(
-        sceneUnlockRevealTokenRows,
-      );
-    }
+    const allTokenRows = [
+      ...decision.token_rows,
+      ...photoUnlockTokenRows,
+      ...sceneUnlockTokenRows,
+    ];
+    tokenRowsInserted = allTokenRows.length > 0
+      ? await this.repository.upsertCallbackTokens(allTokenRows)
+      : 0;
 
     return {
       ...base,
@@ -2001,35 +2258,25 @@ export class MediaCommerceDecisionService {
       current_uuid: decision.current_uuid,
       photo_url: decision.photo_url,
       selected_uuid: decision.selected_uuid,
-      token_rows: [...allTokenRows, ...sceneUnlockRevealTokenRows],
-      token_rows_prepared: allTokenRows.length + sceneUnlockRevealTokenRows.length,
+      token_rows: allTokenRows,
+      token_rows_prepared: allTokenRows.length,
       token_rows_inserted: tokenRowsInserted,
       log_event_type: decision.log_event_type,
       access_mode: decision.access_mode,
       log_price_xtr: decision.log_price_xtr,
       price_required: decision.price_required,
       invoice_kind: decision.invoice_kind,
-      invoice_sku: invoiceToken?.sku ?? decision.invoice_sku,
-      invoice_amount: invoiceToken?.amount_xtr ?? decision.invoice_amount,
-      original_invoice_amount:
-        normalizePositiveInteger(invoiceToken?.payload_json.original_amount_xtr)
-        ?? decision.original_invoice_amount,
-      promo_key:
-        normalizeString(
-          typeof invoiceToken?.payload_json.promo_key === "string"
-            ? invoiceToken.payload_json.promo_key
-            : null,
-        )
-        ?? decision.promo_key,
-      invoice_title: invoiceToken?.invoice_title ?? decision.invoice_title,
-      invoice_description:
-        invoiceToken?.invoice_description ?? decision.invoice_description,
-      invoice_label: invoiceToken?.invoice_label ?? decision.invoice_label,
+      invoice_sku: decision.invoice_sku,
+      invoice_amount: decision.invoice_amount,
+      original_invoice_amount: decision.original_invoice_amount,
+      promo_key: decision.promo_key,
+      invoice_title: decision.invoice_title,
+      invoice_description: decision.invoice_description,
+      invoice_label: decision.invoice_label,
       invoice_payload_json: decision.invoice_payload_json,
-      invoice_button_text:
-        invoiceToken?.invoice_button_text ?? decision.invoice_button_text,
-      ...buildTopLevelPaymentFields(invoiceToken ? [invoiceToken] : []),
-      scene_unlock_offer_item: sceneUnlockOfferItem,
+      invoice_button_text: decision.invoice_button_text,
+      ...buildTopLevelPaymentFields([]),
+      scene_unlock_offer_item: null,
       fulfillment_invoice_token: decision.fulfillment_invoice_token,
       caption_text: decision.caption_text,
       caption_entities_json: decision.caption_entities_json,
@@ -2990,98 +3237,50 @@ export class MediaCommerceDecisionService {
       abParams,
       subscriptionOfferReason,
     );
-    const [offerAccessStatus, freeCredits] = await Promise.all([
-      this.runRepositoryOperation(
-        "subscription.loadSceneAccessStatus",
-        {
-          chat_id: chatId,
-          payment_kind: null,
-          sku: null,
-          invoice_status: null,
-        },
-        () => this.repository.loadSceneAccessStatus({
-          chat_id: chatId,
-          scene_session_id: null,
-        }),
-      ),
-      this.repository.loadFreeCredits(chatId),
-    ]);
+    const freeBalanceText = formatFreeBalances(input);
+    const offerAccessStatus = await this.runRepositoryOperation(
+      "subscription.loadSceneAccessStatus",
+      {
+        chat_id: chatId,
+        payment_kind: null,
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.loadSceneAccessStatus({
+        chat_id: chatId,
+        scene_session_id: null,
+      }),
+    );
     const subscriptionActive = offerAccessStatus?.subscription_active === true;
-    const sceneAccessActive = offerAccessStatus?.scene_access_active === true;
     const requestSceneSessionId = normalizeString(input.scene_session_id);
     const requestSceneTurnNo = normalizeNonNegativeInteger(input.scene_turn_no);
     const inActiveScene =
       Boolean(requestSceneSessionId)
-      && requestSceneTurnNo != null
-      && requestSceneTurnNo >= 0;
+      && offerAccessStatus?.scene_is_active === true
+      && normalizeString(offerAccessStatus.active_scene_session_id) === requestSceneSessionId;
     const activeSceneSessionId =
       inActiveScene ? requestSceneSessionId : null;
-    const freeSceneUnlockButton =
-      config.TELEGRAM_UX_COPY_JSON.free_actions?.scene_unlock_button;
-    const freeSceneUnlockTokenRows =
+    const canOfferSceneUnlock =
       !subscriptionActive
-      && !sceneAccessActive
       && inActiveScene
       && activeSceneSessionId
-      && abParams.scene_unlock?.enabled !== false
-      && freeSceneUnlockButton
-      && Math.max(0, Number(freeCredits?.free_scene_unlocks ?? 0)) > 0
-        ? [
-            buildFreeActionTokenRow({
-              action_kind: "free_scene_unlock",
-              chat_id: chatId,
-              scene_session_id: activeSceneSessionId,
-              turn_no: null,
-              scene_turn_no: requestSceneTurnNo,
-              target_message_id: null,
-              feature_key: "scene_unlock",
-              action_button_text: freeSceneUnlockButton,
-              ab_test: abContext,
-            }),
-          ]
-        : [];
-    const sceneUnlockPlan =
-      !subscriptionActive
-      && !sceneAccessActive
-      && inActiveScene
-      && activeSceneSessionId
-      && freeSceneUnlockTokenRows.length === 0
-        ? applySceneUnlockOverride(
-          resolveActionPlanByFeatureKey("scene_unlock"),
-          abParams,
-        )
-        : null;
+      && abParams.scene_unlock?.enabled !== false;
     const subscriptionPlans = applySubscriptionPlanOverrides(
       resolveSubscriptionPlans(),
       abParams,
     );
-    const invoiceInputs = [
-      ...(sceneUnlockPlan && activeSceneSessionId
-        ? buildSceneUnlockPaymentInputs({
-          chat_id: chatId,
-          scene_session_id: activeSceneSessionId,
-          idempotency_key: effectiveIdempotencyKey,
-          subscription_offer_reason: subscriptionOfferReason,
-          turn_limit: turnLimit,
-          turns_today: turnsToday,
-          turn_limit_reset_text: turnLimitResetText,
-          plan: sceneUnlockPlan,
-          ab_test: abContext,
-        })
-        : []),
-      ...subscriptionPlans.flatMap((plan, index) =>
-        buildSubscriptionPaymentInputs({
-          chat_id: chatId,
-          idempotency_key: effectiveIdempotencyKey,
-          subscription_offer_reason: subscriptionOfferReason,
-          turn_limit: turnLimit,
-          turns_today: turnsToday,
-          turn_limit_reset_text: turnLimitResetText,
-          sort_order: index + 1,
-          plan,
-          ab_test: abContext,
-        })),
-    ];
+    const invoiceInputs = subscriptionPlans.flatMap((plan, index) =>
+      buildSubscriptionPaymentInputs({
+        chat_id: chatId,
+        idempotency_key: effectiveIdempotencyKey,
+        subscription_offer_reason: subscriptionOfferReason,
+        turn_limit: turnLimit,
+        turns_today: turnsToday,
+        turn_limit_reset_text: turnLimitResetText,
+        sort_order: index + 1,
+        plan,
+        ab_test: abContext,
+      }));
 
     const upsertedRows = await this.repository.upsertInvoiceTokens(
       invoiceInputs,
@@ -3104,25 +3303,18 @@ export class MediaCommerceDecisionService {
           - getSourceSortOrder(normalizePaymentSource(right.payment_source)),
       );
     const subscriptionOfferItems = groupOfferItems(sortedRows);
-    const sceneUnlockOfferItem =
-      subscriptionOfferItems.find((item) => item.feature_key === "scene_unlock")
-      ?? null;
-    const paidSceneUnlockRevealTokenRows =
-      sceneUnlockOfferItem != null
-        ? [
-            buildPaymentUiTokenRow({
-              action_kind: "reveal_feature_payment_options",
-              chat_id: chatId,
-              scene_session_id: activeSceneSessionId,
-              turn_no: null,
-              scene_turn_no: null,
-              target_message_id: null,
-              feature_key: "scene_unlock",
-              action_button_text: sceneUnlockPlan?.button_text ?? sceneUnlockOfferItem.label,
-              payment_options: sceneUnlockOfferItem.payment_options,
-              idempotency_key: `subscription-scene-unlock-ui:${effectiveIdempotencyKey}:${activeSceneSessionId ?? "no-scene"}`,
-            }),
-          ]
+    const sceneUnlockEntryTokenRows =
+      canOfferSceneUnlock && activeSceneSessionId
+        ? await this.buildSceneUnlockEntryTokenRows({
+          chat_id: chatId,
+          scene_session_id: activeSceneSessionId,
+          turn_no: null,
+          scene_turn_no: requestSceneTurnNo,
+          target_message_id: null,
+          subscription_active: subscriptionActive,
+          scene_access_active: offerAccessStatus?.scene_access_active === true,
+          ab_selection: abSelection,
+        })
         : [];
     const hasSbpSubscriptionOption = subscriptionOfferItems.some((item) =>
       item.payment_kind === "subscription"
@@ -3148,11 +3340,9 @@ export class MediaCommerceDecisionService {
               scene_turn_no: null,
               target_message_id: offerMessageId,
               subscription_offer_items: subscriptionOfferItems,
-              token_rows: [
-                ...freeSceneUnlockTokenRows,
-                ...paidSceneUnlockRevealTokenRows,
-              ],
+              token_rows: sceneUnlockEntryTokenRows,
               text: offerText,
+              free_balance_text: freeBalanceText,
               offer_message_id: offerMessageId,
               selected_payment_source: source,
               idempotency_key: `subscription-source-ui:${effectiveIdempotencyKey}`,
@@ -3163,8 +3353,7 @@ export class MediaCommerceDecisionService {
       subscriptionPaymentToggleTokenRows,
     );
     const tokenRows = [
-      ...freeSceneUnlockTokenRows,
-      ...paidSceneUnlockRevealTokenRows,
+      ...sceneUnlockEntryTokenRows,
       ...subscriptionPaymentToggleTokenRows.map((row) => ({
         ...row,
         payload_json: {
@@ -3193,6 +3382,7 @@ export class MediaCommerceDecisionService {
       token_rows_prepared: tokenRows.length,
       token_rows_inserted: tokenRowsInserted,
       text: offerText,
+      free_balance_text: freeBalanceText,
       ab_test: abContext,
       subscription_offer_items: subscriptionOfferItems,
       selected_payment_source: defaultPaymentSource,
@@ -3215,21 +3405,49 @@ export class MediaCommerceDecisionService {
       return { ...base, reason: "chat_id_required" };
     }
 
-    const result = await this.repository.storePhotoEvent({
+    const actionKind = normalizeString(input.action_kind);
+    const accessMode = normalizeString(input.access_mode);
+    const sceneSessionId = normalizeString(input.scene_session_id);
+    const turnNo = normalizeNonNegativeInteger(input.turn_no);
+    const sceneTurnNo = normalizeNonNegativeInteger(input.scene_turn_no);
+    const mediaSignature = normalizeString(input.media_signature);
+    const uuid = normalizeLowerString(input.selected_uuid);
+    const panelMessageId =
+      normalizePositiveInteger(input.panel_message_id)
+      ?? normalizePositiveInteger(input.target_message_id);
+    const fulfillmentToken = normalizeString(input.fulfillment_invoice_token);
+    const isFreePhotoCredit =
+      actionKind === "free_photo_unlock" && accessMode === "free_credit";
+    const result = isFreePhotoCredit
+      && sceneSessionId
+      && turnNo != null
+      && mediaSignature
+      && uuid
+      && panelMessageId
+      && fulfillmentToken
+      ? await this.repository.finalizeFreePhotoUnlock({
+          token: fulfillmentToken,
+          chat_id: chatId,
+          scene_session_id: sceneSessionId,
+          turn_no: turnNo,
+          scene_turn_no: sceneTurnNo,
+          media_signature: mediaSignature,
+          uuid,
+          panel_message_id: panelMessageId,
+        })
+      : await this.repository.storePhotoEvent({
       chat_id: chatId,
-      scene_session_id: normalizeString(input.scene_session_id),
-      turn_no: normalizeNonNegativeInteger(input.turn_no),
-      scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
+      scene_session_id: sceneSessionId,
+      turn_no: turnNo,
+      scene_turn_no: sceneTurnNo,
       event_type: normalizeString(input.log_event_type),
-      media_signature: normalizeString(input.media_signature),
-      uuid: normalizeLowerString(input.selected_uuid),
-      panel_message_id:
-        normalizePositiveInteger(input.panel_message_id)
-        ?? normalizePositiveInteger(input.target_message_id),
+      media_signature: mediaSignature,
+      uuid,
+      panel_message_id: panelMessageId,
       price_xtr: normalizeNonNegativeInteger(input.log_price_xtr) ?? 0,
-      access_mode: normalizeString(input.access_mode),
-      action_kind: normalizeString(input.action_kind),
-      fulfillment_invoice_token: normalizeString(input.fulfillment_invoice_token),
+      access_mode: accessMode,
+      action_kind: actionKind,
+      fulfillment_invoice_token: fulfillmentToken,
       next_invoice_token: normalizeString(input.invoice_token),
       next_invoice_link: normalizeString(input.invoice_link),
       price_required: normalizeNonNegativeInteger(input.price_required) ?? 0,

@@ -54,6 +54,7 @@ export function buildBaseResponse(
     current_uuid: normalizeLowerString(input.current_uuid),
     log_event_type: normalizeString(input.log_event_type),
     access_mode: normalizeString(input.access_mode),
+    action_kind: normalizeString(input.action_kind),
     log_price_xtr: normalizeNonNegativeInteger(input.log_price_xtr) ?? 0,
     photo_url: normalizeString(input.photo_url),
     selected_uuid: normalizeLowerString(input.selected_uuid),

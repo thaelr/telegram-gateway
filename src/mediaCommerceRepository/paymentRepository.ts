@@ -107,7 +107,8 @@ export class MediaPaymentRepository {
         cs.chat_id,
         cs.active_scene_session_id,
         COALESCE(cs.free_fast_scene_skips, 0)::integer AS free_fast_scene_skips,
-        COALESCE(cs.free_scene_unlocks, 0)::integer AS free_scene_unlocks
+        COALESCE(cs.free_scene_unlocks, 0)::integer AS free_scene_unlocks,
+        COALESCE(cs.free_photo_unlocks, 0)::integer AS free_photo_unlocks
       FROM public.chat_state cs
       WHERE cs.chat_id = ${chatId}::bigint
       LIMIT 1
@@ -138,6 +139,21 @@ export class MediaPaymentRepository {
     const rows = await this.query<RedeemFreeActionResult[]>`
       SELECT *
       FROM public.media_redeem_free_scene_unlock(
+        ${token}::text,
+        ${chatId}::bigint
+      )
+    `;
+
+    return rows[0] ?? null;
+  }
+
+  async redeemFreePhotoUnlock(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<RedeemFreeActionResult | null> {
+    const rows = await this.query<RedeemFreeActionResult[]>`
+      SELECT *
+      FROM public.media_redeem_free_photo_unlock(
         ${token}::text,
         ${chatId}::bigint
       )

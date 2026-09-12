@@ -266,3 +266,172 @@ test("router endpoint is registered and uses the same auth and validation wiring
   assert.equal(response.json().panel_text, "panel caption");
   assert.deepEqual(response.json().raw_update, { callback_query: { id: "cbq-1" } });
 });
+
+test("reward slot endpoint returns claim UI result", async (t) => {
+  const app = buildApp({
+    logger: false,
+    rewardService: {
+      async claimConfiguredSlot(input) {
+        return {
+          grant_id: 10,
+          chat_id: input.chatId,
+          campaign_id: "campaign-1",
+          slot: input.slot,
+          telegram_message_id: input.telegramMessageId,
+          status: "claimed",
+          free_scene_unlocks: 1,
+          free_fast_scene_skips: 2,
+          free_photo_unlocks: 3,
+          subscription_until: null,
+          success_text: "Gift claimed",
+          callback_answer_text: "Gift claimed",
+          next_action: "show_character_gallery",
+          reward_slot: input.slot,
+        };
+      },
+      async claimReward() {
+        throw new Error("not used");
+      },
+      async assignConfiguredSlot() {
+        throw new Error("not used");
+      },
+      async bindGrantMessage() {
+        throw new Error("not used");
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/rewards/claim-slot",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: { chat_id: "42", reward_slot: "1", inbound_message_id: "100" },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().status, "claimed");
+  assert.equal(response.json().next_action, "show_character_gallery");
+});
+
+test("reward grant endpoint assigns the configured campaign before broadcast delivery", async (t) => {
+  let received: unknown = null;
+  const app = buildApp({
+    logger: false,
+    rewardService: {
+      async claimConfiguredSlot() {
+        throw new Error("not used");
+      },
+      async claimReward() {
+        throw new Error("not used");
+      },
+      async assignConfiguredSlot(input) {
+        received = input;
+        return {
+          grant_id: 10,
+          chat_id: input.chatId,
+          slot: input.slot,
+          campaign_id: "campaign-1",
+          status: "assigned" as const,
+          assigned_at: "2026-09-12T00:00:00Z",
+          claimed_at: null,
+          telegram_message_id: null,
+        };
+      },
+      async bindGrantMessage() {
+        throw new Error("not used");
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/rewards/grants",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: { chat_id: "42", reward_slot: "1" },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(received, { chatId: 42, slot: 1 });
+  assert.equal(response.json().campaign_id, "campaign-1");
+});
+
+test("reward grant message binding endpoint updates an existing grant", async (t) => {
+  let received: unknown = null;
+  const app = buildApp({
+    logger: false,
+    rewardService: {
+      async claimConfiguredSlot() { throw new Error("not used"); },
+      async claimReward() { throw new Error("not used"); },
+      async assignConfiguredSlot() { throw new Error("not used"); },
+      async bindGrantMessage(input) {
+        received = input;
+        return {
+          grant_id: input.grantId,
+          chat_id: 42,
+          slot: 1,
+          campaign_id: "campaign-1",
+          status: "assigned" as const,
+          assigned_at: "2026-09-12T00:00:00Z",
+          claimed_at: null,
+          telegram_message_id: input.telegramMessageId,
+        };
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/rewards/grants/10/bind-message",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: { telegram_message_id: "100" },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(received, { grantId: 10, telegramMessageId: 100 });
+  assert.equal(response.json().telegram_message_id, 100);
+});
+
+test("direct reward endpoint invokes the campaign service without Telegram context", async (t) => {
+  let received: unknown = null;
+  const app = buildApp({
+    logger: false,
+    rewardService: {
+      async claimConfiguredSlot() {
+        throw new Error("not used");
+      },
+      async claimReward(input) {
+        received = input;
+        return {
+          chat_id: input.chatId,
+          campaign_id: input.campaignId,
+          status: "already_claimed",
+          free_scene_unlocks: 1,
+          free_fast_scene_skips: 2,
+          free_photo_unlocks: 3,
+          subscription_until: null,
+        };
+      },
+      async assignConfiguredSlot() {
+        throw new Error("not used");
+      },
+      async bindGrantMessage() {
+        throw new Error("not used");
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/rewards/claim",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: { chat_id: 42, campaign_id: "campaign-1" },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(received, { chatId: 42, campaignId: "campaign-1" });
+  assert.equal(response.json().status, "already_claimed");
+});

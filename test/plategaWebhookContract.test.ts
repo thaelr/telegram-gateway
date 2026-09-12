@@ -8,7 +8,9 @@ type WorkflowNode = {
   type?: string;
   continueOnFail?: boolean;
   parameters?: {
+    method?: string;
     body?: string;
+    inlineKeyboard?: unknown;
     conditions?: {
       conditions?: Array<{
         leftValue?: string;
@@ -17,6 +19,8 @@ type WorkflowNode = {
     responseMode?: string;
     jsCode?: string;
     url?: string;
+    numberOutputs?: number;
+    output?: string;
   };
 };
 
@@ -54,6 +58,17 @@ async function loadRouterWorkflow(): Promise<Workflow> {
     "..",
     "Актуальные",
     "RUS Telegram Update Router v8 TS.json",
+  );
+  return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
+}
+
+async function loadBroadcastWorkflow(): Promise<Workflow> {
+  const workflowPath = path.resolve(
+    process.cwd(),
+    "..",
+    "..",
+    "Дополнительные",
+    "n8n_telegram_broadcast_template.json",
   );
   return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
 }
@@ -234,6 +249,32 @@ test("router workflow sends raw_update to gateway router decision", async () => 
   assert.match(body, /raw_update:\s*\$json\.raw_update\s*\?\?\s*null/u);
 });
 
+test("reward callback topology claims, answers callback, then routes the next action", async () => {
+  const workflow = await loadRouterWorkflow();
+  const nodes = workflow.nodes ?? [];
+  const route = nodes.find((node) => node.name === "Route router action");
+  const claim = nodes.find((node) => node.name === "Claim configured reward");
+  const answer = nodes.find((node) => node.name === "Answer reward callback");
+
+  assert.equal(route?.parameters?.numberOutputs, 17);
+  assert.match(route?.parameters?.output ?? "", /handle_reward_claim/u);
+  assert.match(claim?.parameters?.url ?? "", /\/v1\/rewards\/claim-slot/u);
+  assert.match(claim?.parameters?.body ?? "", /reward_slot/u);
+  assert.equal(answer?.type, "n8n-nodes-base.telegram");
+  assert.deepEqual(
+    workflow.connections?.["Claim configured reward"]?.main?.[0]?.map((item) => item.node),
+    ["Answer reward callback"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Answer reward callback"]?.main?.[0]?.map((item) => item.node),
+    ["Route reward next action"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Route reward next action"]?.main?.[0]?.map((item) => item.node),
+    ["Build gallery flow input"],
+  );
+});
+
 test("Normalize SBP webhook event ignores non-CONFIRMED Platega callback", async () => {
   const normalized = await runNormalizeSbpWebhookContract(
     {
@@ -384,6 +425,43 @@ test("subscription offer topology refreshes an existing offer message instead of
       ["Send subscription offer message"],
       ["Prepare finalize subscription offer input"],
     ],
+  );
+});
+
+test("subscription offer prefixes free balances before choosing send or edit", async () => {
+  const workflow = await loadWorkflow();
+  const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
+  const formatter = nodes.find((entry) => entry.name === "Add free balances to subscription text");
+
+  assert.equal(formatter?.type, "n8n-nodes-base.code");
+  assert.match(String(formatter?.parameters?.jsCode ?? ""), /free_balance_text/u);
+  assert.deepEqual(
+    workflow.connections?.["Build subscription offer message"]?.main?.[0]?.map((entry) => entry.node),
+    ["Add free balances to subscription text"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Add free balances to subscription text"]?.main?.[0]?.map((entry) => entry.node),
+    ["Subscription offer already sent?"],
+  );
+});
+
+test("broadcast registers the campaign grant before sending a stable reward callback", async () => {
+  const workflow = await loadBroadcastWorkflow();
+  const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
+  const grant = nodes.find((entry) => entry.name === "Зарегистрировать reward grant");
+  const send = nodes.find((entry) => entry.name === "Отправить сообщение");
+
+  assert.equal(grant?.parameters?.method, "POST");
+  assert.match(String(grant?.parameters?.url ?? ""), /\/v1\/rewards\/grants$/u);
+  assert.match(String(grant?.parameters?.body ?? ""), /reward_slot:\s*1/u);
+  assert.match(JSON.stringify(send?.parameters?.inlineKeyboard ?? null), /reward_claim:1/u);
+  assert.deepEqual(
+    workflow.connections?.["По 1 сообщению каждые 3 секунды"]?.main?.[1]?.map((entry) => entry.node),
+    ["Зарегистрировать reward grant"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Зарегистрировать reward grant"]?.main?.[0]?.map((entry) => entry.node),
+    ["Отправить сообщение"],
   );
 });
 

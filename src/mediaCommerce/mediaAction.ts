@@ -157,6 +157,7 @@ export function buildCallbackTokenRow(input: {
 }
 
 export function buildPhotoInvoiceInput(input: {
+  token?: string | null;
   chat_id: number;
   scene_session_id: string | null;
   turn_no: number | null;
@@ -175,7 +176,7 @@ export function buildPhotoInvoiceInput(input: {
   invoice_button_text: string;
   payload_json: InvoiceTokenPayload;
 }): UpsertInvoiceTokenInput {
-  const token = buildRandomToken("inv");
+  const token = normalizeString(input.token) ?? buildRandomToken("inv");
 
   return {
     token,

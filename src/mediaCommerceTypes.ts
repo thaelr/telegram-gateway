@@ -179,6 +179,7 @@ export interface MediaCommerceDecisionResponse {
   caption_entities_json?: unknown;
   log_event_type?: string | null;
   access_mode?: string | null;
+  action_kind?: string | null;
   log_price_xtr?: number | null;
   fulfillment_invoice_token?: string | null;
   payment_kind?: "photo" | "subscription" | "feature" | null;
@@ -195,6 +196,7 @@ export interface MediaCommerceDecisionResponse {
   turns_today?: number | null;
   turn_limit_reset_text?: string | null;
   text?: string | null;
+  free_balance_text?: string | null;
   message_kind?: TelegramMessageKind | null;
   current_reply_markup?: unknown;
   feature_payment_hint_text?: string | null;
@@ -250,6 +252,7 @@ export interface FreeCredits {
   active_scene_session_id: string | null;
   free_fast_scene_skips: number;
   free_scene_unlocks: number;
+  free_photo_unlocks?: number;
 }
 
 export interface LoadedCallbackToken {

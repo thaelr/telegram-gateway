@@ -8,6 +8,7 @@ import {
   type CatalogRow,
   type LoadMediaContextInput,
   type LoadOfferStatsInput,
+  type MediaCatalogPhoto,
   parseJsonArray,
   parseJsonObject,
   type QueryClient,
@@ -81,6 +82,22 @@ export class MediaCatalogRepository {
     `;
 
     return rows[0] ?? buildEmptyOfferStats(input);
+  }
+
+  async loadPhotoByUuid(uuid: string): Promise<MediaCatalogPhoto | null> {
+    const rows = await this.query<CatalogRow[]>`
+      SELECT
+        mc.uuid::text AS uuid,
+        mc.bucket_name,
+        mc.storage_path,
+        mc.sort_order
+      FROM public.media_catalog mc
+      WHERE LOWER(mc.uuid::text) = LOWER(${uuid}::text)
+      LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row?.uuid) return null;
+    return this.hydrateCatalogRow({ ...row, uuid: row.uuid });
   }
 
   async loadMediaContext(input: LoadMediaContextInput): Promise<MediaContext | null> {

@@ -14,6 +14,8 @@ import {
 import { mediaCommerceRequestSchema } from "./mediaCommerce/requestSchema.js";
 import { isInternalApiAuthorized } from "./internalApiAuth.js";
 import { runWithRequestContext } from "./requestContext.js";
+import { RewardRepository } from "./rewardRepository.js";
+import { RewardService, RewardUnavailableError } from "./rewardService.js";
 
 const routerRequestSchema = z.object({
   chat_id: z.coerce.number().int().positive(),
@@ -45,10 +47,15 @@ const routerRequestSchema = z.object({
 
 type RouterDecisionEvaluator = Pick<AccessDecisionService, "evaluate">;
 type MediaCommerceDecisionEvaluator = Pick<MediaCommerceDecisionService, "evaluate">;
+type RewardClaimer = Pick<
+  RewardService,
+  "claimReward" | "claimConfiguredSlot" | "assignConfiguredSlot" | "bindGrantMessage"
+>;
 
 type BuildAppOptions = {
   accessDecisionService?: RouterDecisionEvaluator;
   mediaCommerceDecisionService?: MediaCommerceDecisionEvaluator;
+  rewardService?: RewardClaimer;
   logger?: boolean;
 };
 
@@ -75,6 +82,8 @@ export function buildApp(options: BuildAppOptions = {}) {
     ?? new AccessDecisionService(new ChatAccessRepository());
   const mediaCommerceDecisionService = options.mediaCommerceDecisionService
     ?? new MediaCommerceDecisionService(new MediaCommerceRepository());
+  const rewardService = options.rewardService
+    ?? new RewardService(new RewardRepository(), config.REWARD_SLOTS_JSON);
 
   app.get("/healthz", async () => ({ ok: true }));
 
@@ -159,6 +168,136 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.post("/v1/router-decision", handleRouterDecision);
   app.post("/v1/media-commerce-decision", handleMediaCommerceDecision);
+  app.post("/v1/rewards/claim-slot", async (request, reply) => {
+    const parsed = z.object({
+      chat_id: z.coerce.number().int().positive(),
+      reward_slot: z.coerce.number().int().positive(),
+      callback_query_id: z.string().trim().nullable().optional(),
+      source_user_id: z.coerce.number().int().positive().nullable().optional(),
+      inbound_message_id: z.coerce.number().int().positive().nullable().optional(),
+      raw_update: z.unknown().nullable().optional(),
+    }).safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: parsed.error.issues,
+      });
+    }
+
+    try {
+      const result = await rewardService.claimConfiguredSlot({
+        chatId: parsed.data.chat_id,
+        slot: parsed.data.reward_slot,
+        telegramMessageId: parsed.data.inbound_message_id ?? null,
+      });
+      return reply.send({
+        ...parsed.data,
+        ...result,
+      });
+    } catch (error) {
+      if (error instanceof RewardUnavailableError) {
+        return reply.send({
+          status: "unavailable",
+          callback_answer_text: "Подарок недоступен",
+          next_action: null,
+          reward_slot: parsed.data.reward_slot,
+          chat_id: parsed.data.chat_id,
+          callback_query_id: parsed.data.callback_query_id ?? null,
+          source_user_id: parsed.data.source_user_id ?? null,
+          inbound_message_id: parsed.data.inbound_message_id ?? null,
+          raw_update: parsed.data.raw_update ?? null,
+        });
+      }
+      throw error;
+    }
+  });
+  app.post("/v1/rewards/claim", async (request, reply) => {
+    const parsed = z.object({
+      chat_id: z.coerce.number().int().positive(),
+      campaign_id: z.string().trim().min(1),
+    }).safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: parsed.error.issues,
+      });
+    }
+
+    try {
+      return reply.send(await rewardService.claimReward({
+        chatId: parsed.data.chat_id,
+        campaignId: parsed.data.campaign_id,
+      }));
+    } catch (error) {
+      if (error instanceof RewardUnavailableError) {
+        return reply.send({
+          status: "unavailable",
+          campaign_id: parsed.data.campaign_id,
+        });
+      }
+      throw error;
+    }
+  });
+  app.post("/v1/rewards/grants", async (request, reply) => {
+    const parsed = z.object({
+      chat_id: z.coerce.number().int().positive(),
+      reward_slot: z.coerce.number().int().positive(),
+    }).safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: parsed.error.issues,
+      });
+    }
+
+    try {
+      return reply.send(await rewardService.assignConfiguredSlot({
+        chatId: parsed.data.chat_id,
+        slot: parsed.data.reward_slot,
+      }));
+    } catch (error) {
+      if (error instanceof RewardUnavailableError) {
+        return reply.status(409).send({
+          chat_id: parsed.data.chat_id,
+          slot: parsed.data.reward_slot,
+          status: "unavailable",
+        });
+      }
+      throw error;
+    }
+  });
+  app.post("/v1/rewards/grants/:grantId/bind-message", async (request, reply) => {
+    const params = z.object({
+      grantId: z.coerce.number().int().positive(),
+    }).safeParse(request.params);
+    const body = z.object({
+      telegram_message_id: z.coerce.number().int().positive(),
+    }).safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: [
+          ...(params.success ? [] : params.error.issues),
+          ...(body.success ? [] : body.error.issues),
+        ],
+      });
+    }
+
+    try {
+      return reply.send(await rewardService.bindGrantMessage({
+        grantId: params.data.grantId,
+        telegramMessageId: body.data.telegram_message_id,
+      }));
+    } catch (error) {
+      if (error instanceof RewardUnavailableError) {
+        return reply.status(404).send({
+          grant_id: params.data.grantId,
+          status: "not_found",
+        });
+      }
+      throw error;
+    }
+  });
 
   return app;
 }

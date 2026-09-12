@@ -18,8 +18,10 @@ import { MediaPaymentRepository } from "./mediaCommerceRepository/paymentReposit
 import {
   type ActivateSubscriptionInput,
   type ActivateSceneAccessInput,
+  type FinalizeFreePhotoUnlockInput,
   type LoadMediaContextInput,
   type LoadOfferStatsInput,
+  type MediaCatalogPhoto,
   type MarkInvoicePaidInput,
   type QueryClient,
   type RecordAbTestDeliveredInput,
@@ -79,6 +81,10 @@ export class MediaCommerceRepository {
 
   async loadMediaContext(input: LoadMediaContextInput): Promise<MediaContext | null> {
     return this.catalogRepository.loadMediaContext(input);
+  }
+
+  async loadPhotoByUuid(uuid: string): Promise<MediaCatalogPhoto | null> {
+    return this.catalogRepository.loadPhotoByUuid(uuid);
   }
 
   async storePanel(input: StorePanelInput): Promise<MediaFinalizeResult> {
@@ -144,8 +150,21 @@ export class MediaCommerceRepository {
     return this.paymentRepository.redeemFreeSceneUnlock(token, chatId);
   }
 
+  async redeemFreePhotoUnlock(
+    token: string | null,
+    chatId: number | null,
+  ): Promise<FreeActionRedeemResult | null> {
+    return this.paymentRepository.redeemFreePhotoUnlock(token, chatId);
+  }
+
   async storePhotoEvent(input: StorePhotoEventInput): Promise<MediaFinalizeResult> {
     return this.mediaEventRepository.storePhotoEvent(input);
+  }
+
+  async finalizeFreePhotoUnlock(
+    input: FinalizeFreePhotoUnlockInput,
+  ): Promise<MediaFinalizeResult> {
+    return this.mediaEventRepository.finalizeFreePhotoUnlock(input);
   }
 
   async storeInvoiceLinks(

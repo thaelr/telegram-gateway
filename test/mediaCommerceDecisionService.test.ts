@@ -129,6 +129,13 @@ type MockRepository = {
   loadMediaContext: (
     input: unknown,
   ) => Promise<MediaContext | null>;
+  loadPhotoByUuid: (uuid: string) => Promise<{
+    uuid: string;
+    bucket_name: string | null;
+    storage_path: string | null;
+    sort_order: number | null;
+    photo_url: string | null;
+  } | null>;
   storePanel: (
     input: unknown,
   ) => Promise<{
@@ -180,6 +187,10 @@ type MockRepository = {
     token: string | null,
     chatId: number | null,
   ) => Promise<FreeActionRedeemResult | null>;
+  redeemFreePhotoUnlock: (
+    token: string | null,
+    chatId: number | null,
+  ) => Promise<FreeActionRedeemResult | null>;
   storePhotoEvent: (
     input: unknown,
   ) => Promise<{
@@ -193,6 +204,7 @@ type MockRepository = {
     stored_count: number;
     invoice_rows_updated: number;
   }>;
+  finalizeFreePhotoUnlock: MockRepository["storePhotoEvent"];
   storeInvoiceLinks: (items: unknown) => Promise<number>;
   claimSbpCheckoutCreation: (
     token: string | null,
@@ -531,6 +543,7 @@ function createRepository(
 ) {
   const calls = {
     loadMediaContext: 0,
+    loadPhotoByUuid: 0,
     storePrecheckoutResult: 0,
     storeInvoiceLinks: 0,
     loadStoredInvoiceTokens: 0,
@@ -550,6 +563,7 @@ function createRepository(
     loadFreeCredits: 0,
     redeemFreeFastSceneSkip: 0,
     redeemFreeSceneUnlock: 0,
+    redeemFreePhotoUnlock: 0,
     loadAbTestAssignment: 0,
     storeAbTestAssignment: 0,
     recordAbTestDelivered: 0,
@@ -675,6 +689,16 @@ function createRepository(
             : null,
       });
     },
+    async loadPhotoByUuid(uuid) {
+      calls.loadPhotoByUuid += 1;
+      return {
+        uuid,
+        bucket_name: "media_bucket",
+        storage_path: `${uuid}.jpg`,
+        sort_order: 2,
+        photo_url: `https://cdn.test/${uuid}.jpg`,
+      };
+    },
     async storePanel() {
       return {
         chat_id: 101,
@@ -794,6 +818,35 @@ function createRepository(
         reason: "redeemed",
       };
     },
+    async redeemFreePhotoUnlock(token, chatId) {
+      calls.redeemFreePhotoUnlock += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: {
+          action_kind: "free_photo_unlock",
+          chat_id: chatId,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          media_signature: "hotel_corridor_close",
+          target_message_id: 777,
+          current_uuid: "u1",
+          base_price_xtr: 10,
+          requested_action: "photo_regen",
+          free_photo_uuid: "u2",
+        },
+        action_kind: "free_photo_unlock",
+        status: "active",
+        redeemed: true,
+        already_consumed: false,
+        already_fulfilled: false,
+        remaining_credits: 0,
+        reason: "redeemed",
+      };
+    },
     async storePhotoEvent() {
       return {
         chat_id: 101,
@@ -802,6 +855,19 @@ function createRepository(
         scene_turn_no: 3,
         media_signature: "hotel_corridor_close",
         price_required: 10,
+        panel_message_id: 555,
+        stored_count: 1,
+        invoice_rows_updated: 1,
+      };
+    },
+    async finalizeFreePhotoUnlock() {
+      return {
+        chat_id: 101,
+        n: 5,
+        scene_session_id: "scene-1",
+        scene_turn_no: 3,
+        media_signature: "hotel_corridor_close",
+        price_required: 0,
         panel_message_id: 555,
         stored_count: 1,
         invoice_rows_updated: 1,
@@ -965,13 +1031,15 @@ test("prepare_offer returns callback offer for free media", async () => {
 
   assert.equal(first.operation, "prepare_offer_callback");
   assert.equal(first.has_media_offer, true);
-  assert.equal(first.token_rows_prepared, 1);
-  assert.equal(first.token_rows_inserted, 1);
+  assert.equal(first.token_rows_prepared, 2);
+  assert.equal(first.token_rows_inserted, 2);
   assert.equal(first.token_rows?.[0]?.payload_json.action_button_text, "text");
   assert.notEqual(first.token_rows?.[0]?.token, second.token_rows?.[0]?.token);
+  assert.equal(first.token_rows?.[1]?.action_kind, "free_scene_unlock");
+  assert.equal(first.token_rows?.[1]?.payload_json.action_button_text, "text");
 });
 
-test("prepare_offer reuses stored invoice link for paid media", async () => {
+test("prepare_offer does not create or reuse a paid photo invoice before click", async () => {
   const { service, calls } = createRepository({
     async loadOfferStats() {
       return buildOfferStats({
@@ -1010,14 +1078,14 @@ test("prepare_offer reuses stored invoice link for paid media", async () => {
 
   const result = await service.evaluate(buildRequest());
 
-  assert.equal(result.operation, "prepare_offer_ready");
-  assert.equal(result.invoice_link, "https://t.me/invoice-link");
-  assert.equal(result.payment_options?.length, 1);
-  assert.equal(findPaymentOption(result.payment_options, "stars")?.checkout_url, "https://t.me/invoice-link");
+  assert.equal(result.operation, "prepare_offer_callback");
+  assert.equal(result.invoice_link, null);
+  assert.equal(result.payment_options, undefined);
+  assert.equal(result.token_rows?.[0]?.action_kind, "free_photo_unlock");
   assert.equal(calls.createStarsInvoice, 0);
 });
 
-test("prepare_offer adds scene unlock invoice under paid photo offers", async () => {
+test("prepare_offer adds neutral photo and scene unlock callbacks under paid photo offers", async () => {
   const { service } = createRepository({
     async loadOfferStats() {
       return buildOfferStats({
@@ -1045,39 +1113,23 @@ test("prepare_offer adds scene unlock invoice under paid photo offers", async ()
           "scene-1",
       });
     },
-    async upsertInvoiceTokens(inputs) {
-      return (Array.isArray(inputs) ? inputs : []).map((input) => {
-        const row = input as {
-          token: string;
-          payload_json: Record<string, unknown>;
-          sku: string;
-          amount_xtr: number;
-          invoice_button_text: string;
-        };
-
-        return buildStoredInvoiceToken({
-          token: row.token,
-          telegram_invoice_payload: row.token,
-          payload_json: row.payload_json,
-          sku: row.sku,
-          amount_xtr: row.amount_xtr,
-          invoice_button_text: row.invoice_button_text,
-          invoice_link: "https://t.me/scene-pass",
-          scene_session_id: "scene-1",
-        });
-      });
+    async upsertInvoiceTokens() {
+      assert.fail("scene unlock payment options must not be created during render");
     },
   });
 
   const result = await service.evaluate(buildRequest());
 
-  assert.equal(result.operation, "prepare_offer_ready");
-  assert.equal(result.invoice_link, "https://t.me/photo");
-  assert.equal(firstOfferPaymentOption(result.scene_unlock_offer_item)?.checkout_url, "https://t.me/scene-pass");
-  assert.equal(result.scene_unlock_offer_item?.feature_key, "scene_unlock");
+  assert.equal(result.operation, "prepare_offer_callback");
+  assert.equal(result.invoice_link, null);
+  assert.equal(result.scene_unlock_offer_item, null);
+  assert.equal(result.token_rows?.length, 2);
+  assert.equal(result.token_rows?.[0]?.action_kind, "free_photo_unlock");
+  assert.equal(result.token_rows?.[1]?.action_kind, "free_scene_unlock");
+  assert.equal(result.token_rows?.[1]?.payload_json.action_button_text, "text");
 });
 
-test("prepare_offer returns free scene unlock callback instead of paid scene unlock when credit is available", async () => {
+test("prepare_offer does not read free scene unlock balance while rendering", async () => {
   const { service, calls } = createRepository({
     async loadOfferStats() {
       return buildOfferStats({
@@ -1101,14 +1153,46 @@ test("prepare_offer returns free scene unlock callback instead of paid scene unl
 
   const result = await service.evaluate(buildRequest());
 
-  assert.equal(result.operation, "prepare_offer_ready");
-  assert.equal(result.invoice_link, "https://t.me/generated-invoice-1");
+  assert.equal(result.operation, "prepare_offer_callback");
+  assert.equal(result.invoice_link, null);
   assert.equal(result.scene_unlock_offer_item, null);
-  assert.equal(result.token_rows?.length, 1);
-  assert.equal(result.token_rows?.[0]?.action_kind, "free_scene_unlock");
-  assert.equal(result.token_rows?.[0]?.payload_json.action_button_text, "free unlock");
-  assert.equal(calls.createStarsInvoice, 1);
-  assert.equal(calls.loadFreeCredits, 1);
+  assert.equal(result.token_rows?.length, 2);
+  assert.equal(result.token_rows?.[0]?.action_kind, "free_photo_unlock");
+  assert.equal(result.token_rows?.[1]?.action_kind, "free_scene_unlock");
+  assert.equal(result.token_rows?.[1]?.payload_json.action_button_text, "text");
+  assert.equal(calls.createStarsInvoice, 0);
+  assert.equal(calls.loadFreeCredits, 0);
+});
+
+test("prepare_offer suppresses the neutral scene unlock button when A/B disables it", async () => {
+  const [experiment] = loadExperimentConfigsFromEnv({
+    EXP_SUBSCRIPTION_OFFER_SCENE_OFF_JSON: JSON.stringify({
+      key: "subscription_offer",
+      version: "scene-off-v1",
+      starts_at: "2020-01-01T00:00:00+00:00",
+      ends_at: "2100-01-01T00:00:00+00:00",
+      distribution: { B: 100 },
+      variants: { B: { scene_unlock: { enabled: false } } },
+    }),
+  });
+  const assignment = buildAssignment({ variant: "B" });
+  const { service } = createRepository({
+    async loadAbTestAssignment() {
+      return assignment;
+    },
+    async storeAbTestAssignment() {
+      return assignment;
+    },
+  });
+
+  await withExperiments([experiment!], async () => {
+    const result = await service.evaluate(buildRequest());
+
+    assert.equal(
+      result.token_rows?.some((row) => row.action_kind === "free_scene_unlock"),
+      false,
+    );
+  });
 });
 
 test("prepare_offer makes paid photos free after scene pass", async () => {
@@ -1127,9 +1211,13 @@ test("prepare_offer makes paid photos free after scene pass", async () => {
   assert.equal(result.operation, "prepare_offer_callback");
   assert.equal(result.price_required, 0);
   assert.equal(result.invoice_kind, undefined);
+  assert.equal(
+    result.token_rows?.some((row) => row.action_kind === "free_scene_unlock"),
+    false,
+  );
 });
 
-test("prepare_offer applies active sku promotion to photo invoice pricing", async () => {
+test("prepare_offer defers active photo promotion pricing until click", async () => {
   await withPromotions([
     {
       promo_key: "media_sale",
@@ -1187,13 +1275,10 @@ test("prepare_offer applies active sku promotion to photo invoice pricing", asyn
 
     const result = await service.evaluate(buildRequest());
 
-    assert.equal(result.operation, "prepare_offer_ready");
-    assert.equal(result.invoice_sku, "payment_media_1");
-    assert.equal(result.invoice_amount, 7);
-    assert.equal(result.original_invoice_amount, 10);
-    assert.equal(result.promo_key, "media_sale");
-    assert.equal(result.invoice_payload_json?.original_amount_xtr, 10);
-    assert.equal(result.invoice_payload_json?.promo_key, "media_sale");
+    assert.equal(result.operation, "prepare_offer_callback");
+    assert.equal(result.invoice_sku, undefined);
+    assert.equal(result.token_rows?.[0]?.action_kind, "free_photo_unlock");
+    assert.equal(result.token_rows?.[0]?.payload_json.base_price_xtr, 10);
   });
 });
 
@@ -2186,6 +2271,347 @@ test("free scene unlock callback activates scene access through existing contrac
   assert.equal(calls.loadMediaContext, 0);
 });
 
+test("free scene unlock callback creates current paid options when no free credit remains", async () => {
+  const tokenPayload = {
+    action_kind: "free_scene_unlock",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    target_message_id: 777,
+    feature_key: "scene_unlock",
+    feature_payment_hint_text: "unlock hint",
+  };
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "scene-unlock-entry",
+        action_kind: "free_scene_unlock",
+        payload_json: tokenPayload,
+      });
+    },
+    async redeemFreeSceneUnlock(token, chatId) {
+      calls.redeemFreeSceneUnlock += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: tokenPayload,
+        action_kind: "free_scene_unlock",
+        status: "active",
+        redeemed: false,
+        already_consumed: false,
+        already_fulfilled: false,
+        remaining_credits: 0,
+        reason: "free_credit_unavailable",
+      };
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "scene-unlock-entry",
+      inbound_message_id: 777,
+    }),
+  );
+
+  assert.equal(result.operation, "feature_payment_options_revealed");
+  assert.equal(result.callback_valid, true);
+  assert.equal(result.feature_key, "scene_unlock");
+  assert.equal(result.target_message_id, 777);
+  assert.equal(result.feature_payment_hint_text, "unlock hint");
+  assert.equal(result.payment_options?.length, 1);
+  assert.equal(result.payment_options?.[0]?.feature_key, "scene_unlock");
+  assert.equal(result.payment_options?.[0]?.amount, 80);
+  assert.equal(result.payment_options?.[0]?.checkout_url, "https://t.me/generated-invoice-1");
+  assert.equal(calls.createStarsInvoice, 1);
+  assert.equal(calls.redeemFreeSceneUnlock, 1);
+  assert.equal(calls.loadMediaContext, 0);
+});
+
+test("free photo unlock callback redeems current credit and delivers the photo", async () => {
+  const payload = {
+    action_kind: "free_photo_unlock",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    media_signature: "hotel_corridor_close",
+    target_message_id: 777,
+    current_uuid: "u1",
+    base_price_xtr: 10,
+    requested_action: "photo_regen",
+    free_photo_uuid: "u2",
+  };
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "photo-unlock-entry",
+        action_kind: "free_photo_unlock",
+        payload_json: payload,
+      });
+    },
+    async loadMediaContext(input) {
+      calls.loadMediaContext += 1;
+      const request = input as {
+        force_deliver_after_payment?: boolean;
+        paid_access_mode?: string | null;
+      };
+      return buildMediaContext({
+        force_deliver_after_payment: request.force_deliver_after_payment === true,
+        paid_access_mode: request.paid_access_mode ?? null,
+      });
+    },
+  });
+
+  const response = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: "photo-unlock-entry",
+    inbound_message_id: 777,
+  }));
+
+  assert.equal(response.operation, "edit_photo");
+  assert.equal(response.log_event_type, "media.photo.unlocked.free");
+  assert.equal(response.access_mode, "free_credit");
+  assert.deepEqual(response.payment_options, []);
+  assert.equal(calls.redeemFreePhotoUnlock, 1);
+  assert.equal(calls.loadMediaContext, 1);
+  assert.equal(calls.createStarsInvoice, 0);
+});
+
+test("free photo unlock callback reveals only Stars when no credit remains", async () => {
+  const payload = {
+    action_kind: "free_photo_unlock",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    media_signature: "hotel_corridor_close",
+    target_message_id: 777,
+    current_uuid: "u1",
+    base_price_xtr: 10,
+    requested_action: "photo_regen",
+    free_photo_uuid: "u2",
+  };
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "photo-unlock-entry",
+        action_kind: "free_photo_unlock",
+        payload_json: payload,
+      });
+    },
+    async redeemFreePhotoUnlock(token, chatId) {
+      calls.redeemFreePhotoUnlock += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: payload,
+        action_kind: "free_photo_unlock",
+        status: "active",
+        redeemed: false,
+        already_consumed: false,
+        already_fulfilled: false,
+        remaining_credits: 0,
+        reason: "free_credit_unavailable",
+      };
+    },
+  });
+
+  const response = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: "photo-unlock-entry",
+    inbound_message_id: 777,
+  }));
+
+  assert.equal(response.operation, "feature_payment_options_revealed");
+  assert.equal(response.callback_valid, true);
+  assert.equal(response.feature_key, "photo_unlock");
+  assert.equal(response.payment_options?.length, 1);
+  assert.equal(response.payment_options?.[0]?.source, "stars");
+  assert.equal(response.payment_options?.[0]?.amount, 10);
+  assert.equal(calls.createStarsInvoice, 1);
+  assert.equal(calls.createSbpPayment, 0);
+  assert.equal(calls.loadMediaContext, 0);
+});
+
+test("consumed free photo callback retries delivery without another credit debit", async () => {
+  const payload = {
+    action_kind: "free_photo_unlock",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    media_signature: "hotel_corridor_close",
+    current_uuid: "u1",
+    base_price_xtr: 10,
+    requested_action: "photo_regen",
+    free_photo_uuid: "u2",
+  };
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "consumed-photo-entry",
+        action_kind: "free_photo_unlock",
+        payload_json: payload,
+      });
+    },
+    async redeemFreePhotoUnlock(token, chatId) {
+      calls.redeemFreePhotoUnlock += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: payload,
+        action_kind: "free_photo_unlock",
+        status: "active",
+        redeemed: false,
+        already_consumed: true,
+        already_fulfilled: false,
+        remaining_credits: 0,
+        reason: "already_consumed",
+      };
+    },
+    async loadMediaContext(input) {
+      calls.loadMediaContext += 1;
+      const request = input as { paid_access_mode?: string | null };
+      return buildMediaContext({
+        force_deliver_after_payment: true,
+        paid_access_mode: request.paid_access_mode ?? null,
+        next_unseen_json: {
+          uuid: "u3",
+          photo_url: "https://cdn.test/u3.jpg",
+          sort_order: 3,
+        },
+      });
+    },
+  });
+
+  const response = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: "consumed-photo-entry",
+  }));
+
+  assert.equal(response.operation, "edit_photo");
+  assert.equal(response.access_mode, "free_credit");
+  assert.equal(response.selected_uuid, "u2");
+  assert.equal(calls.redeemFreePhotoUnlock, 1);
+  assert.equal(calls.loadMediaContext, 1);
+  assert.equal(calls.loadPhotoByUuid, 1);
+});
+
+test("fulfilled free photo callback is an idempotent no-op", async () => {
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "photo-unlock-entry",
+        action_kind: "free_photo_unlock",
+        payload_json: { free_photo_uuid: "u2" },
+      });
+    },
+    async redeemFreePhotoUnlock(token, chatId) {
+      calls.redeemFreePhotoUnlock += 1;
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: { free_photo_uuid: "u2" },
+        action_kind: "free_photo_unlock",
+        status: "fulfilled",
+        redeemed: false,
+        already_consumed: false,
+        already_fulfilled: true,
+        remaining_credits: 0,
+        reason: "already_fulfilled",
+      };
+    },
+  });
+
+  const response = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: "photo-unlock-entry",
+  }));
+
+  assert.equal(response.operation, "noop");
+  assert.equal(response.callback_valid, true);
+  assert.equal(response.reason, "already_fulfilled");
+  assert.equal(calls.redeemFreePhotoUnlock, 1);
+  assert.equal(calls.loadMediaContext, 0);
+  assert.equal(calls.createStarsInvoice, 0);
+});
+
+for (const scenario of [
+  { name: "active subscription", context: { subscription_active: true }, accessMode: "subscription" },
+  { name: "active scene access", context: { scene_access_active: true }, accessMode: "scene_pass" },
+  { name: "remaining base allowance", context: { delivered_in_scene: 2 }, accessMode: "free" },
+]) {
+  test(`free photo callback does not consume credit with ${scenario.name}`, async () => {
+    const payload = {
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      scene_turn_no: 3,
+      media_signature: "hotel_corridor_close",
+      target_message_id: 777,
+      current_uuid: "u1",
+      base_price_xtr: 10,
+      requested_action: "photo_regen",
+    };
+    const { service, calls } = createRepository({
+      async loadCallbackToken() {
+        return buildLoadedCallbackToken({
+          token: "photo-unlock-entry",
+          action_kind: "free_photo_unlock",
+          payload_json: payload,
+        });
+      },
+      async redeemFreePhotoUnlock(token, chatId) {
+        calls.redeemFreePhotoUnlock += 1;
+        return {
+          token,
+          chat_id: chatId,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          payload_json: payload,
+          action_kind: "free_photo_unlock",
+          status: "active",
+          redeemed: false,
+          already_consumed: false,
+          already_fulfilled: false,
+          remaining_credits: 1,
+          reason: "free_credit_not_required",
+        };
+      },
+      async loadMediaContext() {
+        calls.loadMediaContext += 1;
+        return buildMediaContext(scenario.context);
+      },
+    });
+
+    const response = await service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "photo-unlock-entry",
+    }));
+
+    assert.equal(response.operation, "edit_photo");
+    assert.equal(response.access_mode, scenario.accessMode);
+    assert.notEqual(response.action_kind, "free_photo_unlock");
+    assert.equal(calls.redeemFreePhotoUnlock, 1);
+    assert.equal(calls.createStarsInvoice, 0);
+  });
+}
+
 test("free scene unlock duplicate fulfilled callback is idempotent", async () => {
   const { service } = createRepository({
     async loadCallbackToken() {
@@ -2289,7 +2715,7 @@ test("stale free scene unlock callback does not activate access", async () => {
   assert.equal(result.feature_key, "scene_unlock");
 });
 
-test("callback photo request returns next media step with ready invoice links", async () => {
+test("callback photo request returns next media step with neutral photo unlock", async () => {
   const { service, calls } = createRepository({
     async loadMediaContext() {
       return buildMediaContext({
@@ -2337,12 +2763,17 @@ test("callback photo request returns next media step with ready invoice links", 
   );
 
   assert.equal(result.operation, "edit_photo");
-  assert.equal(result.payment_options?.length, 1);
-  assert.match(String(result.invoice_token ?? ""), /^inv_/u);
-  assert.equal(result.invoice_link, "https://t.me/generated-invoice-1");
+  assert.deepEqual(result.payment_options, []);
+  assert.equal(result.invoice_token, null);
+  assert.equal(result.invoice_link, null);
   assert.equal(result.photo_url, "https://cdn.test/u1.jpg");
-  assert.equal(firstOfferPaymentOption(result.scene_unlock_offer_item)?.checkout_url, "https://t.me/generated-invoice-2");
-  assert.equal(calls.createStarsInvoice, 2);
+  assert.equal(result.scene_unlock_offer_item, null);
+  assert.equal(
+    result.token_rows?.some((row) => row.action_kind === "free_scene_unlock"),
+    true,
+  );
+  assert.equal(result.token_rows?.some((row) => row.action_kind === "free_photo_unlock"), true);
+  assert.equal(calls.createStarsInvoice, 0);
 });
 
 test("callback photo request unlocks through scene pass with zero price", async () => {
@@ -2374,6 +2805,10 @@ test("callback photo request unlocks through scene pass with zero price", async 
   assert.equal(result.log_price_xtr, 0);
   assert.equal(result.price_required, 0);
   assert.equal(result.log_event_type, "media.photo.unlocked.scene_pass");
+  assert.equal(
+    result.token_rows?.some((row) => row.action_kind === "free_scene_unlock"),
+    false,
+  );
 });
 
 test("pre_checkout validates token and stores decision", async () => {
@@ -3503,31 +3938,29 @@ test("subscription_offer creates missing invoice links internally", async () => 
   );
 
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.equal(result.subscription_invoice_tokens?.length, 3);
+  assert.equal(result.subscription_invoice_tokens?.length, 2);
   assert.deepEqual(result.subscription_invoice_tokens, [
-    "telegram:1:scene-1:payment_action_2",
     "telegram:1:payment_plan_2",
     "telegram:1:payment_plan_3",
   ]);
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => item.sku),
-    ["payment_action_2", "payment_plan_2", "payment_plan_3"],
+    ["payment_plan_2", "payment_plan_3"],
   );
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => item.sort_order),
-    [0, 1, 2],
+    [1, 2],
   );
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
     [
       "https://t.me/generated-invoice-1",
       "https://t.me/generated-invoice-2",
-      "https://t.me/generated-invoice-3",
     ],
   );
-  assert.equal(calls.storeInvoiceLinks, 3);
+  assert.equal(calls.storeInvoiceLinks, 2);
   assert.equal(calls.loadStoredInvoiceTokens, 0);
-  assert.equal(calls.createStarsInvoice, 3);
+  assert.equal(calls.createStarsInvoice, 2);
 });
 
 test("subscription_offer assigns sticky ab group and stores compact context in payment tokens", async () => {
@@ -3645,6 +4078,10 @@ test("subscription_offer assigns sticky ab group and stores compact context in p
     assert.deepEqual(
       first.subscription_offer_items?.map((item) => item.sku),
       ["payment_plan_2"],
+    );
+    assert.equal(
+      first.token_rows?.some((row) => row.action_kind === "free_scene_unlock"),
+      false,
     );
     assert.equal(first.subscription_invoice_tokens?.[0]?.includes(":ab_"), true);
     assert.deepEqual(second.subscription_invoice_tokens, first.subscription_invoice_tokens);
@@ -4185,7 +4622,7 @@ test("subscription payment source toggle callback reuses stored offer data", asy
   assert.equal(calls.createSbpPayment, 0);
 });
 
-test("subscription_offer returns top-level free scene unlock callback when credit is available", async () => {
+test("subscription_offer returns one scene unlock entry button regardless of free credit snapshot", async () => {
   const { service, calls } = createRepository({
     async loadFreeCredits(chatId) {
       calls.loadFreeCredits += 1;
@@ -4220,9 +4657,76 @@ test("subscription_offer returns top-level free scene unlock callback when credi
   );
   assert.equal(result.token_rows?.length, 1);
   assert.equal(result.token_rows?.[0]?.action_kind, "free_scene_unlock");
-  assert.equal(result.token_rows?.[0]?.payload_json.action_button_text, "free unlock");
+  assert.equal(result.token_rows?.[0]?.payload_json.action_button_text, "text");
+  assert.equal(
+    result.token_rows?.[0]?.payload_json.payment_options,
+    undefined,
+  );
   assert.equal(result.token_rows_inserted, 1);
+  assert.equal(calls.loadFreeCredits, 0);
   assert.equal(calls.createStarsInvoice, 2);
+});
+
+test("subscription_offer returns reusable free balance text for the inactive subscription UI", async () => {
+  const { service } = createRepository();
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: "subscription_offer",
+    idempotency_key: "telegram:gift-balances",
+    subscription_offer_reason: "subscription_command",
+    free_scene_unlocks: 2,
+    free_photo_unlocks: 0,
+    free_fast_scene_skips: 1,
+  }));
+
+  assert.equal(result.operation, "subscription_offer_ready");
+  assert.equal(result.free_balance_text, [
+    "🎁 У тебя есть:",
+    "• 2 бесплатные разблокировки сцены",
+    "• 1 бесплатный пропуск сцены",
+  ].join("\n"));
+});
+
+test("daily limit subscription_offer returns the same single scene unlock entry button with no free credits", async () => {
+  const { service, calls } = createRepository();
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      idempotency_key: "telegram:daily-limit",
+      subscription_offer_reason: "daily_turn_limit",
+      turns_today: 20,
+      turn_limit: 20,
+      turn_limit_reset_text: "00:00 МСК",
+    }),
+  );
+
+  assert.equal(result.operation, "subscription_offer_ready");
+  assert.deepEqual(
+    result.subscription_offer_items?.map((item) => item.sku),
+    ["payment_plan_2", "payment_plan_3"],
+  );
+  assert.equal(result.token_rows?.length, 1);
+  assert.equal(result.token_rows?.[0]?.action_kind, "free_scene_unlock");
+  assert.equal(calls.loadFreeCredits, 0);
+  assert.equal(calls.createStarsInvoice, 2);
+});
+
+test("subscription_offer uses the active scene id even when scene turn context is absent", async () => {
+  const { service } = createRepository();
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: "subscription_offer",
+      scene_turn_no: null,
+      idempotency_key: "telegram:scene-id-only",
+      subscription_offer_reason: "subscription_command",
+    }),
+  );
+
+  assert.equal(result.token_rows?.length, 1);
+  assert.equal(result.token_rows?.[0]?.action_kind, "free_scene_unlock");
+  assert.equal(result.token_rows?.[0]?.scene_session_id, "scene-1");
 });
 
 test("subscription_offer does not return free scene unlock callback for active subscription", async () => {
@@ -4263,7 +4767,7 @@ test("subscription_offer does not return free scene unlock callback for active s
     result.subscription_offer_items?.map((item) => item.sku),
     ["payment_plan_2", "payment_plan_3"],
   );
-  assert.equal(calls.loadFreeCredits, 1);
+  assert.equal(calls.loadFreeCredits, 0);
 });
 
 test("subscription_offer does not include scene pass without active scene", async () => {
@@ -4371,7 +4875,7 @@ test("subscription_offer does not include scene unlock when request is outside c
   assert.equal(calls.createStarsInvoice, 2);
 });
 
-test("subscription_offer does not include scene pass after purchase", async () => {
+test("subscription_offer hides scene unlock button when scene access is already active", async () => {
   const { service } = createRepository({
     async loadSceneAccessStatus() {
       return {
@@ -4400,6 +4904,10 @@ test("subscription_offer does not include scene pass after purchase", async () =
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => item.sku),
     ["payment_plan_2", "payment_plan_3"],
+  );
+  assert.equal(
+    result.token_rows?.some((row) => row.action_kind === "free_scene_unlock"),
+    false,
   );
 });
 
@@ -4511,15 +5019,15 @@ test("subscription_offer applies promotions by sku and last active match wins", 
     assert.equal(result.operation, "subscription_offer_ready");
     assert.deepEqual(
       result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.amount),
-      [70, 140, 180],
+      [140, 180],
     );
     assert.deepEqual(
       result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.original_amount),
-      [80, 200, 300],
+      [200, 300],
     );
     assert.deepEqual(
       result.subscription_offer_items?.map((item) => item.promo_key),
-      ["all_sale", "plan_2_override", "all_sale"],
+      ["plan_2_override", "all_sale"],
     );
   });
 });
@@ -4553,9 +5061,9 @@ test("subscription_offer persists freshly created links without reload loop", as
     }),
   );
 
-  assert.equal(calls.storeInvoiceLinks, 3);
+  assert.equal(calls.storeInvoiceLinks, 2);
   assert.equal(calls.loadStoredInvoiceTokens, 0);
-  assert.equal(calls.createStarsInvoice, 3);
+  assert.equal(calls.createStarsInvoice, 2);
   assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.offer_reused, false);
   assert.equal(result.text, null);
@@ -4564,7 +5072,6 @@ test("subscription_offer persists freshly created links without reload loop", as
     [
       "https://t.me/generated-invoice-1",
       "https://t.me/generated-invoice-2",
-      "https://t.me/generated-invoice-3",
     ],
   );
 });
@@ -4635,13 +5142,12 @@ test("subscription_offer reuses stored invoice links from batch upsert without r
     [
       "https://t.me/reused-1",
       "https://t.me/reused-2",
-      "https://t.me/reused-3",
     ],
   );
   assert.equal(result.offer_reused, true);
 });
 
-test("prepare_offer uses random unique invoice tokens for photo payments", async () => {
+test("prepare_offer uses stable neutral callback tokens for the same paid photo context", async () => {
   const { service } = createRepository({
     async loadOfferStats() {
       return buildOfferStats({
@@ -4669,9 +5175,10 @@ test("prepare_offer uses random unique invoice tokens for photo payments", async
   const first = await service.evaluate(buildRequest());
   const second = await service.evaluate(buildRequest());
 
-  assert.equal(first.operation, "prepare_offer_ready");
-  assert.equal(second.operation, "prepare_offer_ready");
-  assert.notEqual(first.invoice_token, second.invoice_token);
+  assert.equal(first.operation, "prepare_offer_callback");
+  assert.equal(second.operation, "prepare_offer_callback");
+  assert.equal(first.token_rows?.[0]?.token, second.token_rows?.[0]?.token);
+  assert.equal(first.token_rows?.[0]?.action_kind, "free_photo_unlock");
 });
 
 test("finalize_photo_event is idempotent when the same photo event is retried", async () => {
@@ -4715,6 +5222,62 @@ test("finalize_photo_event is idempotent when the same photo event is retried", 
   assert.equal(result.operation, "photo_event_stored");
   assert.equal(result.stored_count, 0);
   assert.equal(result.reason, "photo_event_skipped");
+});
+
+test("free photo finalization uses the dedicated token-bound fulfillment path", async () => {
+  let dedicatedInput: Record<string, unknown> | null = null;
+  let paidPathCalled = false;
+  const { service } = createRepository({
+    async storePhotoEvent() {
+      paidPathCalled = true;
+      throw new Error("paid photo path must not be used");
+    },
+    async finalizeFreePhotoUnlock(input) {
+      dedicatedInput = input as Record<string, unknown>;
+      return {
+        chat_id: 101,
+        n: 5,
+        scene_session_id: "scene-1",
+        scene_turn_no: 3,
+        media_signature: "hotel_corridor_close",
+        price_required: 0,
+        panel_message_id: 555,
+        stored_count: 1,
+        invoice_rows_updated: 1,
+      };
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: "finalize_photo_event",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    log_event_type: "media.photo.unlocked.free",
+    media_signature: "hotel_corridor_close",
+    selected_uuid: "u2",
+    panel_message_id: 555,
+    log_price_xtr: 0,
+    access_mode: "free_credit",
+    action_kind: "free_photo_unlock",
+    fulfillment_invoice_token: "photo-unlock-entry",
+    price_required: 0,
+  }));
+
+  assert.equal(result.operation, "photo_event_stored");
+  assert.equal(result.stored_count, 1);
+  assert.equal(paidPathCalled, false);
+  assert.deepEqual(dedicatedInput, {
+    token: "photo-unlock-entry",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    media_signature: "hotel_corridor_close",
+    uuid: "u2",
+    panel_message_id: 555,
+  });
 });
 
 test("finalize_offer stores panel_text for photo caption persistence", async () => {

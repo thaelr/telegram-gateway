@@ -44,6 +44,41 @@ const mediaPromotionSchema = z.object({
 
 const textSchema = z.string().min(1);
 
+const rewardDefinitionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.enum(["scene_unlock", "scene_skip", "photo_unlock"]),
+    amount: z.number().int().positive(),
+  }).strict(),
+  z.object({
+    type: z.literal("subscription"),
+    days: z.number().int().positive(),
+  }).strict(),
+]);
+
+const rewardSlotSchema = z.object({
+  slot: z.number().int().positive(),
+  campaign_id: z.string().trim().min(1),
+  enabled: z.boolean(),
+  valid_from: z.string().datetime({ offset: true }).nullable().optional(),
+  valid_until: z.string().datetime({ offset: true }).nullable().optional(),
+  rewards: z.array(rewardDefinitionSchema).min(1),
+  success_text: z.string().min(1),
+  already_claimed_text: z.string().min(1).default("Подарок уже активирован"),
+  next_action: z.string().trim().min(1).nullable().optional(),
+}).strict().superRefine((value, ctx) => {
+  if (
+    value.valid_from
+    && value.valid_until
+    && Date.parse(value.valid_from) > Date.parse(value.valid_until)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "valid_from must be before or equal to valid_until",
+      path: ["valid_from"],
+    });
+  }
+});
+
 const telegramUxCopySchema = z.object({
   terms: z.object({
     message: textSchema,
@@ -226,6 +261,19 @@ const rawEnvSchema = z.object({
         raw,
         z.array(mediaPromotionSchema),
       )),
+  REWARD_SLOTS_JSON: z
+    .string()
+    .default("[]")
+    .transform((raw) =>
+      parseJsonEnv(raw, z.array(rewardSlotSchema)))
+    .refine(
+      (slots) => new Set(slots.map((slot) => slot.slot)).size === slots.length,
+      "Reward slots must be unique",
+    )
+    .refine(
+      (slots) => new Set(slots.map((slot) => slot.campaign_id)).size === slots.length,
+      "Reward campaign ids must be unique",
+    ),
   TELEGRAM_UX_COPY_JSON: z
     .string()
     .transform((raw) =>

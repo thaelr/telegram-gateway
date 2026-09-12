@@ -3,6 +3,7 @@ import { sql } from "../db.js";
 import {
   asJsonValue,
   buildMediaFinalizeFallback,
+  type FinalizeFreePhotoUnlockInput,
   type QueryClient,
   type RecordAbTestDeliveredInput,
   type StorePanelInput,
@@ -70,6 +71,34 @@ export class MediaEventRepository {
       scene_turn_no: input.scene_turn_no,
       media_signature: input.media_signature,
       price_required: input.price_required,
+      panel_message_id: input.panel_message_id,
+    });
+  }
+
+  async finalizeFreePhotoUnlock(
+    input: FinalizeFreePhotoUnlockInput,
+  ): Promise<MediaFinalizeResult> {
+    const rows = await this.query<MediaFinalizeResult[]>`
+      SELECT *
+      FROM public.media_finalize_free_photo_unlock(
+        ${input.token}::text,
+        ${input.chat_id}::bigint,
+        ${input.scene_session_id}::text,
+        ${input.turn_no}::integer,
+        ${input.scene_turn_no}::integer,
+        ${input.media_signature}::text,
+        ${input.uuid}::text,
+        ${input.panel_message_id}::bigint
+      )
+    `;
+
+    return rows[0] ?? buildMediaFinalizeFallback({
+      chat_id: input.chat_id,
+      n: input.turn_no,
+      scene_session_id: input.scene_session_id,
+      scene_turn_no: input.scene_turn_no,
+      media_signature: input.media_signature,
+      price_required: 0,
       panel_message_id: input.panel_message_id,
     });
   }

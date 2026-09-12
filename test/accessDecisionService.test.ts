@@ -92,6 +92,7 @@ function buildAccessContext(
     scene_access_active: false,
     free_fast_scene_skips: 0,
     free_scene_unlocks: 0,
+    free_photo_unlocks: 0,
     turns_today: 0,
     scene_turn_no: -1,
     selected_character_i: 1,
@@ -337,7 +338,13 @@ test("returns allow_scene within daily limit", async () => {
 });
 
 test("returns subscription offer when daily limit is exhausted on message 21", async () => {
-  const { service } = createService(buildAccessContext({ turns_today: 20 }));
+  const { service } = createService(
+    buildAccessContext({
+      active_scene_session_id: "scene-1",
+      scene_turn_no: 3,
+      turns_today: 20,
+    }),
+  );
 
   const result = await service.evaluate(buildRequest());
 
@@ -346,6 +353,9 @@ test("returns subscription offer when daily limit is exhausted on message 21", a
   assert.equal(result.allowed, false);
   assert.equal(result.subscription_offer_reason, "daily_turn_limit");
   assert.equal(result.reason, "daily_turn_limit_reached");
+  assert.equal(result.scene_session_id, "scene-1");
+  assert.equal(result.active_scene_session_id, "scene-1");
+  assert.equal(result.scene_turn_no, 3);
 });
 
 test("returns allow_scene when current scene is unlocked", async () => {
@@ -388,6 +398,7 @@ test("returns subscription status for /subscription with active subscription", a
       subscription_active: true,
       subscription_sku: "payment_plan_2",
       subscription_until: "2026-08-15T10:00:00.000Z",
+      free_photo_unlocks: 2,
     }),
   );
 
@@ -402,7 +413,7 @@ test("returns subscription status for /subscription with active subscription", a
   assert.equal(result.action, "show_subscription_status");
   assert.equal(result.decision, "show_subscription_status");
   assert.equal(result.allowed, true);
-  assert.equal(result.text, "text");
+  assert.equal(result.text, "🎁 У тебя есть:\n• 2 бесплатных фото\n\ntext");
 });
 
 test("formats 14-day subscription plan from sku even when 4 days are left", async () => {
@@ -448,7 +459,12 @@ test("formats 30-day subscription plan from sku", async () => {
 });
 
 test("returns subscription offer for /subscription without active subscription", async () => {
-  const { service } = createService(buildAccessContext());
+  const { service } = createService(
+    buildAccessContext({
+      active_scene_session_id: "scene-1",
+      scene_turn_no: 3,
+    }),
+  );
 
   const result = await service.evaluate(
     buildRequest({
@@ -462,6 +478,30 @@ test("returns subscription offer for /subscription without active subscription",
   assert.equal(result.decision, "show_subscription_offer");
   assert.equal(result.allowed, true);
   assert.equal(result.subscription_offer_reason, "subscription_command");
+  assert.equal(result.scene_session_id, "scene-1");
+  assert.equal(result.active_scene_session_id, "scene-1");
+  assert.equal(result.scene_turn_no, 3);
+});
+
+test("preserves active scene id for /subscription when scene turn is unavailable", async () => {
+  const { service } = createService(
+    buildAccessContext({
+      active_scene_session_id: "scene-1",
+      scene_turn_no: -1,
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/subscription",
+      event_type: "command.received",
+      message_type: "command",
+    }),
+  );
+
+  assert.equal(result.scene_session_id, "scene-1");
+  assert.equal(result.active_scene_session_id, "scene-1");
+  assert.equal(result.scene_turn_no, null);
 });
 
 test("returns character mode screen for character_select callback without repository call", async () => {
@@ -662,6 +702,52 @@ test("commerce callback preserves panel text and entities passthrough", async ()
   assert.deepEqual(result.panel_entities_json, entities);
   assert.deepEqual(result.raw_update, rawUpdate);
   assert.equal(calls.length, 0);
+});
+
+test("reward callback is routed before generic commerce without access lookup", async () => {
+  const { service, calls } = createService(buildAccessContext(), {
+    throwOnCall: true,
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      event_type: "callback_query.received",
+      callback_data: "reward_claim:2",
+      callback_query_id: "reward-callback",
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.intent, "reward_claim");
+  assert.equal(result.action, "handle_reward_claim");
+  assert.equal(result.reward_slot, 2);
+  assert.equal(result.allowed, true);
+  assert.equal(calls.length, 0);
+});
+
+test("invalid reward callback does not fall through to commerce", async () => {
+  const { service, calls } = createService(buildAccessContext(), {
+    throwOnCall: true,
+  });
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "reward_claim:not-a-slot",
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "ignore");
+  assert.equal(result.intent, "interaction_event");
+  assert.equal(calls.length, 0);
+});
+
+test("reward callback rejects trailing callback payload fields", async () => {
+  const { service } = createService(buildAccessContext(), { throwOnCall: true });
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "reward_claim:1:unexpected",
+    user_message: null,
+  }));
+  assert.equal(result.action, "ignore");
 });
 
 test("reachability is classified by event_type without route_target", async () => {

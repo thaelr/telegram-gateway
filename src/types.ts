@@ -19,6 +19,7 @@ export type RouterIntent =
   | "subscription"
   | "paysupport"
   | "terms_accept"
+  | "reward_claim"
   | "newscene_confirm"
   | "character_select"
   | "character_back"
@@ -40,6 +41,7 @@ export type RouterAction =
   | "show_terms_gate"
   | "send_paysupport_message"
   | "handle_terms_accept"
+  | "handle_reward_claim"
   | "handle_newscene_confirm"
   | "handle_character_back"
   | "handle_scene_mode"
@@ -63,6 +65,7 @@ export interface AccessDecisionRequest {
   scene_mode?: string | null;
   callback_data?: string | null;
   callback_query_id?: string | null;
+  reward_slot?: number | null;
   panel_text?: string | null;
   panel_entities_json?: unknown | null;
   pre_checkout_query_id?: string | null;
@@ -95,6 +98,7 @@ export interface AccessDecisionResponse {
   inbound_message_id?: number | null;
   callback_data?: string | null;
   callback_query_id?: string | null;
+  reward_slot?: number | null;
   panel_text?: string | null;
   panel_entities_json?: unknown | null;
   pre_checkout_query_id?: string | null;
@@ -109,10 +113,13 @@ export interface AccessDecisionResponse {
   subscription_active?: boolean;
   subscription_sku?: string | null;
   subscription_until?: string | null;
+  scene_session_id?: string | null;
   active_scene_session_id?: string | null;
+  scene_turn_no?: number | null;
   scene_access_active?: boolean;
   free_fast_scene_skips?: number | null;
   free_scene_unlocks?: number | null;
+  free_photo_unlocks?: number | null;
   turns_today?: number | null;
   turn_limit?: number | null;
   turn_limit_reset_text?: string | null;
@@ -142,6 +149,7 @@ export interface AccessContext {
   scene_access_active: boolean;
   free_fast_scene_skips: number;
   free_scene_unlocks: number;
+  free_photo_unlocks: number;
   turns_today: number;
   scene_turn_no: number;
   selected_character_i: number | null;

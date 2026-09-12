@@ -21,6 +21,11 @@ export type CatalogRow = {
   first_unlocked_at?: string | null;
 };
 
+export type MediaCatalogPhoto = CatalogRow & {
+  uuid: string;
+  photo_url: string | null;
+};
+
 export type SceneTurnRef = {
   chat_id: number;
   scene_session_id: string | null;
@@ -163,6 +168,13 @@ export type StorePhotoEventInput = SceneTurnRef & {
   next_invoice_token: string | null;
   next_invoice_link: string | null;
   price_required: number;
+};
+
+export type FinalizeFreePhotoUnlockInput = SceneTurnRef & {
+  token: string;
+  media_signature: string;
+  uuid: string;
+  panel_message_id: number;
 };
 
 export function parseJsonArray(value: unknown): unknown[] {

@@ -289,6 +289,28 @@ test("loadMediaContext delegates to media_load_media_context and hydrates media 
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_media_context\(/u);
 });
 
+test("loadPhotoByUuid hydrates the exact catalog photo used by a consumed callback retry", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      uuid: "u-2",
+      bucket_name: "media_bucket",
+      storage_path: "char-1/u-2.jpg",
+      sort_order: 2,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.loadPhotoByUuid("u-2");
+
+  assert.equal(result?.uuid, "u-2");
+  assert.equal(
+    result?.photo_url,
+    "https://media.example.com/storage/v1/object/public/media_bucket/char-1/u-2.jpg",
+  );
+  assert.match(calls[0]?.sql ?? "", /FROM public\.media_catalog/u);
+  assert.deepEqual(calls[0]?.values, ["u-2"]);
+});
+
 test("loadCallbackToken delegates to media_load_interaction_token with fixed shape", async () => {
   const { query, calls } = createTaggedQueryStub([[
     {
@@ -560,6 +582,65 @@ test("redeemFreeSceneUnlock delegates to media_redeem_free_scene_unlock", async 
   assert.equal(result?.redeemed, true);
   assert.equal(result?.action_kind, "free_scene_unlock");
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_redeem_free_scene_unlock\(/u);
+});
+
+test("redeemFreePhotoUnlock delegates to media_redeem_free_photo_unlock", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      token: "photo-token",
+      chat_id: 101,
+      action_kind: "free_photo_unlock",
+      redeemed: true,
+      reason: "redeemed",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+  const result = await repository.redeemFreePhotoUnlock("photo-token", 101);
+
+  assert.equal(result?.redeemed, true);
+  assert.match(calls[0]?.sql ?? "", /public\.media_redeem_free_photo_unlock\(/u);
+  assert.deepEqual(calls[0]?.values, ["photo-token", 101]);
+});
+
+test("finalizeFreePhotoUnlock delegates the exact photo UUID to its dedicated RPC", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      chat_id: 101,
+      n: 5,
+      scene_session_id: "scene-1",
+      scene_turn_no: 3,
+      media_signature: "hotel_room_close",
+      price_required: 0,
+      panel_message_id: 777,
+      stored_count: 1,
+      invoice_rows_updated: 1,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.finalizeFreePhotoUnlock({
+    token: "photo-token",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    media_signature: "hotel_room_close",
+    uuid: "u-2",
+    panel_message_id: 777,
+  });
+
+  assert.equal(result?.stored_count, 1);
+  assert.match(calls[0]?.sql ?? "", /public\.media_finalize_free_photo_unlock\(/u);
+  assert.deepEqual(calls[0]?.values, [
+    "photo-token",
+    101,
+    "scene-1",
+    5,
+    3,
+    "hotel_room_close",
+    "u-2",
+    777,
+  ]);
 });
 
 test("loadStoredInvoiceTokens delegates to media_load_stored_invoice_tokens", async () => {

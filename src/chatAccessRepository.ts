@@ -18,6 +18,7 @@ type AccessContextRow = {
   active_menu_message_id: number | null;
   free_fast_scene_skips: number;
   free_scene_unlocks: number;
+  free_photo_unlocks: number;
 };
 
 export class ChatAccessRepository {
@@ -80,6 +81,7 @@ export class ChatAccessRepository {
           cs.active_menu_message_id,
           COALESCE(cs.free_fast_scene_skips, 0)::integer AS free_fast_scene_skips,
           COALESCE(cs.free_scene_unlocks, 0)::integer AS free_scene_unlocks,
+          COALESCE(cs.free_photo_unlocks, 0)::integer AS free_photo_unlocks,
           (
             cs.subscription_until IS NOT NULL
             AND cs.subscription_until > now()
@@ -124,7 +126,8 @@ export class ChatAccessRepository {
         u.active_menu_screen,
         u.active_menu_message_id,
         u.free_fast_scene_skips,
-        u.free_scene_unlocks
+        u.free_scene_unlocks,
+        u.free_photo_unlocks
       FROM upserted u
       LEFT JOIN active_scene ON TRUE
       LEFT JOIN usage ON TRUE

@@ -1,5 +1,6 @@
 import { config } from "./config.js";
 import { ChatAccessRepository } from "./chatAccessRepository.js";
+import { prependFreeBalances } from "./freeBalanceFormatter.js";
 import type {
   AccessContext,
   AccessDecisionRequest,
@@ -29,6 +30,7 @@ type RouterClassification = {
   action: RouterAction;
   character_i?: number | null;
   scene_mode?: string | null;
+  reward_slot?: number | null;
 };
 
 type AccessRepository = Pick<ChatAccessRepository, "ensureAndLoadAccessContext">;
@@ -40,6 +42,7 @@ function isAllowedClassification(classification: RouterClassification): boolean 
     case "subscription":
     case "paysupport":
     case "terms_accept":
+    case "reward_claim":
     case "newscene_confirm":
     case "character_select":
     case "character_back":
@@ -112,6 +115,23 @@ function classifyRouterInput(input: AccessDecisionRequest): RouterClassification
   const routeTarget = String(input.route_target ?? "").trim();
   const eventType = String(input.event_type ?? "").trim();
   const callbackData = normalizeCallbackData(input.callback_data);
+
+  if (callbackData?.startsWith("reward_claim:")) {
+    const match = /^reward_claim:(\d+)$/u.exec(callbackData);
+    const rewardSlot = normalizePositiveInteger(match?.[1]);
+    return rewardSlot
+      ? {
+          domain: "interaction",
+          intent: "reward_claim",
+          action: "handle_reward_claim",
+          reward_slot: rewardSlot,
+        }
+      : {
+          domain: "interaction",
+          intent: "interaction_event",
+          action: "ignore",
+        };
+  }
 
   if (callbackData?.startsWith("terms_accept")) {
     return {
@@ -266,7 +286,7 @@ function classifyRouterInput(input: AccessDecisionRequest): RouterClassification
 }
 
 function formatSubscriptionStatusText(context: AccessContext): string {
-  return config.TELEGRAM_UX_COPY_JSON.subscription.active
+  const text = config.TELEGRAM_UX_COPY_JSON.subscription.active
     .replaceAll("{subscription_sku}", String(context.subscription_sku ?? ""))
     .replaceAll("{subscription_until}", String(context.subscription_until ?? ""))
     .replaceAll(
@@ -277,6 +297,7 @@ function formatSubscriptionStatusText(context: AccessContext): string {
         )?.days ?? "",
       ),
     );
+  return prependFreeBalances(text, context) ?? text;
 }
 
 function replaceCount(template: string, count: number): string {
@@ -342,6 +363,7 @@ export class AccessDecisionService {
       telegram_chat_status: input.telegram_chat_status ?? null,
       character_i: effectiveCharacterId,
       scene_mode: effectiveSceneMode,
+      reward_slot: classification.reward_slot ?? null,
       ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
 
@@ -361,15 +383,22 @@ export class AccessDecisionService {
       config.BUSINESS_TIME_ZONE,
     );
 
+    const hasActiveScene = Boolean(accessContext.active_scene_session_id);
     const contextFields = {
       terms_accepted_at: accessContext.terms_accepted_at,
       subscription_active: accessContext.subscription_active,
       subscription_sku: accessContext.subscription_sku,
       subscription_until: accessContext.subscription_until,
+      scene_session_id: hasActiveScene ? accessContext.active_scene_session_id : null,
       active_scene_session_id: accessContext.active_scene_session_id,
+      scene_turn_no:
+        hasActiveScene && accessContext.scene_turn_no >= 0
+          ? accessContext.scene_turn_no
+          : null,
       scene_access_active: accessContext.scene_access_active,
       free_fast_scene_skips: accessContext.free_fast_scene_skips,
       free_scene_unlocks: accessContext.free_scene_unlocks,
+      free_photo_unlocks: accessContext.free_photo_unlocks,
       turns_today: accessContext.turns_today,
       turn_limit: config.TURN_LIMIT,
       turn_limit_reset_text: config.TURN_LIMIT_RESET_TEXT,
