@@ -3,8 +3,6 @@ import { config } from "../config.js";
 export type CreateSbpPaymentInput = {
   token: string;
   chat_id: number;
-  sku: string;
-  title: string;
   description: string;
   amount_rub: number;
   metadata?: Record<string, unknown>;
@@ -47,6 +45,7 @@ export class SbpPaymentError extends Error {
     message: string,
     readonly stage: "request" | "response",
     readonly statusCode: number | null,
+    readonly outcome: "definite_failure" | "ambiguous",
     readonly details?: unknown,
     options?: ErrorOptions,
   ) {
@@ -64,6 +63,7 @@ export class SbpPaymentAdapter implements SbpPaymentClient {
         "SBP adapter is disabled",
         "request",
         null,
+        "definite_failure",
       );
     }
 
@@ -99,6 +99,7 @@ export class SbpPaymentAdapter implements SbpPaymentClient {
         "SBP payment request failed",
         "request",
         null,
+        "ambiguous",
         error instanceof Error ? error.message : error,
         { cause: error instanceof Error ? error : undefined },
       );
@@ -115,6 +116,7 @@ export class SbpPaymentAdapter implements SbpPaymentClient {
           "SBP provider response is not valid JSON",
           "response",
           response.status,
+          "ambiguous",
           rawBody,
           { cause: error instanceof Error ? error : undefined },
         );
@@ -126,6 +128,7 @@ export class SbpPaymentAdapter implements SbpPaymentClient {
         "SBP provider returned a non-success HTTP status",
         "response",
         response.status,
+        "ambiguous",
         parsedBody ?? rawBody,
       );
     }
@@ -141,6 +144,7 @@ export class SbpPaymentAdapter implements SbpPaymentClient {
         "SBP provider response does not include payment identifiers",
         "response",
         response.status,
+        "ambiguous",
         payload ?? rawBody,
       );
     }

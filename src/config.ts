@@ -63,7 +63,6 @@ const rewardSlotSchema = z.object({
   valid_until: z.string().datetime({ offset: true }).nullable().optional(),
   rewards: z.array(rewardDefinitionSchema).min(1),
   success_text: z.string().min(1),
-  already_claimed_text: z.string().min(1).default("Подарок уже активирован"),
   next_action: z.string().trim().min(1).nullable().optional(),
 }).strict().superRefine((value, ctx) => {
   if (
@@ -103,8 +102,7 @@ const telegramUxCopySchema = z.object({
   }),
   free_actions: z.object({
     fast_scene_skip_button: textSchema,
-    scene_unlock_button: textSchema,
-  }).optional(),
+  }),
   payment_ui: z.object({
     fast_scene_skip_hint: textSchema,
     scene_unlock_hint: textSchema,
@@ -201,6 +199,8 @@ const rawEnvSchema = z.object({
   DATABASE_URL: z.string().url(),
   INTERNAL_API_KEY: z.string().min(1),
   INTERNAL_API_KEY_HEADER: z.string().min(1).default("x-internal-api-key"),
+  GATEWAY_PUBLIC_URL: z.string().trim().optional(),
+  RAILWAY_PUBLIC_DOMAIN: z.string().trim().optional(),
   TG_BOT_TOKEN: z.string().min(1),
   SBP_ENABLED: z
     .string()
@@ -294,6 +294,12 @@ const normalizedSbpConfig = {
   SBP_FAILED_URL: parsedEnv.SBP_FAILED_URL?.trim() || null,
 } as const;
 
+const gatewayPublicUrl =
+  (parsedEnv.GATEWAY_PUBLIC_URL?.replace(/\/+$/u, "") || null)
+  ?? (parsedEnv.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${parsedEnv.RAILWAY_PUBLIC_DOMAIN.replace(/\/+$/u, "")}`
+    : null);
+
 if (normalizedSbpConfig.SBP_ENABLED) {
   const missingKeys = [
     ["SBP_API_BASE_URL", normalizedSbpConfig.SBP_API_BASE_URL],
@@ -301,6 +307,7 @@ if (normalizedSbpConfig.SBP_ENABLED) {
     ["SBP_API_SECRET", normalizedSbpConfig.SBP_API_SECRET],
     ["SBP_RETURN_URL", normalizedSbpConfig.SBP_RETURN_URL],
     ["SBP_FAILED_URL", normalizedSbpConfig.SBP_FAILED_URL],
+    ["GATEWAY_PUBLIC_URL", gatewayPublicUrl],
   ]
     .filter(([, value]) => !value)
     .map(([key]) => key);
@@ -314,10 +321,12 @@ if (normalizedSbpConfig.SBP_ENABLED) {
   z.string().url().parse(normalizedSbpConfig.SBP_API_BASE_URL);
   z.string().url().parse(normalizedSbpConfig.SBP_RETURN_URL);
   z.string().url().parse(normalizedSbpConfig.SBP_FAILED_URL);
+  z.string().url().parse(gatewayPublicUrl);
 }
 
 export const config = {
   ...parsedEnv,
   ...normalizedSbpConfig,
+  GATEWAY_PUBLIC_URL: gatewayPublicUrl,
   EXPERIMENTS: loadExperimentConfigsFromEnv(process.env),
 };

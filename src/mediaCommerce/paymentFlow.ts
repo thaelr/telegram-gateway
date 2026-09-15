@@ -5,7 +5,6 @@ import type {
   PaidInvoiceToken,
 } from "../mediaCommerceTypes.js";
 import {
-  isExpired,
   normalizeNonNegativeInteger,
   normalizePositiveInteger,
   normalizeString,
@@ -269,7 +268,9 @@ export function validatePrecheckout(
     };
   }
 
-  if (isExpired(tokenRow.expires_at)) {
+  const expiresAt = normalizeString(tokenRow.expires_at);
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
     return {
       ok: false,
       error: config.TELEGRAM_UX_COPY_JSON.payment_errors.expired,

@@ -55,9 +55,10 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
 ]);
 
 const { buildApp } = await import("../src/server.js");
-const { MediaCommerceOperationError } = await import(
+const { MediaCommerceDecisionService, MediaCommerceOperationError } = await import(
   "../src/mediaCommerceDecisionService.js"
 );
+const { UnknownPhotoPriceError } = await import("../src/mediaCommerce/plans.js");
 
 test("media-commerce endpoint rejects missing internal api key", async (t) => {
   let called = false;
@@ -199,6 +200,203 @@ test("media-commerce endpoint returns safe diagnostics for internal errors", asy
   assert.equal(typeof body.request_id, "string");
   assert.ok(body.request_id.length > 0);
   assert.equal("stack" in body, false);
+});
+
+test("public SBP payment endpoint redirects without internal API auth", async (t) => {
+  let checkout: {
+    checkout_url: string;
+    external_payment_id: string;
+  } | null = null;
+  let claimHeld = false;
+  let createPaymentCalls = 0;
+  const token = "subscription:plan:sbp";
+  const repository = {
+    async loadStoredInvoiceTokens(tokens: string[]) {
+      if (!tokens.includes(token)) return [];
+      return [{
+        token,
+        kind: "invoice_payload",
+        chat_id: 101,
+        scene_session_id: null,
+        turn_no: null,
+        scene_turn_no: null,
+        payload_json: { action_kind: "subscription_payment" },
+        sku: "plan",
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        checkout_url: checkout?.checkout_url ?? null,
+        external_payment_id: checkout?.external_payment_id ?? null,
+        amount_xtr: null,
+        telegram_invoice_payload: null,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        telegram_invoice_message_id: null,
+        invoice_link: null,
+        stored: true,
+        invoice_title: "Plan",
+        invoice_description: "Subscription",
+        invoice_label: "Plan",
+        invoice_button_text: "Pay",
+        status: "invoice_sent",
+        action_kind: "subscription_payment",
+      }];
+    },
+    async claimSbpCheckoutCreation(requestedToken: string, chatId: number) {
+      return {
+        token: requestedToken,
+        chat_id: chatId,
+        checkout_url: checkout?.checkout_url ?? null,
+        external_payment_id: checkout?.external_payment_id ?? null,
+        claim_acquired: checkout == null && !claimHeld
+          ? (claimHeld = true)
+          : false,
+      };
+    },
+    async releaseSbpCheckoutCreation() {
+      claimHeld = false;
+      return 1;
+    },
+    async storeInvoiceLinks(items: Array<{
+      checkout_url?: string | null;
+      external_payment_id?: string | null;
+    }>) {
+      const [item] = items;
+      if (item?.checkout_url && item.external_payment_id) {
+        checkout = {
+          checkout_url: item.checkout_url,
+          external_payment_id: item.external_payment_id,
+        };
+      }
+      return item ? 1 : 0;
+    },
+    async loadInvoiceToken() {
+      return {
+        found: true,
+        token,
+        requested_token: token,
+        kind: "invoice_payload",
+        chat_id: 101,
+        scene_session_id: null,
+        turn_no: null,
+        payload_json: { action_kind: "subscription_payment" },
+        status: "invoice_sent",
+        action_kind: "subscription_payment",
+        sku: "plan",
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        checkout_url: checkout?.checkout_url ?? null,
+        external_payment_id: checkout?.external_payment_id ?? null,
+        amount_xtr: null,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        telegram_invoice_message_id: null,
+      };
+    },
+  };
+  const sbpCheckoutService = new MediaCommerceDecisionService(
+    repository as never,
+    {} as never,
+    {
+      async createPayment() {
+        createPaymentCalls += 1;
+        return {
+          external_payment_id: "platega-1",
+          checkout_url: "https://platega.example/checkout/existing",
+        };
+      },
+    },
+  );
+  const app = buildApp({
+    logger: false,
+    sbpCheckoutService,
+  });
+  t.after(() => app.close());
+
+  const first = await app.inject({
+    method: "GET",
+    url: "/v1/pay/sbp/subscription%3Aplan%3Asbp",
+  });
+  const second = await app.inject({
+    method: "GET",
+    url: "/v1/pay/sbp/subscription%3Aplan%3Asbp",
+  });
+
+  assert.equal(first.statusCode, 302);
+  assert.equal(first.headers.location, "https://platega.example/checkout/existing");
+  assert.equal(second.statusCode, 302);
+  assert.equal(second.headers.location, "https://platega.example/checkout/existing");
+  assert.equal(createPaymentCalls, 1);
+});
+
+test("public SBP payment endpoint maps expected checkout states without 500", async (t) => {
+  const cases = [
+    { code: "sbp_invoice_not_found", status: 404, error: "payment_not_found" },
+    { code: "sbp_invoice_expired", status: 410, error: "payment_unavailable" },
+    { code: "sbp_invoice_status_invalid", status: 410, error: "payment_unavailable" },
+    { code: "sbp_invoice_kind_invalid", status: 410, error: "payment_unavailable" },
+    { code: "sbp_invoice_action_invalid", status: 410, error: "payment_unavailable" },
+    { code: "sbp_payment_source_invalid", status: 410, error: "payment_unavailable" },
+    { code: "sbp_checkout_creation_in_progress", status: 409, error: "payment_creation_in_progress" },
+    { code: "sbp_checkout_creation_uncertain", status: 503, error: "payment_reconciliation_required" },
+  ] as const;
+
+  for (const entry of cases) {
+    await t.test(entry.code, async (nested) => {
+      const app = buildApp({
+        logger: false,
+        sbpCheckoutService: {
+          async resolveSbpCheckout() {
+            throw new MediaCommerceOperationError("unavailable", "sbpRedirect", entry.code);
+          },
+        },
+      });
+      nested.after(() => app.close());
+
+      const response = await app.inject({ method: "GET", url: "/v1/pay/sbp/token" });
+      assert.equal(response.statusCode, entry.status);
+      assert.deepEqual(response.json(), { error: entry.error });
+    });
+  }
+});
+
+test("public SBP payment endpoint leaves true internal failures as 500", async (t) => {
+  const app = buildApp({
+    logger: false,
+    sbpCheckoutService: {
+      async resolveSbpCheckout() {
+        throw new MediaCommerceOperationError(
+          "database unavailable",
+          "sbpRedirect.loadInvoiceToken",
+          "database_unavailable",
+        );
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({ method: "GET", url: "/v1/pay/sbp/token" });
+  assert.equal(response.statusCode, 500);
+});
+
+test("unknown photo price keeps its typed code in the commerce HTTP response", async (t) => {
+  const app = buildApp({
+    logger: false,
+    mediaCommerceDecisionService: {
+      async evaluate() {
+        throw new UnknownPhotoPriceError(999);
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/media-commerce-decision",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: { chat_id: 101 },
+  });
+  assert.equal(response.statusCode, 500);
+  assert.equal(response.json().code, "unknown_photo_price");
 });
 
 test("router endpoint is registered and uses the same auth and validation wiring", async (t) => {

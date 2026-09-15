@@ -83,8 +83,6 @@ test("SbpPaymentAdapter sends Platega transaction/process request and maps respo
     const result = await adapter.createPayment({
       token: "payment-token-1",
       chat_id: 1318122313,
-      sku: "payment_action_1",
-      title: "Fast skip",
       description: "Пропустить вступление",
       amount_rub: 80,
     });
@@ -141,8 +139,6 @@ test("SbpPaymentAdapter throws stable error code on malformed Platega response",
         adapter.createPayment({
           token: "payment-token-1",
           chat_id: 1318122313,
-          sku: "payment_action_1",
-          title: "Fast skip",
           description: "Пропустить вступление",
           amount_rub: 80,
         }),
@@ -150,8 +146,61 @@ test("SbpPaymentAdapter throws stable error code on malformed Platega response",
         error instanceof SbpPaymentError
         && error.code === "sbp_payment_creation_failed"
         && error.stage === "response"
-        && error.statusCode === 200,
+        && error.statusCode === 200
+        && error.outcome === "ambiguous",
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("SbpPaymentAdapter treats 400, 408, and 5xx as ambiguous by default", async () => {
+  const adapter = new SbpPaymentAdapter();
+  const originalFetch = globalThis.fetch;
+
+  try {
+    for (const status of [400, 408, 500]) {
+      globalThis.fetch = async () => new Response(
+        JSON.stringify({ error: `provider-${status}` }),
+        { status, headers: { "content-type": "application/json" } },
+      );
+      await assert.rejects(
+        () => adapter.createPayment({
+          token: `payment-token-${status}`,
+          chat_id: 1318122313,
+          description: "Пропустить вступление",
+          amount_rub: 80,
+        }),
+        (error: unknown) => error instanceof SbpPaymentError
+          && error.statusCode === status
+          && error.outcome === "ambiguous",
+        String(status),
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("SbpPaymentAdapter treats network and timeout failures as ambiguous", async () => {
+  const adapter = new SbpPaymentAdapter();
+  const originalFetch = globalThis.fetch;
+
+  try {
+    for (const failure of [new TypeError("network down"), new DOMException("timed out", "TimeoutError")]) {
+      globalThis.fetch = async () => { throw failure; };
+      await assert.rejects(
+        () => adapter.createPayment({
+          token: "payment-token-network",
+          chat_id: 1318122313,
+          description: "Пропустить вступление",
+          amount_rub: 80,
+        }),
+        (error: unknown) => error instanceof SbpPaymentError
+          && error.stage === "request"
+          && error.outcome === "ambiguous",
+      );
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

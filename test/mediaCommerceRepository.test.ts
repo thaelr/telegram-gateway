@@ -1301,3 +1301,101 @@ test("loadSceneAccessStatus reads active scene and pass state", async () => {
   assert.equal(result?.scene_is_active, true);
   assert.match(calls[0]?.sql ?? "", /FROM public\.chat_state cs/u);
 });
+
+test("required media RPCs reject zero-row contract violations", async () => {
+  const baseScene = {
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 2,
+    media_signature: "signature",
+  };
+  const operations = [
+    async () => {
+      const { query } = createTaggedQueryStub([[]]);
+      return new MediaCommerceRepository(query as never).loadOfferStats({
+        ...baseScene,
+        base_price_xtr: 10,
+        should_offer: true,
+      });
+    },
+    async () => {
+      const { query } = createTaggedQueryStub([[]]);
+      return new MediaCommerceRepository(query as never).loadMediaContext({
+        ...baseScene,
+        base_price_xtr: 10,
+        current_uuid: null,
+        target_message_id: 777,
+        action_kind: "photo_request",
+        requested_action: "photo_request",
+        invoice_token: null,
+        force_deliver_after_payment: false,
+        paid_access_mode: null,
+        callback_valid: true,
+        panel_text: null,
+        panel_entities_json: [],
+      });
+    },
+    async () => {
+      const { query } = createTaggedQueryStub([[]]);
+      return new MediaCommerceRepository(query as never).storePanel({
+        ...baseScene,
+        panel_message_id: 777,
+        price_xtr: 10,
+        invoice_token: null,
+        invoice_link: null,
+        panel_text: null,
+        panel_entities_json: [],
+      });
+    },
+    async () => {
+      const { query } = createTaggedQueryStub([[]]);
+      return new MediaCommerceRepository(query as never).storePhotoEvent({
+        ...baseScene,
+        event_type: "photo.sent",
+        uuid: "u1",
+        panel_message_id: 777,
+        price_xtr: 10,
+        access_mode: "paid",
+        action_kind: "photo_request",
+        fulfillment_invoice_token: "invoice-1",
+        next_invoice_token: null,
+        next_invoice_link: null,
+        price_required: 10,
+      });
+    },
+    async () => {
+      const { query } = createTaggedQueryStub([[]]);
+      return new MediaCommerceRepository(query as never).finalizeFreePhotoUnlock({
+        ...baseScene,
+        token: "free-token",
+        uuid: "u1",
+        panel_message_id: 777,
+      });
+    },
+  ];
+
+  for (const operation of operations) {
+    await assert.rejects(
+      operation,
+      (error: unknown) => error instanceof Error && "code" in error
+        && error.code === "media_repository_contract_violation",
+    );
+  }
+});
+
+test("SBP safety repository methods delegate to dedicated RPCs", async () => {
+  const { query, calls } = createTaggedQueryStub([
+    [{ updated_count: 1 }],
+    [{ updated_count: 1 }],
+    [{ updated_count: 1 }],
+  ]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  assert.equal(await repository.markSbpCheckoutCreationUncertain("token", 101), 1);
+  assert.equal(await repository.markSbpInvoiceCanceled("external-1"), 1);
+  assert.equal(await repository.recordSbpStatusConflict("external-1", "CONFIRMED"), 1);
+  assert.match(calls[0]?.sql ?? "", /media_mark_sbp_checkout_creation_uncertain/u);
+  assert.match(calls[1]?.sql ?? "", /media_mark_sbp_invoice_canceled/u);
+  assert.match(calls[2]?.sql ?? "", /media_record_sbp_status_conflict/u);
+});

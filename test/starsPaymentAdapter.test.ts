@@ -172,3 +172,51 @@ test("TelegramStarsPaymentAdapter throws when result is empty", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("TelegramStarsPaymentAdapter classifies network failures consistently", async () => {
+  const adapter = new TelegramStarsPaymentAdapter();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new TypeError("network down");
+  };
+  try {
+    await assert.rejects(
+      () => adapter.createStarsInvoice({
+        title: "title",
+        description: "description",
+        payload: "payload",
+        label: "label",
+        amount_xtr: 123,
+      }),
+      (error: unknown) => error instanceof TelegramStarsInvoiceError
+        && error.code === "stars_invoice_creation_failed"
+        && error.stage === "request",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("TelegramStarsPaymentAdapter aborts a request after its finite timeout", async () => {
+  const adapter = new TelegramStarsPaymentAdapter(5);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+  });
+  try {
+    await assert.rejects(
+      () => adapter.createStarsInvoice({
+        title: "title",
+        description: "description",
+        payload: "payload",
+        label: "label",
+        amount_xtr: 123,
+      }),
+      (error: unknown) => error instanceof TelegramStarsInvoiceError
+        && error.code === "stars_invoice_creation_failed"
+        && error.stage === "request",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

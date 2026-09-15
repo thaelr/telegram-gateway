@@ -46,6 +46,28 @@ export class MediaPaymentRepository {
     return rows[0] ?? null;
   }
 
+  async markSbpInvoiceCanceled(externalPaymentId: string): Promise<number> {
+    const rows = await this.query<Array<{ updated_count: number }>>`
+      SELECT public.media_mark_sbp_invoice_canceled(
+        ${externalPaymentId}::text
+      ) AS updated_count
+    `;
+    return rows[0]?.updated_count ?? 0;
+  }
+
+  async recordSbpStatusConflict(
+    externalPaymentId: string,
+    providerStatus: string,
+  ): Promise<number> {
+    const rows = await this.query<Array<{ updated_count: number }>>`
+      SELECT public.media_record_sbp_status_conflict(
+        ${externalPaymentId}::text,
+        ${providerStatus}::text
+      ) AS updated_count
+    `;
+    return rows[0]?.updated_count ?? 0;
+  }
+
   async activateSubscription(
     input: ActivateSubscriptionInput,
   ): Promise<number> {

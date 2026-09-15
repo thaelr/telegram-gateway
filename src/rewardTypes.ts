@@ -12,7 +12,6 @@ export type RewardSlot = {
   valid_until?: string | null;
   rewards: RewardDefinition[];
   success_text: string;
-  already_claimed_text?: string;
   next_action?: string | null;
 };
 

@@ -3,8 +3,6 @@ import { sql } from "../db.js";
 import type { MediaContext, MediaOfferStats } from "../mediaCommerceTypes.js";
 import {
   asJsonValue,
-  buildEmptyMediaContext,
-  buildEmptyOfferStats,
   type CatalogRow,
   type LoadMediaContextInput,
   type LoadOfferStatsInput,
@@ -13,6 +11,7 @@ import {
   parseJsonObject,
   type QueryClient,
 } from "./shared.js";
+import { MediaRepositoryContractError } from "./errors.js";
 
 export class MediaCatalogRepository {
   constructor(private readonly query: QueryClient) {}
@@ -81,7 +80,11 @@ export class MediaCatalogRepository {
       )
     `;
 
-    return rows[0] ?? buildEmptyOfferStats(input);
+    const row = rows[0];
+    if (!row) {
+      throw new MediaRepositoryContractError("media_load_offer_stats");
+    }
+    return row;
   }
 
   async loadPhotoByUuid(uuid: string): Promise<MediaCatalogPhoto | null> {
@@ -125,7 +128,7 @@ export class MediaCatalogRepository {
 
     const row = rows[0];
     if (!row) {
-      return buildEmptyMediaContext(input);
+      throw new MediaRepositoryContractError("media_load_media_context");
     }
 
     const unlockedItems = parseJsonArray(row.unlocked_items_json)

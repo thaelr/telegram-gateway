@@ -21,6 +21,10 @@ type WorkflowNode = {
     url?: string;
     numberOutputs?: number;
     output?: string;
+    workflowId?: {
+      value?: string;
+      cachedResultName?: string;
+    };
   };
 };
 
@@ -34,6 +38,19 @@ type Workflow = {
   nodes?: WorkflowNode[];
   connections?: Record<string, { main?: WorkflowConnection[][] }>;
 };
+
+function reachableNodeNames(workflow: Workflow, start: string): Set<string> {
+  const reachable = new Set<string>();
+  const pending = [start];
+  while (pending.length > 0) {
+    const current = pending.shift();
+    if (!current || reachable.has(current)) continue;
+    reachable.add(current);
+    const targets = workflow.connections?.[current]?.main?.flat() ?? [];
+    pending.push(...targets.map((target) => target.node ?? "").filter(Boolean));
+  }
+  return reachable;
+}
 
 async function loadWorkflow(): Promise<Workflow> {
   const raw = await loadWorkflowRaw();
@@ -50,6 +67,72 @@ async function loadWorkflowRaw(): Promise<string> {
   );
   return readFile(workflowPath, "utf8");
 }
+
+async function loadSbpMigration(): Promise<string> {
+  const migrationPath = path.resolve(
+    process.cwd(),
+    "..",
+    "..",
+    "..",
+    "MP-DB",
+    "supabase",
+    "migrations",
+    "20260904_media_commerce_sbp.sql",
+  );
+  return readFile(migrationPath, "utf8");
+}
+
+test("SBP paid claim validates external id and RUB currency without amount equality", async () => {
+  const migration = await loadSbpMigration();
+  const functionStart = migration.indexOf(
+    "CREATE OR REPLACE FUNCTION public.media_mark_invoice_paid",
+  );
+  const functionSql = migration.slice(functionStart);
+
+  assert.ok(functionStart >= 0);
+  assert.match(
+    functionSql,
+    /t\.external_payment_id[\s\S]*= NULLIF\(BTRIM\(p_external_payment_id\), ''\)/u,
+  );
+  assert.match(
+    functionSql,
+    /t\.currency[\s\S]*= COALESCE\(NULLIF\(BTRIM\(p_payment_currency\), ''\), 'RUB'\)/u,
+  );
+  assert.doesNotMatch(
+    functionSql,
+    /COALESCE\(t\.amount, t\.amount_xtr\) = p_payment_total_amount/u,
+  );
+});
+
+test("SBP migration makes checkout claims lifecycle-safe and ambiguous outcomes durable", async () => {
+  const migration = await loadSbpMigration();
+  const claimStart = migration.indexOf(
+    "CREATE OR REPLACE FUNCTION public.media_claim_sbp_checkout_creation",
+  );
+  const claimEnd = migration.indexOf(
+    "CREATE OR REPLACE FUNCTION public.media_release_sbp_checkout_creation",
+  );
+  const claimSql = migration.slice(claimStart, claimEnd);
+
+  assert.ok(claimStart >= 0 && claimEnd > claimStart);
+  assert.match(claimSql, /t\.status = 'invoice_sent'/u);
+  assert.match(claimSql, /t\.action_kind IN \('subscription_payment', 'photo_payment', 'feature_payment'\)/u);
+  assert.match(claimSql, /t\.expires_at IS NOT NULL/u);
+  assert.match(claimSql, /t\.expires_at > now\(\)/u);
+  assert.match(claimSql, /sbp_checkout_creation_state[\s\S]*= 'idle'/u);
+  assert.doesNotMatch(claimSql, /INTERVAL '2 minutes'/u);
+  assert.match(
+    migration,
+    /sbp_checkout_creation_started_at IS NOT NULL[\s\S]*THEN 'uncertain'/u,
+  );
+  assert.match(
+    migration,
+    /THEN COALESCE\(sbp_checkout_creation_uncertain_at, sbp_checkout_creation_started_at\)/u,
+  );
+  assert.match(migration, /media_mark_sbp_checkout_creation_uncertain/u);
+  assert.match(migration, /media_mark_sbp_invoice_canceled/u);
+  assert.match(migration, /media_record_sbp_status_conflict/u);
+});
 
 async function loadRouterWorkflow(): Promise<Workflow> {
   const workflowPath = path.resolve(
@@ -239,6 +322,33 @@ test("Normalize SBP webhook event maps Platega CONFIRMED callback to gateway con
   assert.equal("chat_id" in normalized, false);
 });
 
+test("Normalize SBP webhook event maps Platega CANCELED callback to gateway contract", async () => {
+  const normalized = await runNormalizeSbpWebhookContract(
+    {
+      headers: {
+        "x-merchantid": "merchant-1",
+        "x-secret": "secret-1",
+      },
+      body: {
+        id: "platega-canceled-1",
+        status: "CANCELED",
+        amount: 299,
+        currency: "RUB",
+      },
+    },
+    {
+      SBP_MERCHANT_ID: "merchant-1",
+      SBP_API_SECRET: "secret-1",
+    },
+  );
+
+  assert.equal(normalized.event_type, "payment.canceled.received");
+  assert.equal(normalized.sbp_webhook_action, "canceled");
+  assert.equal(normalized.external_payment_id, "platega-canceled-1");
+  assert.equal(normalized.response_code, 200);
+  assert.equal(normalized.reason, null);
+});
+
 test("router workflow sends raw_update to gateway router decision", async () => {
   const workflow = await loadRouterWorkflow();
   const node = Array.isArray(workflow.nodes)
@@ -247,6 +357,19 @@ test("router workflow sends raw_update to gateway router decision", async () => 
   const body = String(node?.parameters?.body ?? "");
 
   assert.match(body, /raw_update:\s*\$json\.raw_update\s*\?\?\s*null/u);
+});
+
+test("current Router metadata names every Media Commerce workflow reference as v4", async () => {
+  const workflow = await loadRouterWorkflow();
+  const references = (workflow.nodes ?? []).filter(
+    (node) => node.parameters?.workflowId?.value === "xA0A41F8bZ0XR0MR",
+  );
+
+  assert.equal(references.length, 2);
+  assert.ok(references.every(
+    (node) => node.parameters?.workflowId?.value === "xA0A41F8bZ0XR0MR"
+      && node.parameters?.workflowId?.cachedResultName === "RUS Media Commerce Flow v4",
+  ));
 });
 
 test("reward callback topology claims, answers callback, then routes the next action", async () => {
@@ -353,12 +476,32 @@ test("Normalize SBP webhook event rejects malformed confirmed callback", async (
   assert.equal(normalized.response_code, 400);
 });
 
-test("SBP webhook topology calls gateway only for confirmed route and responds through response node", async () => {
+test("SBP webhook topology responds once after confirmed fulfillment and bypasses fulfillment for canceled", async () => {
   const workflow = await loadWorkflow();
   const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
   const webhook = nodes.find((entry) => entry.name === "SBP payment webhook");
+  const route = nodes.find((entry) => entry.name === "Route SBP webhook event");
+  const terminalRoute = nodes.find(
+    (entry) => entry.name === "Route SBP confirmed terminal response",
+  );
+  const cancellationValidation = nodes.find(
+    (entry) => entry.name === "Validate SBP cancellation persisted",
+  );
 
   assert.equal(webhook?.parameters?.responseMode, "responseNode");
+  assert.match(String(route?.parameters?.output ?? ""), /confirmed.*canceled/u);
+  assert.match(
+    String(terminalRoute?.parameters?.output ?? ""),
+    /subscription_activated.*feature_fulfillment_required.*scene_access_activated/u,
+  );
+  assert.match(
+    String(terminalRoute?.parameters?.output ?? ""),
+    /feature_fast_scene_skip_config_missing/u,
+  );
+  assert.match(
+    String(cancellationValidation?.parameters?.jsCode ?? ""),
+    /payment_canceled.*payment_already_canceled/u,
+  );
   assert.deepEqual(
     workflow.connections?.["Normalize SBP webhook event"]?.main?.[0]?.map((entry) => entry.node),
     ["Route SBP webhook event"],
@@ -369,14 +512,76 @@ test("SBP webhook topology calls gateway only for confirmed route and responds t
     ),
     [
       ["Send SBP payment event to gateway"],
+      ["Send SBP cancellation event to gateway"],
       ["Return SBP webhook ignored"],
       ["Return SBP webhook invalid"],
     ],
   );
   assert.deepEqual(
     workflow.connections?.["Send SBP payment event to gateway"]?.main?.[0]?.map((entry) => entry.node),
-    ["Route operation group", "Return SBP webhook success"],
+    ["Restore confirmed SBP webhook context"],
   );
+  assert.deepEqual(
+    workflow.connections?.["Restore confirmed SBP webhook context"]?.main?.[0]?.map((entry) => entry.node),
+    ["Route operation group"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Send SBP cancellation event to gateway"]?.main?.[0]?.map((entry) => entry.node),
+    ["Validate SBP cancellation persisted"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Validate SBP cancellation persisted"]?.main?.[0]?.map((entry) => entry.node),
+    ["Return SBP webhook success"],
+  );
+  for (const terminal of [
+    "Return payment fulfillment result",
+    "Mark fast scene skip fulfilled",
+    "Return noop result",
+  ]) {
+    assert.deepEqual(
+      workflow.connections?.[terminal]?.main?.[0]?.map((entry) => entry.node),
+      ["Route SBP confirmed terminal response"],
+      terminal,
+    );
+  }
+  assert.deepEqual(
+    workflow.connections?.["Route SBP confirmed terminal response"]?.main?.map((output) =>
+      output.map((entry) => entry.node)
+    ),
+    [
+      ["Fail incomplete SBP confirmed fulfillment"],
+      ["Return SBP webhook success"],
+      ["Return non-webhook terminal result"],
+    ],
+  );
+
+  const respondNodes = new Set(
+    nodes
+      .filter((node) => node.type === "n8n-nodes-base.respondToWebhook")
+      .map((node) => node.name ?? ""),
+  );
+  const confirmedReachable = reachableNodeNames(workflow, "Send SBP payment event to gateway");
+  const canceledReachable = reachableNodeNames(workflow, "Send SBP cancellation event to gateway");
+  assert.deepEqual(
+    [...confirmedReachable].filter((name) => respondNodes.has(name)),
+    ["Return SBP webhook success"],
+  );
+  assert.deepEqual(
+    [...canceledReachable].filter((name) => respondNodes.has(name)),
+    ["Return SBP webhook success"],
+  );
+  assert.equal(canceledReachable.has("Route operation group"), false);
+  assert.equal(canceledReachable.has("Need noop callback answer?"), false);
+  const successIncoming = Object.entries(workflow.connections ?? {})
+    .filter(([, connection]) => (connection.main ?? []).flat().some(
+      (target) => target.node === "Return SBP webhook success",
+    ))
+    .map(([source]) => source)
+    .sort();
+  assert.deepEqual(successIncoming, [
+    "Route SBP confirmed terminal response",
+    "Validate SBP cancellation persisted",
+  ]);
 });
 
 test("subscription offer topology refreshes an existing offer message instead of skipping render", async () => {

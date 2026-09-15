@@ -26,6 +26,15 @@ export type PromotedInvoicePlan<T extends InvoicePlan> = T & {
   promo_active: boolean;
 };
 
+export class UnknownPhotoPriceError extends Error {
+  readonly code = "unknown_photo_price";
+
+  constructor(readonly amountXtr: number) {
+    super(`No configured photo plan for ${amountXtr} XTR`);
+    this.name = "UnknownPhotoPriceError";
+  }
+}
+
 function isPromotionActive(promotion: MediaPromotion, nowMs: number): boolean {
   const startsAt = Date.parse(promotion.starts_at);
   const endsAt = Date.parse(promotion.ends_at);
@@ -123,21 +132,14 @@ export function applyPromotionToPlan<T extends InvoicePlan>(
 
 export function resolvePhotoPlanByAmount(
   amountXtr: number,
-): PromotedInvoicePlan<MediaPhotoPlan> {
+): PromotedInvoicePlan<MediaPhotoPlan> | null {
   const normalizedAmount = Math.max(1, Math.trunc(amountXtr));
 
   const plan = config.MEDIA_PHOTO_PLANS_JSON.find(
     (plan) => plan.amount_xtr === normalizedAmount,
-  ) ?? {
-    sku: `payment_media_custom_${normalizedAmount}`,
-    amount_xtr: normalizedAmount,
-    title: "text",
-    description: "text",
-    label: "text",
-    button_text: config.TELEGRAM_UX_COPY_JSON.media.pay_button,
-  };
+  ) ?? null;
 
-  return applyPromotionToPlan(plan);
+  return plan ? applyPromotionToPlan(plan) : null;
 }
 
 export function resolveSubscriptionPlans(): Array<PromotedInvoicePlan<MediaSubscriptionPlan>> {

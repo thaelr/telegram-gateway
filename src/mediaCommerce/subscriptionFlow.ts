@@ -6,7 +6,6 @@ import type {
   MediaSubscriptionOfferReason,
   PaymentCurrency,
   PaymentSource,
-  StoredInvoiceToken,
 } from "../mediaCommerceTypes.js";
 import { INVOICE_TTL_MS } from "./utils.js";
 
@@ -234,35 +233,6 @@ export function buildFeaturePaymentInputs(input: {
     payload_json: payloadJson,
     action_kind: "feature_payment",
     plan: input.plan,
-  });
-}
-
-export function mergeStoredRowsWithMetadata(
-  storedRows: StoredInvoiceToken[],
-  sourceRows: StoredInvoiceToken[],
-): StoredInvoiceToken[] {
-  const metadataByToken = new Map(
-    sourceRows.map((row) => [row.token, row]),
-  );
-
-  return storedRows.map((row) => {
-    const source = metadataByToken.get(row.token);
-    return {
-      ...row,
-      scene_turn_no: source?.scene_turn_no ?? row.scene_turn_no,
-      stored: source?.stored ?? row.stored,
-      payment_source: source?.payment_source ?? row.payment_source,
-      amount: source?.amount ?? row.amount,
-      currency: source?.currency ?? row.currency,
-      checkout_url: source?.checkout_url ?? row.checkout_url,
-      external_payment_id: source?.external_payment_id ?? row.external_payment_id,
-      invoice_title: source?.invoice_title ?? row.invoice_title,
-      invoice_description:
-        source?.invoice_description ?? row.invoice_description,
-      invoice_label: source?.invoice_label ?? row.invoice_label,
-      invoice_button_text:
-        source?.invoice_button_text ?? row.invoice_button_text,
-    };
   });
 }
 

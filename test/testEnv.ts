@@ -22,7 +22,6 @@ export const testTelegramUxCopy = {
   },
   free_actions: {
     fast_scene_skip_button: "free skip {count}",
-    scene_unlock_button: "free unlock",
   },
   payment_ui: {
     fast_scene_skip_hint: "*skip hint",
@@ -99,6 +98,7 @@ export const testTelegramUxCopy = {
 export function installTestEnv(): void {
   process.env.DATABASE_URL ??= "postgresql://postgres:postgres@localhost:5432/postgres";
   process.env.INTERNAL_API_KEY ??= "test-internal-key";
+  process.env.GATEWAY_PUBLIC_URL ??= "https://gateway.example";
   process.env.TG_BOT_TOKEN ??= "test-telegram-bot-token";
   process.env.TELEGRAM_UX_COPY_JSON ??= JSON.stringify(testTelegramUxCopy);
 }

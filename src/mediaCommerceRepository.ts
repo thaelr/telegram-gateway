@@ -193,6 +193,21 @@ export class MediaCommerceRepository {
     return this.tokenRepository.releaseSbpCheckoutCreation(token, chatId);
   }
 
+  async markSbpCheckoutCreationUncertain(token: string, chatId: number): Promise<number> {
+    return this.tokenRepository.markSbpCheckoutCreationUncertain(token, chatId);
+  }
+
+  async markSbpInvoiceCanceled(externalPaymentId: string): Promise<number> {
+    return this.paymentRepository.markSbpInvoiceCanceled(externalPaymentId);
+  }
+
+  async recordSbpStatusConflict(
+    externalPaymentId: string,
+    providerStatus: string,
+  ): Promise<number> {
+    return this.paymentRepository.recordSbpStatusConflict(externalPaymentId, providerStatus);
+  }
+
   async loadStoredInvoiceTokens(tokens: string[]): Promise<StoredInvoiceToken[]> {
     return this.tokenRepository.loadStoredInvoiceTokens(tokens);
   }

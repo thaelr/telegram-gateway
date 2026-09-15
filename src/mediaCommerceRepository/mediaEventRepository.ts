@@ -2,13 +2,13 @@ import type { MediaFinalizeResult } from "../mediaCommerceTypes.js";
 import { sql } from "../db.js";
 import {
   asJsonValue,
-  buildMediaFinalizeFallback,
   type FinalizeFreePhotoUnlockInput,
   type QueryClient,
   type RecordAbTestDeliveredInput,
   type StorePanelInput,
   type StorePhotoEventInput,
 } from "./shared.js";
+import { MediaRepositoryContractError } from "./errors.js";
 
 export class MediaEventRepository {
   constructor(private readonly query: QueryClient) {}
@@ -31,15 +31,9 @@ export class MediaEventRepository {
       )
     `;
 
-    return rows[0] ?? buildMediaFinalizeFallback({
-      chat_id: input.chat_id,
-      n: input.turn_no,
-      scene_session_id: input.scene_session_id,
-      scene_turn_no: input.scene_turn_no,
-      media_signature: input.media_signature,
-      price_required: input.price_xtr,
-      panel_message_id: input.panel_message_id,
-    });
+    const row = rows[0];
+    if (!row) throw new MediaRepositoryContractError("media_store_panel");
+    return row;
   }
 
   async storePhotoEvent(input: StorePhotoEventInput): Promise<MediaFinalizeResult> {
@@ -64,15 +58,9 @@ export class MediaEventRepository {
       )
     `;
 
-    return rows[0] ?? buildMediaFinalizeFallback({
-      chat_id: input.chat_id,
-      n: input.turn_no,
-      scene_session_id: input.scene_session_id,
-      scene_turn_no: input.scene_turn_no,
-      media_signature: input.media_signature,
-      price_required: input.price_required,
-      panel_message_id: input.panel_message_id,
-    });
+    const row = rows[0];
+    if (!row) throw new MediaRepositoryContractError("media_store_photo_event");
+    return row;
   }
 
   async finalizeFreePhotoUnlock(
@@ -92,15 +80,11 @@ export class MediaEventRepository {
       )
     `;
 
-    return rows[0] ?? buildMediaFinalizeFallback({
-      chat_id: input.chat_id,
-      n: input.turn_no,
-      scene_session_id: input.scene_session_id,
-      scene_turn_no: input.scene_turn_no,
-      media_signature: input.media_signature,
-      price_required: 0,
-      panel_message_id: input.panel_message_id,
-    });
+    const row = rows[0];
+    if (!row) {
+      throw new MediaRepositoryContractError("media_finalize_free_photo_unlock");
+    }
+    return row;
   }
 
   async recordAbTestDelivered(

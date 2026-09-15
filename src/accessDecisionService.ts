@@ -498,10 +498,7 @@ export class AccessDecisionService {
           ...passthrough,
           ...contextFields,
           decision: "allow_scene",
-          action:
-            classification.intent === "scene_mode"
-              ? "handle_scene_mode"
-              : "run_scene_core",
+          action: "run_scene_core",
           allowed: true,
           reason: accessContext.subscription_active
             ? "subscription_active"

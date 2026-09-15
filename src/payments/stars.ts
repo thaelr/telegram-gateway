@@ -18,6 +18,8 @@ export interface StarsInvoiceClient {
   ): Promise<CreateStarsInvoiceResult>;
 }
 
+export const STARS_INVOICE_REQUEST_TIMEOUT_MS = 20_000;
+
 type TelegramApiErrorPayload = {
   ok?: unknown;
   description?: unknown;
@@ -60,6 +62,10 @@ export class TelegramStarsInvoiceError extends Error {
 }
 
 export class TelegramStarsPaymentAdapter implements StarsInvoiceClient {
+  constructor(
+    private readonly requestTimeoutMs = STARS_INVOICE_REQUEST_TIMEOUT_MS,
+  ) {}
+
   async createStarsInvoice(
     input: CreateStarsInvoiceInput,
   ): Promise<CreateStarsInvoiceResult> {
@@ -73,6 +79,7 @@ export class TelegramStarsPaymentAdapter implements StarsInvoiceClient {
           headers: {
             "content-type": "application/json",
           },
+          signal: AbortSignal.timeout(this.requestTimeoutMs),
           body: JSON.stringify({
             title: input.title,
             description: input.description,

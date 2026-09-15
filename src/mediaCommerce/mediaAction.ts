@@ -15,14 +15,7 @@ import {
   parseJsonArray,
   parseJsonObject,
 } from "./utils.js";
-import { resolvePhotoPlanByAmount } from "./plans.js";
-
-export const PHOTO_ACTIONS = new Set([
-  "photo_request",
-  "photo_regen",
-  "photo_prev",
-  "photo_next",
-]);
+import { resolvePhotoPlanByAmount, UnknownPhotoPriceError } from "./plans.js";
 
 export type MediaActionDecision = {
   operation: "noop" | "edit_photo";
@@ -402,6 +395,9 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   if (unseenAfter > 0) {
     if (nextPrice > 0) {
       const photoPlan = resolvePhotoPlanByAmount(nextPrice);
+      if (!photoPlan) {
+        throw new UnknownPhotoPriceError(nextPrice);
+      }
       finalOperation = "edit_photo";
       invoiceKind = "photo";
       invoiceSku = photoPlan.sku;

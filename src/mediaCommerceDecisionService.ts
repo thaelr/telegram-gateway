@@ -19,6 +19,7 @@ import {
 import {
   INVOICE_PAYLOAD_KIND,
   hasExpectedPaymentDetails,
+  normalizePaymentActionKind,
   normalizePaymentSource,
   type ResolvedInvoiceAction,
   resolveInvoiceActionResult,
@@ -51,6 +52,7 @@ import {
   parseJsonObject,
 } from "./mediaCommerce/utils.js";
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
+import type { UpsertInvoiceTokenInput } from "./mediaCommerceRepository/shared.js";
 import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema.js";
 import { getRequestContext } from "./requestContext.js";
 import { formatFreeBalances } from "./freeBalanceFormatter.js";
@@ -60,6 +62,7 @@ import {
 } from "./payments/stars.js";
 import {
   SbpPaymentAdapter,
+  SbpPaymentError,
   type SbpPaymentClient,
 } from "./payments/sbp.js";
 import type {
@@ -105,6 +108,9 @@ type MediaRepository = Pick<
   | "storeInvoiceLinks"
   | "claimSbpCheckoutCreation"
   | "releaseSbpCheckoutCreation"
+  | "markSbpCheckoutCreationUncertain"
+  | "markSbpInvoiceCanceled"
+  | "recordSbpStatusConflict"
   | "loadStoredInvoiceTokens"
   | "loadAbTestAssignment"
   | "storeAbTestAssignment"
@@ -146,6 +152,19 @@ const SBP_CHECKOUT_WAIT_TIMEOUT_MS = 24_000;
 const SBP_CHECKOUT_WAIT_BACKOFF_MS = [200, 400, 800, 1000, 1500, 2000] as const;
 const FREE_CALLBACK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+function buildSbpGatewayCheckoutUrl(token: string): string {
+  const baseUrl = normalizeString(config.GATEWAY_PUBLIC_URL);
+  if (!baseUrl) {
+    throw new MediaCommerceOperationError(
+      "Gateway public URL is not configured",
+      "payment.buildSbpGatewayCheckoutUrl",
+      "sbp_gateway_url_missing",
+    );
+  }
+
+  return `${baseUrl}/v1/pay/sbp/${encodeURIComponent(token)}`;
+}
+
 function replaceCount(template: string, count: number): string {
   return template.replaceAll("{count}", String(count));
 }
@@ -157,6 +176,60 @@ function buildStableCallbackToken(parts: Array<string | number | null | undefine
     .slice(0, 32);
 
   return `btn_${hash}`;
+}
+
+function getPaymentAttemptBaseToken(input: UpsertInvoiceTokenInput): string {
+  const source = normalizePaymentSource(input.payment_source);
+  const suffix = source ? `:${source}` : "";
+  return suffix && input.token.endsWith(suffix)
+    ? input.token.slice(0, -suffix.length)
+    : input.token;
+}
+
+function buildNextPaymentAttemptInputs(
+  inputs: UpsertInvoiceTokenInput[],
+  rows: StoredInvoiceToken[],
+): UpsertInvoiceTokenInput[] | null {
+  const rowByToken = new Map(rows.map((row) => [row.token, row]));
+  const canceledByBase = new Map<string, StoredInvoiceToken>();
+
+  for (const input of inputs) {
+    const row = rowByToken.get(input.token);
+    if (normalizeString(row?.status) === "canceled") {
+      canceledByBase.set(getPaymentAttemptBaseToken(input), row!);
+    }
+  }
+  if (canceledByBase.size === 0) return null;
+
+  const nextExpiry = new Date(Date.now() + INVOICE_TTL_MS).toISOString();
+  return inputs.map((input) => {
+    const baseToken = getPaymentAttemptBaseToken(input);
+    const canceled = canceledByBase.get(baseToken);
+    if (!canceled) return input;
+
+    const externalPaymentId = normalizeString(canceled.external_payment_id);
+    if (!externalPaymentId) {
+      throw new MediaCommerceOperationError(
+        "Canceled SBP attempt has no external payment id",
+        "payment.rolloverCanceledAttempt",
+        "sbp_canceled_attempt_invalid",
+      );
+    }
+    const retrySuffix = createHash("sha256")
+      .update(`${baseToken}\u001f${canceled.token}\u001f${externalPaymentId}`)
+      .digest("hex")
+      .slice(0, 32);
+    const source = normalizePaymentSource(input.payment_source);
+    const token = `pay_retry_${retrySuffix}${source ? `:${source}` : ""}`;
+    return {
+      ...input,
+      token,
+      telegram_invoice_payload: source === "stars" ? token : null,
+      checkout_url: null,
+      external_payment_id: null,
+      expires_at: nextExpiry,
+    };
+  });
 }
 
 function buildFreeActionTokenRow(input: {
@@ -462,6 +535,31 @@ function toOperationError(operation: string, error: unknown): MediaCommerceOpera
   );
 }
 
+function getSbpPaymentError(error: unknown): SbpPaymentError | null {
+  if (error instanceof SbpPaymentError) return error;
+  if (
+    error instanceof MediaCommerceOperationError
+    && error.cause instanceof SbpPaymentError
+  ) {
+    return error.cause;
+  }
+  return null;
+}
+
+function getSbpCheckoutEligibilityError(row: StoredInvoiceToken): string | null {
+  if (normalizeString(row.kind) !== INVOICE_PAYLOAD_KIND) return "sbp_invoice_kind_invalid";
+  if (normalizePaymentSource(row.payment_source) !== "sbp") return "sbp_payment_source_invalid";
+  if (normalizeString(row.status) !== "invoice_sent") return "sbp_invoice_status_invalid";
+  if (!normalizePaymentActionKind(row.action_kind)) return "sbp_invoice_action_invalid";
+
+  const expiresAt = normalizeString(row.expires_at);
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    return "sbp_invoice_expired";
+  }
+  return null;
+}
+
 function buildPaymentOption(row: StoredInvoiceToken): MediaPaymentOption {
   const paymentSource = normalizePaymentSource(row.payment_source) ?? "stars";
   const paymentCurrency = normalizePaymentCurrency(row.currency)
@@ -681,13 +779,22 @@ function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute 
   if (mode === "finalize_subscription_offer") return "finalize_subscription_offer";
   if (eventType === "callback_query.received") return "callback";
   if (eventType === "payment.pre_checkout.received") return "pre_checkout";
-  if (eventType === "payment.success.received" || eventType === "payment.confirmed.received") {
+  if (
+    eventType === "payment.success.received"
+    || eventType === "payment.confirmed.received"
+    || eventType === "payment.canceled.received"
+  ) {
     return "payment_success";
   }
   return "noop";
 }
 
 export class MediaCommerceDecisionService {
+  private readonly uncertainSbpCheckouts = new Map<
+    string,
+    { external_payment_id: string | null; checkout_url: string | null }
+  >();
+
   constructor(
     private readonly repository: MediaRepository,
     private readonly starsClient: StarsInvoiceClient = new TelegramStarsPaymentAdapter(),
@@ -727,6 +834,49 @@ export class MediaCommerceDecisionService {
     execute: () => Promise<T>,
   ): Promise<T> {
     return this.runOperation(operation, context, execute);
+  }
+
+  private async upsertCurrentPaymentAttempts(
+    inputs: UpsertInvoiceTokenInput[],
+    operationPrefix: string,
+  ): Promise<StoredInvoiceToken[]> {
+    let currentInputs = inputs;
+
+    while (true) {
+      const rows = await this.runRepositoryOperation(
+        `${operationPrefix}.upsertInvoiceTokens`,
+        { chat_id: null, payment_kind: null, sku: null, invoice_status: null },
+        () => this.repository.upsertInvoiceTokens(currentInputs),
+      );
+      const nextInputs = buildNextPaymentAttemptInputs(currentInputs, rows);
+      if (!nextInputs) return rows;
+      currentInputs = nextInputs;
+    }
+  }
+
+  private async persistSbpCheckoutCreationUncertain(
+    token: string,
+    chatId: number,
+    operationPrefix: string,
+    context: OperationLogContext,
+  ): Promise<void> {
+    const updated = await this.runRepositoryOperation(
+      `${operationPrefix}.markCheckoutCreationUncertain`,
+      context,
+      () => this.repository.markSbpCheckoutCreationUncertain(token, chatId),
+    );
+    if (updated !== 1) {
+      console.error("[media_commerce] sbp_checkout_creation_uncertain_not_persisted", {
+        token,
+        chat_id: chatId,
+        updated_count: updated,
+      });
+      throw new MediaCommerceOperationError(
+        "SBP uncertain creation state was not persisted",
+        `${operationPrefix}.markCheckoutCreationUncertain`,
+        "sbp_checkout_uncertain_persistence_failed",
+      );
+    }
   }
 
   private async ensureStarsInvoiceLink(
@@ -801,6 +951,15 @@ export class MediaCommerceDecisionService {
     row: StoredInvoiceToken,
     operationPrefix: string,
   ): Promise<StoredInvoiceToken> {
+    const eligibilityError = getSbpCheckoutEligibilityError(row);
+    if (eligibilityError) {
+      throw new MediaCommerceOperationError(
+        "SBP invoice is not eligible for checkout",
+        `${operationPrefix}.validateCheckoutEligibility`,
+        eligibilityError,
+      );
+    }
+
     const existingCheckout = normalizeString(row.checkout_url);
     const existingExternalPaymentId = normalizeString(row.external_payment_id);
     if (existingCheckout && existingExternalPaymentId) {
@@ -823,13 +982,35 @@ export class MediaCommerceDecisionService {
     const chatId = normalizePositiveInteger(row.chat_id);
     const sku = normalizeString(row.sku);
     const amountRub = normalizePositiveInteger(row.amount);
-    const title = normalizeString(row.invoice_title);
     const description = normalizeString(row.invoice_description);
-    if (!token || !chatId || !sku || !amountRub || !title || !description) {
+    if (!token || !chatId || !amountRub || !description) {
       throw new MediaCommerceOperationError(
         "Stored SBP row is incomplete",
         `${operationPrefix}.createPayment`,
         "sbp_payment_creation_failed",
+      );
+    }
+
+    const uncertain = this.uncertainSbpCheckouts.get(token);
+    if (uncertain) {
+      const reloaded = await this.repository.loadInvoiceToken(token, chatId);
+      if (
+        uncertain.external_payment_id != null
+        && uncertain.checkout_url != null
+        && normalizeString(reloaded?.external_payment_id) === uncertain.external_payment_id
+        && normalizeString(reloaded?.checkout_url) === uncertain.checkout_url
+      ) {
+        this.uncertainSbpCheckouts.delete(token);
+        return {
+          ...row,
+          checkout_url: uncertain.checkout_url,
+          external_payment_id: uncertain.external_payment_id,
+        };
+      }
+      throw new MediaCommerceOperationError(
+        "SBP checkout creation outcome requires reconciliation",
+        `${operationPrefix}.createPayment`,
+        "sbp_checkout_creation_uncertain",
       );
     }
 
@@ -861,13 +1042,27 @@ export class MediaCommerceDecisionService {
       if (claim?.claim_acquired) {
         break;
       }
+      if (claim?.eligible === false) {
+        throw new MediaCommerceOperationError(
+          "SBP invoice became ineligible for checkout",
+          `${operationPrefix}.claimSbpCheckoutCreation`,
+          "sbp_invoice_status_invalid",
+        );
+      }
+      if (claim?.creation_state === "uncertain") {
+        throw new MediaCommerceOperationError(
+          "SBP checkout creation outcome requires reconciliation",
+          `${operationPrefix}.createPayment`,
+          "sbp_checkout_creation_uncertain",
+        );
+      }
 
       const remainingMs = SBP_CHECKOUT_WAIT_TIMEOUT_MS - (Date.now() - waitStartedAt);
       if (remainingMs <= 0) {
         throw new MediaCommerceOperationError(
           "SBP checkout creation is already in progress",
           `${operationPrefix}.createPayment`,
-          "sbp_payment_creation_failed",
+          "sbp_checkout_creation_in_progress",
         );
       }
 
@@ -898,8 +1093,6 @@ export class MediaCommerceDecisionService {
         () => this.sbpClient!.createPayment({
           token,
           chat_id: chatId,
-          sku,
-          title,
           description,
           amount_rub: amountRub,
           metadata: {
@@ -909,35 +1102,92 @@ export class MediaCommerceDecisionService {
         }),
       );
     } catch (error) {
-      await this.runRepositoryOperation(
-        `${operationPrefix}.releaseSbpCheckoutCreation`,
-        {
-          chat_id: chatId,
-          payment_kind: normalizeString(row.action_kind),
-          sku,
-          invoice_status: normalizeString(row.status),
-        },
-        () => this.repository.releaseSbpCheckoutCreation(token, chatId),
-      );
+      const providerError = getSbpPaymentError(error);
+      if (providerError?.outcome === "definite_failure") {
+        await this.runRepositoryOperation(
+          `${operationPrefix}.releaseSbpCheckoutCreation`,
+          claimContext,
+          () => this.repository.releaseSbpCheckoutCreation(token, chatId),
+        );
+      } else {
+        this.uncertainSbpCheckouts.set(token, {
+          external_payment_id: null,
+          checkout_url: null,
+        });
+        await this.persistSbpCheckoutCreationUncertain(
+          token,
+          chatId,
+          operationPrefix,
+          claimContext,
+        );
+        throw new MediaCommerceOperationError(
+          "SBP checkout creation outcome requires reconciliation",
+          `${operationPrefix}.createPayment`,
+          "sbp_checkout_creation_uncertain",
+          { cause: error instanceof Error ? error : undefined },
+        );
+      }
       throw error;
     }
 
-    await this.runRepositoryOperation(
-      `${operationPrefix}.storeCheckout`,
-      {
-        chat_id: chatId,
-        payment_kind: normalizeString(row.action_kind),
-        sku,
-        invoice_status: normalizeString(row.status),
-      },
-      () => this.repository.storeInvoiceLinks([{
+    this.uncertainSbpCheckouts.set(token, created);
+    let updatedCount: number;
+    try {
+      updatedCount = await this.runRepositoryOperation(
+        `${operationPrefix}.storeCheckout`,
+        claimContext,
+        () => this.repository.storeInvoiceLinks([{
+          token,
+          chat_id: chatId,
+          invoice_link: null,
+          checkout_url: created.checkout_url,
+          external_payment_id: created.external_payment_id,
+        }]),
+      );
+    } catch (error) {
+      await this.persistSbpCheckoutCreationUncertain(
         token,
-        chat_id: chatId,
-        invoice_link: null,
-        checkout_url: created.checkout_url,
-        external_payment_id: created.external_payment_id,
-      }]),
+        chatId,
+        operationPrefix,
+        claimContext,
+      );
+      throw new MediaCommerceOperationError(
+        "SBP checkout persistence outcome requires reconciliation",
+        `${operationPrefix}.storeCheckout`,
+        "sbp_checkout_creation_uncertain",
+        { cause: error instanceof Error ? error : undefined },
+      );
+    }
+    if (updatedCount !== 1) {
+      await this.persistSbpCheckoutCreationUncertain(
+        token,
+        chatId,
+        operationPrefix,
+        claimContext,
+      );
+      throw new MediaCommerceOperationError(
+        "SBP checkout was not persisted to the expected invoice",
+        `${operationPrefix}.storeCheckout`,
+        "sbp_checkout_creation_uncertain",
+      );
+    }
+
+    const saved = await this.runRepositoryOperation(
+      `${operationPrefix}.reloadCheckout`,
+      claimContext,
+      () => this.repository.loadInvoiceToken(token, chatId),
     );
+    if (
+      normalizeString(saved?.external_payment_id) !== created.external_payment_id
+      || normalizeString(saved?.checkout_url) !== created.checkout_url
+    ) {
+      throw new MediaCommerceOperationError(
+        "Persisted SBP checkout does not match provider response",
+        `${operationPrefix}.reloadCheckout`,
+        "sbp_checkout_persistence_failed",
+      );
+    }
+    this.uncertainSbpCheckouts.delete(token);
 
     return {
       ...row,
@@ -946,12 +1196,67 @@ export class MediaCommerceDecisionService {
     };
   }
 
-  private async ensureStoredPaymentReady(
+  async resolveSbpCheckout(tokenInput: string): Promise<string> {
+    const token = normalizeString(tokenInput);
+    if (!token) {
+      throw new MediaCommerceOperationError(
+        "SBP invoice token is required",
+        "sbpRedirect.loadInvoiceToken",
+        "sbp_invoice_not_found",
+      );
+    }
+
+    const rows = await this.runRepositoryOperation(
+      "sbpRedirect.loadInvoiceToken",
+      {
+        chat_id: null,
+        payment_kind: null,
+        sku: null,
+        invoice_status: null,
+      },
+      () => this.repository.loadStoredInvoiceTokens([token]),
+    );
+    const row = rows.find((candidate) => candidate.token === token);
+
+    if (!row) {
+      throw new MediaCommerceOperationError(
+        "SBP invoice token was not found",
+        "sbpRedirect.loadInvoiceToken",
+        "sbp_invoice_not_found",
+      );
+    }
+    const eligibilityError = getSbpCheckoutEligibilityError(row);
+    if (eligibilityError) {
+      throw new MediaCommerceOperationError(
+        "Invoice token is not eligible for SBP checkout",
+        "sbpRedirect.validateCheckoutEligibility",
+        eligibilityError,
+      );
+    }
+
+    const ready = await this.ensureSbpCheckout(row, "sbpRedirect");
+    const checkoutUrl = normalizeString(ready.checkout_url);
+    if (!checkoutUrl) {
+      throw new MediaCommerceOperationError(
+        "SBP checkout URL was not created",
+        "sbpRedirect.createPayment",
+        "sbp_payment_creation_failed",
+      );
+    }
+
+    return checkoutUrl;
+  }
+
+  private async prepareStoredPaymentOptions(
     row: StoredInvoiceToken,
     operationPrefix: string,
   ): Promise<StoredInvoiceToken> {
     return normalizePaymentSource(row.payment_source) === "sbp"
-      ? this.ensureSbpCheckout(row, operationPrefix)
+      ? {
+          ...row,
+          checkout_url: buildSbpGatewayCheckoutUrl(row.token),
+          external_payment_id: null,
+        }
       : this.ensureStarsInvoiceLink(row, operationPrefix);
   }
 
@@ -1048,7 +1353,7 @@ export class MediaCommerceDecisionService {
       return [];
     }
 
-    const rows = await this.repository.upsertInvoiceTokens(
+    const rows = await this.upsertCurrentPaymentAttempts(
       buildSceneUnlockPaymentInputs({
         chat_id: input.chat_id,
         scene_session_id: input.scene_session_id,
@@ -1058,9 +1363,10 @@ export class MediaCommerceDecisionService {
         plan,
         ab_test: toAbTestContext(abSelection),
       }),
+      "sceneUnlock.click",
     );
     const readyRows = await Promise.all(
-      rows.map((row) => this.ensureStoredPaymentReady(row, "sceneUnlock.click")),
+      rows.map((row) => this.prepareStoredPaymentOptions(row, "sceneUnlock.click")),
     );
 
     return buildOfferItem(readyRows)?.payment_options ?? [];
@@ -1112,6 +1418,13 @@ export class MediaCommerceDecisionService {
     panel_entities_json: unknown[];
   }): Promise<MediaPaymentOption[]> {
     const plan = resolvePhotoPlanByAmount(input.base_price_xtr);
+    if (!plan) {
+      throw new MediaCommerceOperationError(
+        `Unknown configured photo price: ${input.base_price_xtr}`,
+        "photoUnlock.resolvePlan",
+        "unknown_photo_price",
+      );
+    }
     const stored = await this.repository.upsertInvoiceToken(
       buildPhotoInvoiceInput({
         token: `photo-unlock-click:${input.token}`,
@@ -1356,15 +1669,15 @@ export class MediaCommerceDecisionService {
 
     const featureKey = normalizeString(input.feature_key) ?? "fast_scene_skip";
     const freeFastSkipButton =
-      config.TELEGRAM_UX_COPY_JSON.free_actions?.fast_scene_skip_button;
+      config.TELEGRAM_UX_COPY_JSON.free_actions.fast_scene_skip_button;
     const freeCredits =
-      featureKey === "fast_scene_skip" && freeFastSkipButton
+      featureKey === "fast_scene_skip"
         ? await this.repository.loadFreeCredits(chatId)
         : null;
     const sceneSessionId =
       normalizeString(input.scene_session_id)
       ?? normalizeString(freeCredits?.active_scene_session_id);
-    if (featureKey === "fast_scene_skip" && sceneSessionId && freeFastSkipButton) {
+    if (featureKey === "fast_scene_skip" && sceneSessionId) {
       const freeFastSkips = Math.max(0, Number(freeCredits?.free_fast_scene_skips ?? 0));
       if (freeFastSkips > 0) {
         const tokenRow = buildFreeActionTokenRow({
@@ -1401,7 +1714,7 @@ export class MediaCommerceDecisionService {
 
     const actionPlan = resolveActionPlanByFeatureKey(featureKey);
     const storedFeatureInvoices = actionPlan
-      ? await this.repository.upsertInvoiceTokens(
+      ? await this.upsertCurrentPaymentAttempts(
         buildFeaturePaymentInputs({
           chat_id: chatId,
           scene_session_id: normalizeString(input.scene_session_id),
@@ -1424,10 +1737,12 @@ export class MediaCommerceDecisionService {
           requested_action: `${featureKey}_purchase`,
           plan: actionPlan,
         }),
+        "featureOffer",
       )
       : [];
     const featureInvoices = await Promise.all(
-      storedFeatureInvoices.map((row) => this.ensureStoredPaymentReady(row, "featureOffer")),
+      storedFeatureInvoices.map((row) =>
+        this.prepareStoredPaymentOptions(row, "featureOffer")),
     );
     const featureInvoice = selectLegacyPrimaryRow(featureInvoices);
     const featurePaymentOptions = featureInvoices
@@ -2407,6 +2722,9 @@ export class MediaCommerceDecisionService {
     input: MediaCommerceDecisionRequest,
   ): Promise<MediaCommerceDecisionResponse> {
     const base = buildBaseResponse(input, "payment_success");
+    if (normalizeString(input.event_type) === "payment.canceled.received") {
+      return this.evaluateExternalPaymentCancellation(base, input);
+    }
     const inputPaymentSource = normalizePaymentSource(input.payment_source);
     if (
       inputPaymentSource === "sbp"
@@ -2629,6 +2947,79 @@ export class MediaCommerceDecisionService {
     return this.fulfillPhotoPayment(base, paidRow, payload);
   }
 
+  private async evaluateExternalPaymentCancellation(
+    base: MediaCommerceDecisionResponse,
+    input: MediaCommerceDecisionRequest,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const externalPaymentId = normalizeString(input.external_payment_id);
+    if (!externalPaymentId) {
+      return { ...base, payment_source: "sbp", reason: "external_payment_id_required" };
+    }
+
+    const loaded = await this.runRepositoryOperation(
+      "payment.external.loadCanceledInvoice",
+      { chat_id: null, payment_kind: null, sku: null, invoice_status: null },
+      () => this.repository.loadInvoiceTokenByExternalPaymentId(externalPaymentId),
+    );
+    if (!loaded?.found || !loaded.token) {
+      return { ...base, payment_source: "sbp", reason: "payment_not_found" };
+    }
+    if (
+      normalizeString(loaded.external_payment_id) !== externalPaymentId
+      || normalizePaymentSource(loaded.payment_source) !== "sbp"
+      || normalizeString(loaded.kind) !== INVOICE_PAYLOAD_KIND
+    ) {
+      return { ...base, payment_source: "sbp", reason: "payment_not_found" };
+    }
+
+    const status = normalizeString(loaded.status);
+    if (status === "canceled") {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        payment_source: "sbp",
+        payment_token: loaded.token,
+        reason: "payment_already_canceled",
+      };
+    }
+    if (status !== "invoice_sent") {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        payment_source: "sbp",
+        payment_token: loaded.token,
+        reason: "invoice_status_invalid",
+      };
+    }
+
+    const updated = await this.runRepositoryOperation(
+      "payment.external.markInvoiceCanceled",
+      {
+        chat_id: normalizePositiveInteger(loaded.chat_id),
+        payment_kind: normalizeString(loaded.action_kind),
+        sku: normalizeString(loaded.sku),
+        invoice_status: status,
+      },
+      () => this.repository.markSbpInvoiceCanceled(externalPaymentId),
+    );
+    if (updated !== 1) {
+      const reloaded = await this.repository.loadInvoiceTokenByExternalPaymentId(
+        externalPaymentId,
+      );
+      if (normalizeString(reloaded?.status) !== "canceled") {
+        return { ...base, payment_source: "sbp", reason: "payment_not_canceled" };
+      }
+    }
+
+    return {
+      ...base,
+      chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+      payment_source: "sbp",
+      payment_token: loaded.token,
+      reason: "payment_canceled",
+    };
+  }
+
   private async evaluateExternalPaymentSuccess(
     base: MediaCommerceDecisionResponse,
     input: MediaCommerceDecisionRequest,
@@ -2683,6 +3074,17 @@ export class MediaCommerceDecisionService {
       };
     }
 
+    if (normalizeString(loaded.external_payment_id) !== externalPaymentId) {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        reason: "payment_not_found",
+      };
+    }
+
     const payload = parseJsonObject(loaded.payload_json) ?? {};
     const loadedToken = loaded.token;
     const loadedChatId = normalizePositiveInteger(loaded.chat_id);
@@ -2700,7 +3102,47 @@ export class MediaCommerceDecisionService {
 
     const resolvedAction = actionResolution.action;
     const existingStatus = normalizeString(loaded.status);
-
+    if (existingStatus === "canceled") {
+      await this.runRepositoryOperation(
+        "payment.external.recordStatusConflict",
+        {
+          chat_id: loadedChatId,
+          payment_kind: resolvedAction.payment_kind,
+          sku: normalizeString(loaded.sku),
+          invoice_status: existingStatus,
+        },
+        () => this.repository.recordSbpStatusConflict(externalPaymentId, "CONFIRMED"),
+      );
+      console.error("[media_commerce] sbp_status_conflict", {
+        external_payment_id: externalPaymentId,
+        local_status: existingStatus,
+        provider_status: "CONFIRMED",
+      });
+      return {
+        ...base,
+        chat_id: loadedChatId ?? base.chat_id,
+        payment_source: "sbp",
+        payment_kind: resolvedAction.payment_kind,
+        payment_token: loaded.token,
+        feature_key: resolvedAction.feature_key,
+        reason: "payment_status_conflict",
+      };
+    }
+    if (
+      normalizeString(loaded.currency ?? "RUB") !== "RUB"
+      || normalizeString(input.payment_currency) !== "RUB"
+    ) {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        payment_kind: resolvedAction.payment_kind,
+        feature_key: resolvedAction.feature_key,
+        reason: "payment_details_mismatch",
+      };
+    }
 
     if (existingStatus === "fulfilled") {
       return {
@@ -3264,14 +3706,15 @@ export class MediaCommerceDecisionService {
         ab_test: abContext,
       }));
 
-    const upsertedRows = await this.repository.upsertInvoiceTokens(
+    const upsertedRows = await this.upsertCurrentPaymentAttempts(
       invoiceInputs,
+      "subscription",
     );
     const tokenList = upsertedRows.map((row) => row.token);
     const rows = await Promise.all(
       upsertedRows.map((row) =>
-        this.ensureStoredPaymentReady(row, "subscription")),
-      );
+        this.prepareStoredPaymentOptions(row, "subscription")),
+    );
 
     const sortedRows = rows
       .slice()

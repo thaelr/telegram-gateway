@@ -247,6 +247,20 @@ export class MediaInteractionTokenRepository {
     return rows[0]?.updated_count ?? 0;
   }
 
+  async markSbpCheckoutCreationUncertain(
+    token: string,
+    chatId: number,
+  ): Promise<number> {
+    const rows = await this.query<Array<{ updated_count: number }>>`
+      SELECT public.media_mark_sbp_checkout_creation_uncertain(
+        ${token}::text,
+        ${chatId}::bigint
+      ) AS updated_count
+    `;
+
+    return rows[0]?.updated_count ?? 0;
+  }
+
   async loadStoredInvoiceTokens(tokens: string[]): Promise<StoredInvoiceToken[]> {
     if (tokens.length === 0) {
       return [];

@@ -47,6 +47,7 @@ const routerRequestSchema = z.object({
 
 type RouterDecisionEvaluator = Pick<AccessDecisionService, "evaluate">;
 type MediaCommerceDecisionEvaluator = Pick<MediaCommerceDecisionService, "evaluate">;
+type SbpCheckoutResolver = Pick<MediaCommerceDecisionService, "resolveSbpCheckout">;
 type RewardClaimer = Pick<
   RewardService,
   "claimReward" | "claimConfiguredSlot" | "assignConfiguredSlot" | "bindGrantMessage"
@@ -55,6 +56,7 @@ type RewardClaimer = Pick<
 type BuildAppOptions = {
   accessDecisionService?: RouterDecisionEvaluator;
   mediaCommerceDecisionService?: MediaCommerceDecisionEvaluator;
+  sbpCheckoutService?: SbpCheckoutResolver;
   rewardService?: RewardClaimer;
   logger?: boolean;
 };
@@ -80,15 +82,27 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   const accessDecisionService = options.accessDecisionService
     ?? new AccessDecisionService(new ChatAccessRepository());
+  const defaultMediaCommerceService =
+    options.mediaCommerceDecisionService == null || options.sbpCheckoutService == null
+      ? new MediaCommerceDecisionService(new MediaCommerceRepository())
+      : null;
   const mediaCommerceDecisionService = options.mediaCommerceDecisionService
-    ?? new MediaCommerceDecisionService(new MediaCommerceRepository());
+    ?? defaultMediaCommerceService!;
+  const sbpCheckoutService = options.sbpCheckoutService
+    ?? defaultMediaCommerceService!;
   const rewardService = options.rewardService
     ?? new RewardService(new RewardRepository(), config.REWARD_SLOTS_JSON);
 
   app.get("/healthz", async () => ({ ok: true }));
 
   app.addHook("onRequest", async (request, reply) => {
-    if (!request.raw.url?.startsWith("/v1/")) {
+    const isPublicSbpRedirect =
+      request.method === "GET"
+      && /^\/v1\/pay\/sbp\/[^/?]+(?:\?.*)?$/u.test(request.raw.url ?? "");
+    if (
+      !request.raw.url?.startsWith("/v1/")
+      || isPublicSbpRedirect
+    ) {
       return;
     }
 
@@ -168,6 +182,44 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.post("/v1/router-decision", handleRouterDecision);
   app.post("/v1/media-commerce-decision", handleMediaCommerceDecision);
+  app.get("/v1/pay/sbp/:token", async (request, reply) => {
+    const parsed = z.object({
+      token: z.string().trim().min(1),
+    }).safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(404).send({ error: "payment_not_found" });
+    }
+
+    try {
+      const checkoutUrl = await runWithRequestContext(
+        { requestId: request.id },
+        () => sbpCheckoutService.resolveSbpCheckout(parsed.data.token),
+      );
+      return reply.redirect(checkoutUrl, 302);
+    } catch (error) {
+      if (!(error instanceof MediaCommerceOperationError)) throw error;
+
+      if (error.code === "sbp_invoice_not_found") {
+        return reply.status(404).send({ error: "payment_not_found" });
+      }
+      if ([
+        "sbp_invoice_kind_invalid",
+        "sbp_payment_source_invalid",
+        "sbp_invoice_status_invalid",
+        "sbp_invoice_action_invalid",
+        "sbp_invoice_expired",
+      ].includes(error.code ?? "")) {
+        return reply.status(410).send({ error: "payment_unavailable" });
+      }
+      if (error.code === "sbp_checkout_creation_in_progress") {
+        return reply.status(409).send({ error: "payment_creation_in_progress" });
+      }
+      if (error.code === "sbp_checkout_creation_uncertain") {
+        return reply.status(503).send({ error: "payment_reconciliation_required" });
+      }
+      throw error;
+    }
+  });
   app.post("/v1/rewards/claim-slot", async (request, reply) => {
     const parsed = z.object({
       chat_id: z.coerce.number().int().positive(),

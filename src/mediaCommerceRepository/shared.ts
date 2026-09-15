@@ -70,6 +70,8 @@ export type SbpCheckoutCreationClaim = {
   checkout_url: string | null;
   external_payment_id: string | null;
   claim_acquired: boolean;
+  creation_state?: "idle" | "creating" | "uncertain" | "created" | null;
+  eligible?: boolean;
 };
 
 export type StorePanelInput = SceneTurnRef & {
@@ -215,73 +217,4 @@ export function parseJsonObject(value: unknown): Record<string, unknown> | null 
 
 export function asJsonValue(value: unknown): JSONValue {
   return value as JSONValue;
-}
-
-export function buildEmptyOfferStats(input: LoadOfferStatsInput): MediaOfferStats {
-  return {
-    chat_id: input.chat_id,
-    scene_session_id: input.scene_session_id,
-    turn_no: input.turn_no,
-    scene_turn_no: input.scene_turn_no,
-    media_signature: input.media_signature,
-    base_price_xtr: input.base_price_xtr,
-    should_offer: input.should_offer,
-    subscription_active: false,
-    subscription_sku: null,
-    subscription_until: null,
-    scene_access_active: false,
-    delivered_in_scene: 0,
-    total_available: 0,
-    unseen_available: 0,
-    existing_panel_message_id: null,
-  };
-}
-
-export function buildEmptyMediaContext(input: LoadMediaContextInput): MediaContext {
-  return {
-    chat_id: input.chat_id,
-    scene_session_id: input.scene_session_id,
-    turn_no: input.turn_no,
-    scene_turn_no: input.scene_turn_no,
-    media_signature: input.media_signature,
-    current_uuid: input.current_uuid,
-    target_message_id: input.target_message_id,
-    base_price_xtr: input.base_price_xtr,
-    action_kind: input.action_kind,
-    requested_action: input.requested_action,
-    invoice_token: input.invoice_token,
-    force_deliver_after_payment: input.force_deliver_after_payment,
-    paid_access_mode: input.paid_access_mode,
-    callback_valid: input.callback_valid,
-    panel_text: input.panel_text,
-    panel_entities_json: input.panel_entities_json,
-    subscription_active: false,
-    subscription_sku: null,
-    subscription_until: null,
-    scene_access_active: false,
-    delivered_in_scene: 0,
-    total_available: 0,
-    unseen_available: 0,
-    unlocked_items_json: [],
-    next_unseen_json: null,
-  };
-}
-
-export function buildMediaFinalizeFallback(
-  input: Pick<
-    MediaFinalizeResult,
-    | "chat_id"
-    | "n"
-    | "scene_session_id"
-    | "scene_turn_no"
-    | "media_signature"
-    | "price_required"
-    | "panel_message_id"
-  >,
-): MediaFinalizeResult {
-  return {
-    ...input,
-    stored_count: 0,
-    invoice_rows_updated: 0,
-  };
 }
