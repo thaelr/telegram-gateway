@@ -2341,6 +2341,10 @@ test("free scene unlock callback creates current paid options when no free credi
   assert.equal(result.payment_options?.[0]?.amount, 80);
   assert.equal(result.payment_options?.[0]?.checkout_url, "https://t.me/generated-invoice-1");
   assert.equal(calls.createStarsInvoice, 1);
+  const sceneInvoiceInput = calls.createStarsInvoiceInputs[0] as { payload: string };
+  assert.match(sceneInvoiceInput.payload, /^stars_[0-9a-f]{64}$/u);
+  assert.ok(Buffer.byteLength(sceneInvoiceInput.payload, "utf8") <= 128);
+  assert.notEqual(sceneInvoiceInput.payload, "scene-unlock-entry");
   assert.equal(calls.redeemFreeSceneUnlock, 1);
   assert.equal(calls.loadMediaContext, 0);
 });

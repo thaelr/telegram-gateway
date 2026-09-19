@@ -8,6 +8,7 @@ import { config } from "../config.js";
 import type { UpsertInvoiceTokenInput } from "../mediaCommerceRepository/shared.js";
 import {
   buildRandomToken,
+  buildTelegramInvoicePayload,
   INVOICE_TTL_MS,
   normalizeLowerString,
   normalizePositiveInteger,
@@ -189,7 +190,7 @@ export function buildPhotoInvoiceInput(input: {
     amount: input.amount_xtr,
     currency: "XTR",
     amount_xtr: input.amount_xtr,
-    telegram_invoice_payload: token,
+    telegram_invoice_payload: buildTelegramInvoicePayload(token),
     checkout_url: null,
     external_payment_id: null,
     expires_at: new Date(Date.now() + INVOICE_TTL_MS).toISOString(),

@@ -340,7 +340,7 @@ test("loadCallbackToken delegates to media_load_interaction_token with fixed sha
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_interaction_token\(/u);
 });
 
-test("loadInvoiceToken delegates to media_load_interaction_token and preserves invoice fields", async () => {
+test("loadInvoiceToken delegates to payload-aware media_load_invoice_token and preserves invoice fields", async () => {
   const { query, calls } = createTaggedQueryStub([[
     {
       requested_token: "inv-1",
@@ -367,7 +367,7 @@ test("loadInvoiceToken delegates to media_load_interaction_token and preserves i
   assert.equal(result?.sku, "payment_media_1");
   assert.equal(result?.amount_xtr, 10);
   assert.equal(result?.telegram_invoice_message_id, 777);
-  assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_interaction_token\(/u);
+  assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_invoice_token\(/u);
 });
 
 test("loadInvoiceTokenByExternalPaymentId delegates to dedicated lookup and preserves invoice fields", async () => {

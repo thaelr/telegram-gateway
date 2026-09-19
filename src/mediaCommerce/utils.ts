@@ -1,4 +1,10 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+
+export const TELEGRAM_INVOICE_PAYLOAD_MAX_BYTES = 128;
+
+export function buildTelegramInvoicePayload(paymentToken: string): string {
+  return `stars_${createHash("sha256").update(paymentToken).digest("hex")}`;
+}
 
 export function normalizeString(value: string | null | undefined): string | null {
   if (value == null) return null;

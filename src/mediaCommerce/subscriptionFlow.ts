@@ -7,7 +7,7 @@ import type {
   PaymentCurrency,
   PaymentSource,
 } from "../mediaCommerceTypes.js";
-import { INVOICE_TTL_MS } from "./utils.js";
+import { buildTelegramInvoicePayload, INVOICE_TTL_MS } from "./utils.js";
 
 type CommercePlan = {
   sku: string;
@@ -82,7 +82,9 @@ function buildPaymentInputRow(input: {
     amount,
     currency,
     amount_xtr: isStars ? input.plan.amount_xtr : null,
-    telegram_invoice_payload: isStars ? input.token : null,
+    telegram_invoice_payload: isStars
+      ? buildTelegramInvoicePayload(input.token)
+      : null,
     checkout_url: null,
     external_payment_id: null,
     expires_at: input.expires_at,

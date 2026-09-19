@@ -138,7 +138,14 @@ export class MediaInteractionTokenRepository {
     token: string | null,
     chatId: number | null,
   ): Promise<LoadedInvoiceToken | null> {
-    const row = await this.loadInteractionToken(token, chatId);
+    const rows = await this.query<LoadedInvoiceToken[]>`
+      SELECT *
+      FROM public.media_load_invoice_token(
+        ${token}::text,
+        ${chatId}::bigint
+      )
+    `;
+    const row = rows[0] ?? null;
     return row
       ? {
           requested_token: row.requested_token,

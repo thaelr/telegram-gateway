@@ -159,6 +159,21 @@ test("deployed SBP base migration remains immutable and lifecycle changes stay i
   );
 });
 
+test("Stars payload migration provides a unique payload lookup without exposing internal tokens", async () => {
+  const migration = await loadSbpMigration(
+    "20260920010000_stars_invoice_payload_identifier.sql",
+  );
+
+  assert.match(migration, /uq_interaction_tokens_telegram_invoice_payload_invoice/u);
+  assert.match(migration, /'stars_' \|\| encode\(extensions\.digest\(t\.token, 'sha256'\), 'hex'\)/u);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.media_load_invoice_token/u);
+  assert.match(
+    migration,
+    /candidate\.token = i\.requested_token[\s\S]*candidate\.telegram_invoice_payload = i\.requested_token/u,
+  );
+  assert.match(migration, /t\.kind = 'invoice_payload'/u);
+});
+
 async function loadRouterWorkflow(): Promise<Workflow> {
   const workflowPath = path.resolve(
     process.cwd(),

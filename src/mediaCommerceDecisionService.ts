@@ -41,6 +41,7 @@ import {
 } from "./mediaCommerce/plans.js";
 import {
   INVOICE_TTL_MS,
+  buildTelegramInvoicePayload,
   extractPanelFromRawUpdate,
   isExpired,
   normalizeBoolean,
@@ -225,7 +226,9 @@ function buildNextPaymentAttemptInputs(
     return {
       ...input,
       token,
-      telegram_invoice_payload: source === "stars" ? token : null,
+      telegram_invoice_payload: source === "stars"
+        ? buildTelegramInvoicePayload(token)
+        : null,
       checkout_url: null,
       external_payment_id: null,
       expires_at: nextExpiry,
