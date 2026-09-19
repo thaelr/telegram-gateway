@@ -104,6 +104,7 @@ const { MediaCommerceDecisionService } = await import(
 );
 const { config } = await import("../src/config.js");
 const { SbpPaymentError } = await import("../src/payments/sbp.js");
+const { TelegramStarsInvoiceError } = await import("../src/payments/stars.js");
 const {
   buildAssignment,
   loadExperimentConfigsFromEnv,
@@ -647,6 +648,7 @@ function createRepository(
           kind?: string;
           chat_id?: number;
           payload_json?: Record<string, unknown>;
+          action_kind?: string;
           sku?: string;
           payment_source?: "stars" | "sbp";
           amount?: number | null;
@@ -669,6 +671,7 @@ function createRepository(
           turn_no: null,
           scene_turn_no: null,
           payload_json: row.payload_json ?? {},
+          action_kind: row.action_kind ?? "photo_payment",
           sku: row.sku ?? `payment_plan_${index + 1}`,
           payment_source: row.payment_source ?? "stars",
           amount: row.amount ?? row.amount_xtr ?? (index + 1) * 100,
@@ -2340,6 +2343,102 @@ test("free scene unlock callback creates current paid options when no free credi
   assert.equal(calls.createStarsInvoice, 1);
   assert.equal(calls.redeemFreeSceneUnlock, 1);
   assert.equal(calls.loadMediaContext, 0);
+});
+
+test("Stars invoice creation logs safe provider details and invoice context", async () => {
+  const tokenPayload = {
+    action_kind: "free_scene_unlock",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    target_message_id: 777,
+    feature_key: "scene_unlock",
+  };
+  const capturedErrors: unknown[][] = [];
+  const originalConsoleError = console.error;
+  const { service } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "scene-unlock-entry",
+        action_kind: "free_scene_unlock",
+        payload_json: tokenPayload,
+      });
+    },
+    async redeemFreeSceneUnlock(token, chatId) {
+      return {
+        token,
+        chat_id: chatId,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json: tokenPayload,
+        action_kind: "free_scene_unlock",
+        status: "active",
+        redeemed: false,
+        already_consumed: false,
+        already_fulfilled: false,
+        remaining_credits: 0,
+        reason: "free_credit_unavailable",
+      };
+    },
+  }, {
+    async createStarsInvoice() {
+      throw new TelegramStarsInvoiceError(
+        "Telegram Stars API returned a non-success HTTP status",
+        "response",
+        400,
+        "Bad Request: invoice title is invalid",
+        {
+          ok: false,
+          error_code: 400,
+          description: "Bad Request: invoice title is invalid",
+          result: "sensitive-result",
+          payload: "sensitive-payload",
+          api_url: "https://api.telegram.org/botSECRET/createInvoiceLink",
+        },
+      );
+    },
+  });
+
+  console.error = (...args: unknown[]) => capturedErrors.push(args);
+  try {
+    await assert.rejects(() => service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "scene-unlock-entry",
+      inbound_message_id: 777,
+    })));
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(capturedErrors.length, 1);
+  assert.equal(capturedErrors[0]?.[0], "[media_commerce] sceneUnlock.click.createInvoiceLink");
+  assert.deepEqual(capturedErrors[0]?.[1], {
+    request_id: null,
+    operation: "sceneUnlock.click.createInvoiceLink",
+    status: "error",
+    duration_ms: (capturedErrors[0]?.[1] as { duration_ms: number }).duration_ms,
+    chat_id: 101,
+    payment_kind: "feature_payment",
+    sku: "payment_action_2",
+    amount_xtr: 80,
+    title: "text",
+    label: "text",
+    invoice_status: "invoice_sent",
+    code: "stars_invoice_creation_failed",
+    message: "Telegram Stars API returned a non-success HTTP status",
+    stage: "response",
+    statusCode: 400,
+    description: "Bad Request: invoice title is invalid",
+    details: {
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: invoice title is invalid",
+    },
+  });
+  const serializedLog = JSON.stringify(capturedErrors);
+  assert.doesNotMatch(serializedLog, /sensitive-result|sensitive-payload|botSECRET|api\.telegram\.org/u);
 });
 
 test("free photo unlock callback redeems current credit and delivers the photo", async () => {
@@ -6103,6 +6202,43 @@ test("CONFIRMED after local cancellation records an explicit status conflict", a
   }
   assert.equal(calls.recordSbpStatusConflict, 1);
   assert.equal(calls.markInvoicePaid, 0);
+});
+
+test("CONFIRMED after cancellation fails closed when status conflict is not persisted", async () => {
+  const externalPaymentId = "sbp-conflict-not-persisted";
+  const { service } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId() {
+      return buildLoadedInvoiceToken({
+        payment_source: "sbp",
+        currency: "RUB",
+        external_payment_id: externalPaymentId,
+        status: "canceled",
+        action_kind: "subscription_payment",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 7,
+          subscription_sku: "payment_plan_7",
+        },
+      });
+    },
+    async recordSbpStatusConflict() {
+      return 0;
+    },
+  });
+
+  await assert.rejects(
+    () => service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.confirmed.received",
+      payment_source: "sbp",
+      external_payment_id: externalPaymentId,
+      payment_currency: "RUB",
+      payment_total_amount: 199,
+    })),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "sbp_status_conflict_persistence_failed",
+  );
 });
 
 test("late CONFIRMED is not rejected solely because the offer expired", async () => {

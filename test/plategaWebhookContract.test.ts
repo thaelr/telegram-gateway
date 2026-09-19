@@ -68,7 +68,7 @@ async function loadWorkflowRaw(): Promise<string> {
   return readFile(workflowPath, "utf8");
 }
 
-async function loadSbpMigration(): Promise<string> {
+async function loadSbpMigration(name: string): Promise<string> {
   const migrationPath = path.resolve(
     process.cwd(),
     "..",
@@ -77,13 +77,15 @@ async function loadSbpMigration(): Promise<string> {
     "MP-DB",
     "supabase",
     "migrations",
-    "20260904_media_commerce_sbp.sql",
+    name,
   );
   return readFile(migrationPath, "utf8");
 }
 
 test("SBP paid claim validates external id and RUB currency without amount equality", async () => {
-  const migration = await loadSbpMigration();
+  const migration = await loadSbpMigration(
+    "20260915165838_media_commerce_sbp_lifecycle_followup.sql",
+  );
   const functionStart = migration.indexOf(
     "CREATE OR REPLACE FUNCTION public.media_mark_invoice_paid",
   );
@@ -105,7 +107,9 @@ test("SBP paid claim validates external id and RUB currency without amount equal
 });
 
 test("SBP migration makes checkout claims lifecycle-safe and ambiguous outcomes durable", async () => {
-  const migration = await loadSbpMigration();
+  const migration = await loadSbpMigration(
+    "20260915165838_media_commerce_sbp_lifecycle_followup.sql",
+  );
   const claimStart = migration.indexOf(
     "CREATE OR REPLACE FUNCTION public.media_claim_sbp_checkout_creation",
   );
@@ -132,6 +136,27 @@ test("SBP migration makes checkout claims lifecycle-safe and ambiguous outcomes 
   assert.match(migration, /media_mark_sbp_checkout_creation_uncertain/u);
   assert.match(migration, /media_mark_sbp_invoice_canceled/u);
   assert.match(migration, /media_record_sbp_status_conflict/u);
+});
+
+test("deployed SBP base migration remains immutable and lifecycle changes stay in follow-up", async () => {
+  const baseMigration = await loadSbpMigration("20260904_media_commerce_sbp.sql");
+  const followUpMigration = await loadSbpMigration(
+    "20260915165838_media_commerce_sbp_lifecycle_followup.sql",
+  );
+
+  assert.doesNotMatch(baseMigration, /sbp_checkout_creation_state/u);
+  assert.doesNotMatch(baseMigration, /media_mark_sbp_checkout_creation_uncertain/u);
+  assert.doesNotMatch(baseMigration, /media_mark_sbp_invoice_canceled/u);
+  assert.doesNotMatch(baseMigration, /media_record_sbp_status_conflict/u);
+  assert.match(
+    baseMigration,
+    /COALESCE\(t\.amount, t\.amount_xtr\) = p_payment_total_amount/u,
+  );
+  assert.match(followUpMigration, /sbp_checkout_creation_state/u);
+  assert.doesNotMatch(
+    followUpMigration,
+    /COALESCE\(t\.amount, t\.amount_xtr\) = p_payment_total_amount/u,
+  );
 });
 
 async function loadRouterWorkflow(): Promise<Workflow> {
@@ -497,6 +522,14 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
   assert.match(
     String(terminalRoute?.parameters?.output ?? ""),
     /feature_fast_scene_skip_config_missing/u,
+  );
+  assert.match(
+    String(terminalRoute?.parameters?.output ?? ""),
+    /subscription_already_activated/u,
+  );
+  assert.match(
+    String(terminalRoute?.parameters?.output ?? ""),
+    /payment_status_conflict/u,
   );
   assert.match(
     String(cancellationValidation?.parameters?.jsCode ?? ""),

@@ -57,6 +57,7 @@ import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema
 import { getRequestContext } from "./requestContext.js";
 import { formatFreeBalances } from "./freeBalanceFormatter.js";
 import {
+  TelegramStarsInvoiceError,
   TelegramStarsPaymentAdapter,
   type StarsInvoiceClient,
 } from "./payments/stars.js";
@@ -535,6 +536,24 @@ function toOperationError(operation: string, error: unknown): MediaCommerceOpera
   );
 }
 
+function toSafeTelegramStarsDetails(details: unknown): Record<string, unknown> | null {
+  if (typeof details !== "object" || details == null || Array.isArray(details)) {
+    return null;
+  }
+
+  const source = details as Record<string, unknown>;
+  const safeDetails: Record<string, unknown> = {};
+  if (typeof source.ok === "boolean") safeDetails.ok = source.ok;
+  if (typeof source.error_code === "number" && Number.isInteger(source.error_code)) {
+    safeDetails.error_code = source.error_code;
+  }
+  if (typeof source.description === "string" && source.description.trim().length > 0) {
+    safeDetails.description = source.description.trim();
+  }
+
+  return Object.keys(safeDetails).length > 0 ? safeDetails : null;
+}
+
 function getSbpPaymentError(error: unknown): SbpPaymentError | null {
   if (error instanceof SbpPaymentError) return error;
   if (
@@ -819,6 +838,7 @@ export class MediaCommerceDecisionService {
       return await execute();
     } catch (error) {
       const operationError = toOperationError(operation, error);
+      const starsError = error instanceof TelegramStarsInvoiceError ? error : null;
       console.error(`[media_commerce] ${operation}`, {
         request_id: requestId,
         operation,
@@ -827,6 +847,14 @@ export class MediaCommerceDecisionService {
         ...context,
         code: operationError.code,
         message: error instanceof Error ? error.message : "Unknown error",
+        ...(starsError
+          ? {
+              stage: starsError.stage,
+              statusCode: starsError.statusCode,
+              description: starsError.description,
+              details: toSafeTelegramStarsDetails(starsError.details),
+            }
+          : {}),
       });
       throw operationError;
     }
@@ -918,6 +946,9 @@ export class MediaCommerceDecisionService {
       chat_id: chatId,
       payment_kind: normalizeString(row.action_kind),
       sku: normalizeString(row.sku),
+      amount_xtr: amountXtr,
+      title,
+      label,
       invoice_status: normalizeString(row.status),
     };
     const created = await this.runOperation(
@@ -3107,7 +3138,7 @@ export class MediaCommerceDecisionService {
     const resolvedAction = actionResolution.action;
     const existingStatus = normalizeString(loaded.status);
     if (existingStatus === "canceled") {
-      await this.runRepositoryOperation(
+      const conflictRecorded = await this.runRepositoryOperation(
         "payment.external.recordStatusConflict",
         {
           chat_id: loadedChatId,
@@ -3117,6 +3148,13 @@ export class MediaCommerceDecisionService {
         },
         () => this.repository.recordSbpStatusConflict(externalPaymentId, "CONFIRMED"),
       );
+      if (conflictRecorded !== 1) {
+        throw new MediaCommerceOperationError(
+          "SBP payment status conflict was not persisted",
+          "payment.external.recordStatusConflict",
+          "sbp_status_conflict_persistence_failed",
+        );
+      }
       console.error("[media_commerce] sbp_status_conflict", {
         external_payment_id: externalPaymentId,
         local_status: existingStatus,
