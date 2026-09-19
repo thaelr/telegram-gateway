@@ -2826,6 +2826,7 @@ test("pre_checkout validates token and stores decision", async () => {
     async loadInvoiceToken(token, chatId) {
       calls.loadInvoiceTokenArgs.push({ token, chatId });
       return buildLoadedInvoiceToken({
+        expires_at: new Date(Date.now() + 60_000) as unknown as string,
         payload_json: {
           action_kind: "photo_payment",
           chat_id: 101,
@@ -2867,6 +2868,10 @@ for (const expiry of [
   { name: "missing", value: null },
   { name: "malformed", value: "not-a-date" },
   { name: "expired", value: new Date(Date.now() - 60_000).toISOString() },
+  {
+    name: "expired database Date",
+    value: new Date(Date.now() - 60_000) as unknown as string,
+  },
 ] as const) {
   test(`pre_checkout rejects invoice_payload with ${expiry.name} expires_at`, async () => {
     const { service, calls } = createRepository({
@@ -4706,6 +4711,7 @@ test("SBP redirect creates one checkout and reuses it for the same subscription 
     external_payment_id: storedCheckout?.external_payment_id ?? null,
     amount_xtr: null,
     telegram_invoice_payload: null,
+    expires_at: new Date(Date.now() + 60_000) as unknown as string,
     payload_json: {
       action_kind: "subscription_payment",
       subscription_days: 7,

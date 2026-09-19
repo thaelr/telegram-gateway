@@ -268,8 +268,12 @@ export function validatePrecheckout(
     };
   }
 
-  const expiresAt = normalizeString(tokenRow.expires_at);
-  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  const expiresAt: unknown = tokenRow.expires_at;
+  const expiresAtMs = expiresAt instanceof Date
+    ? expiresAt.getTime()
+    : typeof expiresAt === "string" && expiresAt.trim()
+      ? Date.parse(expiresAt)
+      : Number.NaN;
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
     return {
       ok: false,

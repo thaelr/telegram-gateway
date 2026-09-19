@@ -552,8 +552,12 @@ function getSbpCheckoutEligibilityError(row: StoredInvoiceToken): string | null 
   if (normalizeString(row.status) !== "invoice_sent") return "sbp_invoice_status_invalid";
   if (!normalizePaymentActionKind(row.action_kind)) return "sbp_invoice_action_invalid";
 
-  const expiresAt = normalizeString(row.expires_at);
-  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  const expiresAt: unknown = row.expires_at;
+  const expiresAtMs = expiresAt instanceof Date
+    ? expiresAt.getTime()
+    : typeof expiresAt === "string" && expiresAt.trim()
+      ? Date.parse(expiresAt)
+      : Number.NaN;
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
     return "sbp_invoice_expired";
   }
