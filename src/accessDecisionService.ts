@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { ChatAccessRepository } from "./chatAccessRepository.js";
 import { prependFreeBalances } from "./freeBalanceFormatter.js";
+import { normalizeNonNegativeInteger, normalizePositiveInteger } from "./numeric.js";
 import type {
   AccessContext,
   AccessDecisionRequest,
@@ -75,11 +76,6 @@ function normalizeSource(source: string | null | undefined): string {
   return normalized || "telegram";
 }
 
-function normalizePositiveInteger(value: unknown): number | null {
-  const normalized = Number(value);
-  return Number.isInteger(normalized) && normalized > 0 ? normalized : null;
-}
-
 function buildIdempotencyKey(
   source: string,
   updateId: number | null | undefined,
@@ -110,70 +106,110 @@ function requiresSceneAccessCheck(classification: RouterClassification): boolean
   return classification.intent === "scene_message";
 }
 
+function ignoreStructuredCallback(): RouterClassification {
+  return {
+    domain: "interaction",
+    intent: "interaction_event",
+    action: "ignore",
+  };
+}
+
+function parseStructuredCallback(
+  callbackData: string,
+): RouterClassification | null {
+  const parts = callbackData.split(":");
+  const namespace = parts[0];
+
+  switch (namespace) {
+    case "reward_claim": {
+      if (parts.length !== 2) return ignoreStructuredCallback();
+      const rewardSlot = normalizePositiveInteger(parts[1]);
+      if (rewardSlot == null) return ignoreStructuredCallback();
+      return {
+        domain: "interaction",
+        intent: "reward_claim",
+        action: "handle_reward_claim",
+        reward_slot: rewardSlot,
+      };
+    }
+    case "terms_accept": {
+      if (
+        parts.length !== 2 ||
+        !["start", "menu", "subscription", "paysupport"].includes(parts[1] ?? "")
+      ) {
+        return ignoreStructuredCallback();
+      }
+      return {
+        domain: "interaction",
+        intent: "terms_accept",
+        action: "handle_terms_accept",
+      };
+    }
+    case "newscene_confirm": {
+      if (parts.length !== 2 || !["yes", "no"].includes(parts[1] ?? "")) {
+        return ignoreStructuredCallback();
+      }
+      return {
+        domain: "interaction",
+        intent: "newscene_confirm",
+        action: "handle_newscene_confirm",
+      };
+    }
+    case "character_select": {
+      if (parts.length !== 2) return ignoreStructuredCallback();
+      const characterId = normalizePositiveInteger(parts[1]);
+      if (characterId == null) return ignoreStructuredCallback();
+      return {
+        domain: "interaction",
+        intent: "character_select",
+        action: "show_character_mode_screen",
+        character_i: characterId,
+      };
+    }
+    case "character_menu": {
+      if (parts.length !== 2 || parts[1] !== "back") return ignoreStructuredCallback();
+      return {
+        domain: "interaction",
+        intent: "character_back",
+        action: "handle_character_back",
+      };
+    }
+    case "scene_mode": {
+      if (parts.length !== 2 && parts.length !== 3) return ignoreStructuredCallback();
+      const sceneMode = parts[1];
+      if (sceneMode !== "fast" && sceneMode !== "roleplay") {
+        return ignoreStructuredCallback();
+      }
+
+      const characterId = parts.length === 3
+        ? normalizePositiveInteger(parts[2])
+        : null;
+      if (parts.length === 3 && characterId == null) {
+        return ignoreStructuredCallback();
+      }
+
+      return {
+        domain: "interaction",
+        intent: "scene_mode",
+        action: "handle_scene_mode",
+        scene_mode: sceneMode,
+        character_i: characterId,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 function classifyRouterInput(input: AccessDecisionRequest): RouterClassification {
   const command = normalizeCommand(input.command);
   const routeTarget = String(input.route_target ?? "").trim();
   const eventType = String(input.event_type ?? "").trim();
   const callbackData = normalizeCallbackData(input.callback_data);
 
-  if (callbackData?.startsWith("reward_claim:")) {
-    const match = /^reward_claim:(\d+)$/u.exec(callbackData);
-    const rewardSlot = normalizePositiveInteger(match?.[1]);
-    return rewardSlot
-      ? {
-          domain: "interaction",
-          intent: "reward_claim",
-          action: "handle_reward_claim",
-          reward_slot: rewardSlot,
-        }
-      : {
-          domain: "interaction",
-          intent: "interaction_event",
-          action: "ignore",
-        };
-  }
-
-  if (callbackData?.startsWith("terms_accept")) {
-    return {
-      domain: "interaction",
-      intent: "terms_accept",
-      action: "handle_terms_accept",
-    };
-  }
-
-  if (callbackData?.startsWith("newscene_confirm:")) {
-    return {
-      domain: "interaction",
-      intent: "newscene_confirm",
-      action: "handle_newscene_confirm",
-    };
-  }
-
-  if (callbackData?.startsWith("character_select:")) {
-    return {
-      domain: "interaction",
-      intent: "character_select",
-      action: "show_character_mode_screen",
-      character_i: normalizePositiveInteger(callbackData.split(":")[1]),
-    };
-  }
-
-  if (callbackData === "character_menu:back") {
-    return {
-      domain: "interaction",
-      intent: "character_back",
-      action: "handle_character_back",
-    };
-  }
-
-  if (callbackData?.startsWith("scene_mode:")) {
-    const selected = callbackData.split(":")[1] || "roleplay";
-    return {
-      domain: "interaction",
-      intent: "scene_mode",
-      action: "handle_scene_mode",
-      scene_mode: selected === "fast" ? "fast" : "roleplay",
-    };
+  if (callbackData) {
+    const structuredCallback = parseStructuredCallback(callbackData);
+    if (structuredCallback) return structuredCallback;
   }
 
   if (eventType === "callback_query.received") {
@@ -307,8 +343,8 @@ function replaceCount(template: string, count: number): string {
 function formatPaysupportText(context: AccessContext): string {
   const copy = config.TELEGRAM_UX_COPY_JSON.paysupport;
   const lines = [copy.message_html];
-  const fastSkips = Math.max(0, Number(context.free_fast_scene_skips ?? 0));
-  const sceneUnlocks = Math.max(0, Number(context.free_scene_unlocks ?? 0));
+  const fastSkips = normalizeNonNegativeInteger(context.free_fast_scene_skips) ?? 0;
+  const sceneUnlocks = normalizeNonNegativeInteger(context.free_scene_unlocks) ?? 0;
 
   if (fastSkips > 0 && copy.free_fast_scene_skips_line) {
     lines.push(replaceCount(copy.free_fast_scene_skips_line, fastSkips));
@@ -383,16 +419,17 @@ export class AccessDecisionService {
       config.BUSINESS_TIME_ZONE,
     );
 
-    const hasActiveScene = Boolean(accessContext.active_scene_session_id);
+    const hasSceneSession = Boolean(accessContext.active_scene_session_id);
+    const hasStartedScene = accessContext.scene_turn_no >= 0;
     const contextFields = {
       terms_accepted_at: accessContext.terms_accepted_at,
       subscription_active: accessContext.subscription_active,
       subscription_sku: accessContext.subscription_sku,
       subscription_until: accessContext.subscription_until,
-      scene_session_id: hasActiveScene ? accessContext.active_scene_session_id : null,
+      scene_session_id: hasSceneSession ? accessContext.active_scene_session_id : null,
       active_scene_session_id: accessContext.active_scene_session_id,
       scene_turn_no:
-        hasActiveScene && accessContext.scene_turn_no >= 0
+        hasSceneSession && hasStartedScene
           ? accessContext.scene_turn_no
           : null,
       scene_access_active: accessContext.scene_access_active,
@@ -423,28 +460,24 @@ export class AccessDecisionService {
     }
 
     if (classification.intent === "scene_start") {
-      const hasActiveScene = accessContext.scene_turn_no >= 0;
-
       return {
         ...passthrough,
         ...contextFields,
         decision: "noop",
-        action: hasActiveScene ? "show_newscene_confirm" : "show_character_gallery",
+        action: hasStartedScene ? "show_newscene_confirm" : "show_character_gallery",
         allowed: true,
-        reason: hasActiveScene ? "scene_start_requires_scene_reset" : "scene_start",
+        reason: hasStartedScene ? "scene_start_requires_scene_reset" : "scene_start",
       };
     }
 
     if (classification.intent === "menu") {
-      const hasActiveScene = accessContext.scene_turn_no >= 0;
-
       return {
         ...passthrough,
         ...contextFields,
         decision: "noop",
-        action: hasActiveScene ? "show_newscene_confirm" : "show_character_gallery",
+        action: hasStartedScene ? "show_newscene_confirm" : "show_character_gallery",
         allowed: true,
-        reason: hasActiveScene ? "menu_requires_scene_reset" : "menu",
+        reason: hasStartedScene ? "menu_requires_scene_reset" : "menu",
       };
     }
 

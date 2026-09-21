@@ -3,7 +3,7 @@ import type {
   MediaCommerceRoute,
 } from "../mediaCommerceTypes.js";
 import type { MediaCommerceDecisionRequest } from "./requestSchema.js";
-import { normalizeFeatureKey } from "./paymentFlow.js";
+import { normalizeFeatureKeyValue } from "./paymentFlow.js";
 import {
   normalizeLowerString,
   normalizeNonNegativeInteger,
@@ -46,7 +46,7 @@ export function buildBaseResponse(
     checkout_url: normalizeString(input.checkout_url),
     subscription_active: input.subscription_active === true,
     scene_access_active: input.scene_access_active === true,
-    feature_key: normalizeFeatureKey(input.feature_key),
+    feature_key: normalizeFeatureKeyValue(input.feature_key),
     invoice_link: normalizeString(input.invoice_link),
     invoice_token: normalizeString(input.invoice_token),
     fulfillment_invoice_token: normalizeString(input.fulfillment_invoice_token),

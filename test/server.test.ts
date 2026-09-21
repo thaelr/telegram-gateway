@@ -465,6 +465,101 @@ test("router endpoint is registered and uses the same auth and validation wiring
   assert.deepEqual(response.json().raw_update, { callback_query: { id: "cbq-1" } });
 });
 
+test("router endpoint rejects unsafe required chat_id values", async (t) => {
+  let called = false;
+  const app = buildApp({
+    logger: false,
+    accessDecisionService: {
+      async evaluate(input) {
+        called = true;
+        return {
+          decision: "noop",
+          action: "ignore",
+          allowed: false,
+          domain: "command",
+          intent: "unknown_command",
+          chat_id: input.chat_id,
+          source: input.source ?? "telegram",
+        };
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const invalidPayloads = [
+    {},
+    { chat_id: null },
+    { chat_id: "" },
+    { chat_id: "   " },
+    { chat_id: true },
+    { chat_id: false },
+    { chat_id: 1.5 },
+    { chat_id: "1.5" },
+  ];
+
+  for (const payload of invalidPayloads) {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/router-decision",
+      headers: { "x-internal-api-key": "test-internal-key" },
+      payload,
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, "invalid_request");
+  }
+
+  assert.equal(called, false);
+});
+
+test("reward endpoints reject unsafe numeric request values", async (t) => {
+  const app = buildApp({
+    logger: false,
+    rewardService: {
+      async claimConfiguredSlot() { throw new Error("not used"); },
+      async claimReward() { throw new Error("not used"); },
+      async assignConfiguredSlot() { throw new Error("not used"); },
+      async bindGrantMessage() { throw new Error("not used"); },
+    },
+  });
+  t.after(() => app.close());
+
+  const cases = [
+    {
+      method: "POST" as const,
+      url: "/v1/rewards/claim-slot",
+      payload: { chat_id: false, reward_slot: "1" },
+    },
+    {
+      method: "POST" as const,
+      url: "/v1/rewards/claim",
+      payload: { chat_id: "", campaign_id: "campaign-1" },
+    },
+    {
+      method: "POST" as const,
+      url: "/v1/rewards/grants",
+      payload: { chat_id: "42", reward_slot: "   " },
+    },
+    {
+      method: "POST" as const,
+      url: "/v1/rewards/grants/10/bind-message",
+      payload: { telegram_message_id: true },
+    },
+  ];
+
+  for (const entry of cases) {
+    const response = await app.inject({
+      method: entry.method,
+      url: entry.url,
+      headers: { "x-internal-api-key": "test-internal-key" },
+      payload: entry.payload,
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, "invalid_request");
+  }
+});
+
 test("reward slot endpoint returns claim UI result", async (t) => {
   const app = buildApp({
     logger: false,

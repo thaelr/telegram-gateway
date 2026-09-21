@@ -1,4 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
+import {
+  normalizeNonNegativeInteger as normalizeStrictNonNegativeInteger,
+  normalizePositiveInteger as normalizeStrictPositiveInteger,
+} from "../numeric.js";
+import {
+  parseJsonArray as parseLenientJsonArray,
+  parseJsonObject as parseLenientJsonObject,
+} from "../json.js";
 
 export const TELEGRAM_INVOICE_PAYLOAD_MAX_BYTES = 128;
 
@@ -18,13 +26,11 @@ export function normalizeLowerString(value: string | null | undefined): string |
 }
 
 export function normalizePositiveInteger(value: unknown): number | null {
-  const normalized = Number(value);
-  return Number.isInteger(normalized) && normalized > 0 ? normalized : null;
+  return normalizeStrictPositiveInteger(value);
 }
 
 export function normalizeNonNegativeInteger(value: unknown): number | null {
-  const normalized = Number(value);
-  return Number.isInteger(normalized) && normalized >= 0 ? normalized : null;
+  return normalizeStrictNonNegativeInteger(value);
 }
 
 export function normalizeBoolean(value: unknown, fallback = false): boolean {
@@ -34,41 +40,25 @@ export function normalizeBoolean(value: unknown, fallback = false): boolean {
 export function parseJsonObject(
   value: unknown,
 ): Record<string, unknown> | null {
-  if (!value) return null;
-  if (typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      return typeof parsed === "object" && parsed && !Array.isArray(parsed)
-        ? (parsed as Record<string, unknown>)
-        : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  return parseLenientJsonObject(value);
 }
 
 export function parseJsonArray(value: unknown): unknown[] | null {
-  if (!value) return null;
-  if (Array.isArray(value)) return value;
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      return Array.isArray(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  return parseLenientJsonArray(value);
 }
 
-export function isExpired(isoString: string | null | undefined): boolean {
-  if (!isoString) return false;
-  const timestamp = Date.parse(isoString);
-  return Number.isFinite(timestamp) && timestamp < Date.now();
+export function isExpired(value: unknown): boolean {
+  if (value == null) return false;
+  if (value instanceof Date) {
+    const timestamp = value.getTime();
+    return !Number.isFinite(timestamp) || timestamp < Date.now();
+  }
+  if (typeof value !== "string") return true;
+
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const timestamp = Date.parse(trimmed);
+  return !Number.isFinite(timestamp) || timestamp < Date.now();
 }
 
 export function buildRandomToken(prefix: "btn" | "inv"): string {

@@ -52,7 +52,7 @@ export class MediaCommerceRepository {
     this.mediaEventRepository = new MediaEventRepository(query);
   }
 
-  async loadOfferStats(input: LoadOfferStatsInput): Promise<MediaOfferStats | null> {
+  async loadOfferStats(input: LoadOfferStatsInput): Promise<MediaOfferStats> {
     return this.catalogRepository.loadOfferStats(input);
   }
 
@@ -79,7 +79,7 @@ export class MediaCommerceRepository {
     return this.tokenRepository.loadCallbackToken(token, chatId);
   }
 
-  async loadMediaContext(input: LoadMediaContextInput): Promise<MediaContext | null> {
+  async loadMediaContext(input: LoadMediaContextInput): Promise<MediaContext> {
     return this.catalogRepository.loadMediaContext(input);
   }
 

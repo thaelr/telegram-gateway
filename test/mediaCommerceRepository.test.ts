@@ -49,6 +49,9 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
 const { MediaCommerceRepository } = await import(
   "../src/mediaCommerceRepository.js"
 );
+const { MediaRepositoryContractError } = await import(
+  "../src/mediaCommerceRepository/errors.js"
+);
 
 type TaggedCall = {
   sql: string;
@@ -340,6 +343,62 @@ test("loadCallbackToken delegates to media_load_interaction_token with fixed sha
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_interaction_token\(/u);
 });
 
+test("loadCallbackToken accepts persisted JSON object strings", async () => {
+  const { query } = createTaggedQueryStub([[
+    {
+      requested_token: "cb-1",
+      token: "cb-1",
+      kind: "button_callback",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      payload_json: "{\"current_uuid\":\"u-1\"}",
+      status: "active",
+      action_kind: "photo_request",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      found: true,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.loadCallbackToken("cb-1", 101);
+
+  assert.deepEqual(result?.payload_json, { current_uuid: "u-1" });
+});
+
+test("found persisted token rows reject corrupt payload_json", async () => {
+  const invalidPayloads = [
+    "not-json",
+    "[1,2,3]",
+    "\"scalar\"",
+    null,
+  ];
+
+  for (const payload_json of invalidPayloads) {
+    const { query } = createTaggedQueryStub([[
+      {
+        requested_token: "cb-1",
+        token: "cb-1",
+        kind: "button_callback",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        payload_json,
+        status: "active",
+        action_kind: "photo_request",
+        expires_at: "2026-08-14T10:00:00.000Z",
+        found: true,
+      },
+    ]]);
+    const repository = new MediaCommerceRepository(query as never);
+
+    await assert.rejects(
+      () => repository.loadCallbackToken("cb-1", 101),
+      MediaRepositoryContractError,
+    );
+  }
+});
+
 test("loadInvoiceToken delegates to payload-aware media_load_invoice_token and preserves invoice fields", async () => {
   const { query, calls } = createTaggedQueryStub([[
     {
@@ -368,6 +427,32 @@ test("loadInvoiceToken delegates to payload-aware media_load_invoice_token and p
   assert.equal(result?.amount_xtr, 10);
   assert.equal(result?.telegram_invoice_message_id, 777);
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_invoice_token\(/u);
+});
+
+test("not-found invoice token keeps null payload as ordinary not-found", async () => {
+  const { query } = createTaggedQueryStub([[
+    {
+      requested_token: "missing",
+      token: null,
+      kind: null,
+      chat_id: null,
+      scene_session_id: null,
+      turn_no: null,
+      payload_json: null,
+      status: null,
+      action_kind: null,
+      sku: null,
+      amount_xtr: null,
+      telegram_invoice_message_id: null,
+      found: false,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.loadInvoiceToken("missing", 101);
+
+  assert.equal(result?.found, false);
+  assert.equal(result?.payload_json, null);
 });
 
 test("loadInvoiceTokenByExternalPaymentId delegates to dedicated lookup and preserves invoice fields", async () => {
@@ -589,6 +674,7 @@ test("redeemFreePhotoUnlock delegates to media_redeem_free_photo_unlock", async 
     {
       token: "photo-token",
       chat_id: 101,
+      payload_json: { action_kind: "free_photo_unlock" },
       action_kind: "free_photo_unlock",
       redeemed: true,
       reason: "redeemed",
@@ -600,6 +686,56 @@ test("redeemFreePhotoUnlock delegates to media_redeem_free_photo_unlock", async 
   assert.equal(result?.redeemed, true);
   assert.match(calls[0]?.sql ?? "", /public\.media_redeem_free_photo_unlock\(/u);
   assert.deepEqual(calls[0]?.values, ["photo-token", 101]);
+});
+
+test("not-found free-action redeem keeps null payload as ordinary not-found", async () => {
+  const { query } = createTaggedQueryStub([[
+    {
+      token: null,
+      chat_id: null,
+      scene_session_id: null,
+      turn_no: null,
+      payload_json: null,
+      action_kind: null,
+      status: null,
+      redeemed: false,
+      already_consumed: false,
+      already_fulfilled: false,
+      remaining_credits: null,
+      reason: "not_found",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.redeemFreePhotoUnlock("missing", 101);
+
+  assert.equal(result?.reason, "not_found");
+  assert.equal(result?.payload_json, null);
+});
+
+test("existing free-action redeem rejects null payload", async () => {
+  const { query } = createTaggedQueryStub([[
+    {
+      token: "photo-token",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      payload_json: null,
+      action_kind: "free_photo_unlock",
+      status: "active",
+      redeemed: true,
+      already_consumed: false,
+      already_fulfilled: false,
+      remaining_credits: 0,
+      reason: "redeemed",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  await assert.rejects(
+    () => repository.redeemFreePhotoUnlock("photo-token", 101),
+    MediaRepositoryContractError,
+  );
 });
 
 test("finalizeFreePhotoUnlock delegates the exact photo UUID to its dedicated RPC", async () => {
@@ -674,6 +810,37 @@ test("loadStoredInvoiceTokens delegates to media_load_stored_invoice_tokens", as
   assert.equal(result[0]?.invoice_link, "https://example.com/invoice");
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_load_stored_invoice_tokens\(/u);
   assertJsonbParameter(calls[0]?.values[0], ["inv-1"]);
+});
+
+test("loadStoredInvoiceTokens rejects corrupt persisted payload_json", async () => {
+  const { query } = createTaggedQueryStub([[
+    {
+      token: "inv-1",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      scene_turn_no: null,
+      payload_json: [],
+      sku: "payment_media_1",
+      amount_xtr: 10,
+      telegram_invoice_payload: "inv-payload",
+      expires_at: "2026-08-14T10:00:00.000Z",
+      telegram_invoice_message_id: 777,
+      invoice_link: "https://example.com/invoice",
+      stored: false,
+      invoice_title: "",
+      invoice_description: "",
+      invoice_label: "",
+      invoice_button_text: "",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  await assert.rejects(
+    () => repository.loadStoredInvoiceTokens(["inv-1"]),
+    MediaRepositoryContractError,
+  );
 });
 
 test("storeSubscriptionOfferMessageId delegates to media_store_subscription_offer_message_id", async () => {
@@ -840,8 +1007,12 @@ test("upsertInvoiceToken delegates to media_upsert_invoice_token and preserves f
     payload_json: {},
     action_kind: "photo_payment",
     sku: "payment_media_1",
+    payment_source: "stars",
+    amount: 10,
+    currency: "XTR",
     amount_xtr: 10,
     telegram_invoice_payload: "inv-payload",
+    checkout_url: null,
     expires_at: "2026-08-14T10:00:00.000Z",
     invoice_title: "Photo",
     invoice_description: "Unlock photo",
@@ -890,8 +1061,12 @@ test("upsertInvoiceToken preserves idempotent repeat shape through media_upsert_
     payload_json: {},
     action_kind: "photo_payment",
     sku: "payment_media_1",
+    payment_source: "stars",
+    amount: 10,
+    currency: "XTR",
     amount_xtr: 10,
     telegram_invoice_payload: "inv-payload",
+    checkout_url: null,
     expires_at: "2026-08-14T10:00:00.000Z",
     invoice_title: "Photo",
     invoice_description: "Unlock photo",
@@ -918,6 +1093,7 @@ test("upsertInvoiceToken normalizes string payload_json into an object before ca
       sku: "payment_plan_2",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
+      checkout_url: null,
       expires_at: "2026-08-14T10:00:00.000Z",
       telegram_invoice_message_id: null,
       invoice_link: null,
@@ -940,8 +1116,12 @@ test("upsertInvoiceToken normalizes string payload_json into an object before ca
     payload_json: "{\"subscription_days\":14}" as never,
     action_kind: "subscription_payment",
     sku: "payment_plan_2",
+    payment_source: "stars",
+    amount: 100,
+    currency: "XTR",
     amount_xtr: 100,
     telegram_invoice_payload: "inv-1",
+    checkout_url: null,
     expires_at: "2026-08-14T10:00:00.000Z",
     invoice_title: "Plan",
     invoice_description: "Desc",
@@ -951,6 +1131,120 @@ test("upsertInvoiceToken normalizes string payload_json into an object before ca
 
   assert.equal(calls.length, 1);
   assertJsonbParameter(calls[0]?.values[6], { subscription_days: 14 });
+});
+
+test("upsertInvoiceToken preserves explicit SBP payment fields", async () => {
+  const { query, calls } = createTaggedQueryStub([[
+    {
+      token: "inv-sbp-1",
+      kind: "invoice_payload",
+      chat_id: 101,
+      scene_session_id: null,
+      turn_no: null,
+      scene_turn_no: null,
+      payload_json: { subscription_days: 14 },
+      sku: "payment_plan_2",
+      payment_source: "sbp",
+      amount: 299,
+      currency: "RUB",
+      checkout_url: null,
+      external_payment_id: null,
+      amount_xtr: null,
+      telegram_invoice_payload: null,
+      expires_at: "2026-08-14T10:00:00.000Z",
+      telegram_invoice_message_id: null,
+      invoice_link: null,
+      stored: true,
+      invoice_title: "Plan",
+      invoice_description: "Desc",
+      invoice_label: "Label",
+      invoice_button_text: "Button",
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  await repository.upsertInvoiceToken({
+    token: "inv-sbp-1",
+    kind: "invoice_payload",
+    chat_id: 101,
+    scene_session_id: null,
+    turn_no: null,
+    scene_turn_no: null,
+    payload_json: { subscription_days: 14 },
+    action_kind: "subscription_payment",
+    sku: "payment_plan_2",
+    payment_source: "sbp",
+    amount: 299,
+    currency: "RUB",
+    amount_xtr: null,
+    telegram_invoice_payload: null,
+    checkout_url: null,
+    expires_at: "2026-08-14T10:00:00.000Z",
+    invoice_title: "Plan",
+    invoice_description: "Desc",
+    invoice_label: "Label",
+    invoice_button_text: "Button",
+  });
+
+  assert.equal(calls[0]?.values[9], "sbp");
+  assert.equal(calls[0]?.values[10], 299);
+  assert.equal(calls[0]?.values[11], "RUB");
+  assert.equal(calls[0]?.values[12], null);
+});
+
+test("upsertInvoiceToken rejects missing derived payment fields and corrupt payload", async () => {
+  const repository = new MediaCommerceRepository(createTaggedQueryStub().query as never);
+  const input = {
+    token: "inv-1",
+    kind: "invoice_payload",
+    chat_id: 101,
+    scene_session_id: null,
+    turn_no: null,
+    scene_turn_no: null,
+    payload_json: { subscription_days: 14 },
+    action_kind: "subscription_payment",
+    sku: "payment_plan_2",
+    payment_source: "stars",
+    amount: 100,
+    currency: "XTR",
+    amount_xtr: 100,
+    telegram_invoice_payload: "inv-1",
+    checkout_url: null,
+    expires_at: "2026-08-14T10:00:00.000Z",
+    invoice_title: "Plan",
+    invoice_description: "Desc",
+    invoice_label: "Label",
+    invoice_button_text: "Button",
+  } as const;
+
+  await assert.rejects(
+    () => repository.upsertInvoiceToken({
+      ...input,
+      payment_source: undefined as never,
+    }),
+    MediaRepositoryContractError,
+  );
+  await assert.rejects(
+    () => repository.upsertInvoiceToken({
+      ...input,
+      amount: undefined as never,
+    }),
+    MediaRepositoryContractError,
+  );
+  await assert.rejects(
+    () => repository.upsertInvoiceToken({
+      ...input,
+      currency: undefined as never,
+    }),
+    MediaRepositoryContractError,
+  );
+  await assert.rejects(
+    () => repository.upsertInvoiceToken({
+      ...input,
+      payload_json: "not-json" as never,
+    }),
+    MediaRepositoryContractError,
+  );
 });
 
 test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () => {
@@ -966,6 +1260,7 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       sku: "payment_plan_2",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
+      checkout_url: null,
       expires_at: "2026-08-14T10:00:00.000Z",
       telegram_invoice_message_id: null,
       invoice_link: null,
@@ -986,6 +1281,7 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       sku: "payment_plan_2",
       amount_xtr: 200,
       telegram_invoice_payload: "inv-2",
+      checkout_url: null,
       expires_at: "2026-08-14T10:00:00.000Z",
       telegram_invoice_message_id: null,
       invoice_link: null,
@@ -1009,8 +1305,12 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       payload_json: { subscription_days: 14 },
       action_kind: "subscription_payment",
       sku: "payment_plan_2",
+      payment_source: "stars",
+      amount: 100,
+      currency: "XTR",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
+      checkout_url: null,
       expires_at: "2026-08-14T10:00:00.000Z",
       invoice_title: "Plan 1",
       invoice_description: "Desc 1",
@@ -1027,8 +1327,12 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       payload_json: "{\"subscription_days\":30}" as never,
       action_kind: "subscription_payment",
       sku: "payment_plan_2",
+      payment_source: "stars",
+      amount: 200,
+      currency: "XTR",
       amount_xtr: 200,
       telegram_invoice_payload: "inv-2",
+      checkout_url: null,
       expires_at: "2026-08-14T10:00:00.000Z",
       invoice_title: "Plan 2",
       invoice_description: "Desc 2",
@@ -1057,6 +1361,7 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       currency: "XTR",
       amount_xtr: 100,
       telegram_invoice_payload: "inv-1",
+      checkout_url: null,
       expires_at: "2026-08-14T10:00:00.000Z",
       invoice_title: "Plan 1",
       invoice_description: "Desc 1",
@@ -1078,6 +1383,7 @@ test("upsertInvoiceTokens delegates to media_upsert_invoice_tokens", async () =>
       currency: "XTR",
       amount_xtr: 200,
       telegram_invoice_payload: "inv-2",
+      checkout_url: null,
       expires_at: "2026-08-14T10:00:00.000Z",
       invoice_title: "Plan 2",
       invoice_description: "Desc 2",

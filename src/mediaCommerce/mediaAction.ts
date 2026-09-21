@@ -11,6 +11,7 @@ import {
   buildTelegramInvoicePayload,
   INVOICE_TTL_MS,
   normalizeLowerString,
+  normalizeNonNegativeInteger,
   normalizePositiveInteger,
   normalizeString,
   parseJsonArray,
@@ -76,7 +77,7 @@ export function normalizeUnlockedItems(value: unknown): MediaUnlockedItem[] {
     unique.push({
       uuid,
       photo_url: photoUrl,
-      sort_order: Number(objectItem?.sort_order ?? 0),
+      sort_order: normalizeNonNegativeInteger(objectItem?.sort_order) ?? 0,
       first_unlocked_at:
         typeof objectItem?.first_unlocked_at === "string"
           ? objectItem.first_unlocked_at
@@ -101,7 +102,7 @@ export function normalizeNextUnseen(
   return {
     uuid,
     photo_url: photoUrl,
-    sort_order: Number(objectValue?.sort_order ?? 0),
+    sort_order: normalizeNonNegativeInteger(objectValue?.sort_order) ?? 0,
   };
 }
 
@@ -208,8 +209,8 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   const callbackValid = context.callback_valid !== false;
   const subscriptionActive = context.subscription_active === true;
   const sceneAccessActive = context.scene_access_active === true;
-  const deliveredInScene = Number(context.delivered_in_scene ?? 0);
-  const basePrice = Number(context.base_price_xtr ?? 10);
+  const deliveredInScene = normalizeNonNegativeInteger(context.delivered_in_scene) ?? 0;
+  const basePrice = normalizePositiveInteger(context.base_price_xtr) ?? 10;
   const forceDeliver = context.force_deliver_after_payment === true;
   const priceRequired = calculateMediaPriceRequired({
     subscription_active: subscriptionActive,
@@ -341,7 +342,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   const deliveredAfter = deliveredInScene + (deliverUnlock ? 1 : 0);
   const unseenAfter = Math.max(
     0,
-    Number(context.unseen_available ?? 0) - (deliverUnlock ? 1 : 0),
+    (normalizeNonNegativeInteger(context.unseen_available) ?? 0) - (deliverUnlock ? 1 : 0),
   );
   const nextPrice = calculateMediaPriceRequired({
     subscription_active: subscriptionActive,

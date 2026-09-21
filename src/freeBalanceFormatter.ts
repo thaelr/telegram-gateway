@@ -1,3 +1,5 @@
+import { normalizeNonNegativeInteger } from "./numeric.js";
+
 export type FreeBalances = {
   free_scene_unlocks?: number | null;
   free_photo_unlocks?: number | null;
@@ -5,7 +7,7 @@ export type FreeBalances = {
 };
 
 function count(value: number | null | undefined): number {
-  return Math.max(0, Math.trunc(Number(value) || 0));
+  return normalizeNonNegativeInteger(value) ?? 0;
 }
 
 function plural(

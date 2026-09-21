@@ -19,6 +19,8 @@ import {
 import {
   INVOICE_PAYLOAD_KIND,
   hasExpectedPaymentDetails,
+  normalizeFeatureKey,
+  normalizeFeatureKeyValue,
   normalizePaymentActionKind,
   normalizePaymentSource,
   type ResolvedInvoiceAction,
@@ -53,7 +55,11 @@ import {
   parseJsonObject,
 } from "./mediaCommerce/utils.js";
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
-import type { UpsertInvoiceTokenInput } from "./mediaCommerceRepository/shared.js";
+import {
+  parseStrictJsonObject,
+  type UpsertInvoiceTokenInput,
+} from "./mediaCommerceRepository/shared.js";
+import { MediaRepositoryContractError } from "./mediaCommerceRepository/errors.js";
 import type { MediaCommerceDecisionRequest } from "./mediaCommerce/requestSchema.js";
 import { getRequestContext } from "./requestContext.js";
 import { formatFreeBalances } from "./freeBalanceFormatter.js";
@@ -574,33 +580,55 @@ function getSbpCheckoutEligibilityError(row: StoredInvoiceToken): string | null 
   if (normalizeString(row.status) !== "invoice_sent") return "sbp_invoice_status_invalid";
   if (!normalizePaymentActionKind(row.action_kind)) return "sbp_invoice_action_invalid";
 
-  const expiresAt: unknown = row.expires_at;
-  const expiresAtMs = expiresAt instanceof Date
-    ? expiresAt.getTime()
-    : typeof expiresAt === "string" && expiresAt.trim()
-      ? Date.parse(expiresAt)
-      : Number.NaN;
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+  if (isExpired(row.expires_at)) {
     return "sbp_invoice_expired";
   }
   return null;
 }
 
-function buildPaymentOption(row: StoredInvoiceToken): MediaPaymentOption {
-  const paymentSource = normalizePaymentSource(row.payment_source) ?? "stars";
-  const paymentCurrency = normalizePaymentCurrency(row.currency)
-    ?? (paymentSource === "sbp" ? "RUB" : "XTR");
-  const payload = parseJsonObject(row.payload_json) ?? {};
+export function buildPaymentOption(row: StoredInvoiceToken): MediaPaymentOption {
+  const paymentSource = normalizePaymentSource(row.payment_source);
+  if (!paymentSource) {
+    throw new MediaRepositoryContractError("buildPaymentOption", {
+      field: "payment_source",
+      reason: "invalid",
+    });
+  }
+
+  const paymentCurrency = normalizePaymentCurrency(row.currency);
+  if (!paymentCurrency) {
+    throw new MediaRepositoryContractError("buildPaymentOption", {
+      field: "currency",
+      reason: "invalid",
+    });
+  }
+
+  const amount = normalizePositiveInteger(row.amount);
+  if (amount == null) {
+    throw new MediaRepositoryContractError("buildPaymentOption", {
+      field: "amount",
+      reason: "invalid",
+    });
+  }
+
+  const checkoutUrl = paymentSource === "stars"
+    ? normalizeString(row.checkout_url) ?? normalizeString(row.invoice_link)
+    : normalizeString(row.checkout_url);
+  if (!checkoutUrl) {
+    throw new MediaRepositoryContractError("buildPaymentOption", {
+      field: paymentSource === "stars" ? "checkout_url/invoice_link" : "checkout_url",
+      reason: "missing",
+    });
+  }
+
+  const payload = parseStrictJsonObject(row.payload_json, "buildPaymentOption");
 
   return {
     token: row.token,
     source: paymentSource,
-    amount: normalizeNonNegativeInteger(row.amount ?? row.amount_xtr) ?? 0,
+    amount,
     currency: paymentCurrency,
-    checkout_url:
-      normalizeString(row.checkout_url)
-      ?? normalizeString(row.invoice_link)
-      ?? "",
+    checkout_url: checkoutUrl,
     external_payment_id: normalizeString(row.external_payment_id),
     sku: row.sku,
     action_kind:
@@ -650,15 +678,14 @@ function buildOfferItem(rows: StoredInvoiceToken[]): MediaOfferItem | null {
     .sort((left, right) =>
       getSourceSortOrder(normalizePaymentSource(left.payment_source))
       - getSourceSortOrder(normalizePaymentSource(right.payment_source))
-      || Number(left.payload_json.sort_order ?? 100)
-      - Number(right.payload_json.sort_order ?? 100),
+      || (normalizeNonNegativeInteger(left.payload_json.sort_order) ?? 100)
+      - (normalizeNonNegativeInteger(right.payload_json.sort_order) ?? 100),
     );
   const primaryRow = sortedRows[0] ?? rows[0];
-  const payload = parseJsonObject(primaryRow?.payload_json) ?? {};
-
   if (!primaryRow) {
     return null;
   }
+  const payload = parseStrictJsonObject(primaryRow.payload_json, "buildOfferItem");
 
   return {
     sku: primaryRow.sku,
@@ -696,7 +723,7 @@ function buildOfferItem(rows: StoredInvoiceToken[]): MediaOfferItem | null {
 }
 
 function buildOfferGroupKey(row: StoredInvoiceToken): string {
-  const payload = parseJsonObject(row.payload_json) ?? {};
+  const payload = parseStrictJsonObject(row.payload_json, "buildOfferGroupKey");
 
   return JSON.stringify([
     normalizeString(row.action_kind) ?? null,
@@ -728,8 +755,10 @@ function groupOfferItems(rows: StoredInvoiceToken[]): MediaOfferItem[] {
     .filter((item): item is MediaOfferItem => item != null)
     .sort(
       (left, right) =>
-        Number(left.sort_order ?? 100) - Number(right.sort_order ?? 100)
-        || Number(left.subscription_days ?? 0) - Number(right.subscription_days ?? 0),
+        (normalizeNonNegativeInteger(left.sort_order) ?? 100)
+        - (normalizeNonNegativeInteger(right.sort_order) ?? 100)
+        || (normalizePositiveInteger(left.subscription_days) ?? 0)
+        - (normalizePositiveInteger(right.subscription_days) ?? 0),
     );
 }
 
@@ -1527,10 +1556,6 @@ export class MediaCommerceDecisionService {
       should_offer: normalizeBoolean(input.should_offer),
     });
 
-    if (!stats) {
-      return { ...base, reason: "offer_stats_not_found" };
-    }
-
     return this.resolvePrepareOffer(base, stats);
   }
 
@@ -1538,13 +1563,13 @@ export class MediaCommerceDecisionService {
     base: MediaCommerceDecisionResponse,
     stats: MediaOfferStats,
   ): Promise<MediaCommerceDecisionResponse> {
-    const deliveredInScene = Number(stats.delivered_in_scene ?? 0);
+    const deliveredInScene = normalizeNonNegativeInteger(stats.delivered_in_scene) ?? 0;
     const subscriptionActive = stats.subscription_active === true;
     const sceneAccessActive = stats.scene_access_active === true;
-    const totalAvailable = Number(stats.total_available ?? 0);
-    const unseenAvailable = Number(stats.unseen_available ?? 0);
+    const totalAvailable = normalizeNonNegativeInteger(stats.total_available) ?? 0;
+    const unseenAvailable = normalizeNonNegativeInteger(stats.unseen_available) ?? 0;
     const existingPanel = normalizePositiveInteger(stats.existing_panel_message_id);
-    const basePrice = Number(stats.base_price_xtr ?? 10);
+    const basePrice = normalizePositiveInteger(stats.base_price_xtr) ?? 10;
     const priceRequired = calculateMediaPriceRequired({
       subscription_active: subscriptionActive,
       scene_access_active: sceneAccessActive,
@@ -1705,7 +1730,18 @@ export class MediaCommerceDecisionService {
       return { ...base, reason: "chat_id_required" };
     }
 
-    const featureKey = normalizeString(input.feature_key) ?? "fast_scene_skip";
+    const featureKey = normalizeFeatureKeyValue(
+      typeof input.feature_key === "string" ? input.feature_key : null,
+    );
+    if (!featureKey) {
+      return { ...base, reason: "feature_key_invalid" };
+    }
+
+    const actionPlan = resolveActionPlanByFeatureKey(featureKey);
+    if (!actionPlan) {
+      return { ...base, feature_key: featureKey, reason: "feature_key_invalid" };
+    }
+
     const freeFastSkipButton =
       config.TELEGRAM_UX_COPY_JSON.free_actions.fast_scene_skip_button;
     const freeCredits =
@@ -1716,7 +1752,7 @@ export class MediaCommerceDecisionService {
       normalizeString(input.scene_session_id)
       ?? normalizeString(freeCredits?.active_scene_session_id);
     if (featureKey === "fast_scene_skip" && sceneSessionId) {
-      const freeFastSkips = Math.max(0, Number(freeCredits?.free_fast_scene_skips ?? 0));
+      const freeFastSkips = normalizeNonNegativeInteger(freeCredits?.free_fast_scene_skips) ?? 0;
       if (freeFastSkips > 0) {
         const tokenRow = buildFreeActionTokenRow({
           action_kind: "free_fast_scene_skip",
@@ -1750,34 +1786,31 @@ export class MediaCommerceDecisionService {
       }
     }
 
-    const actionPlan = resolveActionPlanByFeatureKey(featureKey);
-    const storedFeatureInvoices = actionPlan
-      ? await this.upsertCurrentPaymentAttempts(
-        buildFeaturePaymentInputs({
-          chat_id: chatId,
-          scene_session_id: normalizeString(input.scene_session_id),
-          turn_no: normalizeNonNegativeInteger(input.turn_no),
-          scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
-          character_i: normalizePositiveInteger(input.character_i),
-          scene_mode: normalizeString(input.scene_mode),
-          media_signature: normalizeString(input.media_signature),
-          target_message_id: normalizePositiveInteger(input.target_message_id),
-          current_uuid: normalizeLowerString(input.current_uuid),
-          base_price_xtr: normalizePositiveInteger(input.base_price_xtr),
-          idempotency_key: [
-            "feature",
-            chatId,
-            normalizeString(input.scene_session_id) ?? "no-scene",
-            normalizeNonNegativeInteger(input.turn_no) ?? "no-turn",
-            normalizeNonNegativeInteger(input.scene_turn_no) ?? "no-scene-turn",
-            featureKey,
-          ].join(":"),
-          requested_action: `${featureKey}_purchase`,
-          plan: actionPlan,
-        }),
-        "featureOffer",
-      )
-      : [];
+    const storedFeatureInvoices = await this.upsertCurrentPaymentAttempts(
+      buildFeaturePaymentInputs({
+        chat_id: chatId,
+        scene_session_id: normalizeString(input.scene_session_id),
+        turn_no: normalizeNonNegativeInteger(input.turn_no),
+        scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
+        character_i: normalizePositiveInteger(input.character_i),
+        scene_mode: normalizeString(input.scene_mode),
+        media_signature: normalizeString(input.media_signature),
+        target_message_id: normalizePositiveInteger(input.target_message_id),
+        current_uuid: normalizeLowerString(input.current_uuid),
+        base_price_xtr: normalizePositiveInteger(input.base_price_xtr),
+        idempotency_key: [
+          "feature",
+          chatId,
+          normalizeString(input.scene_session_id) ?? "no-scene",
+          normalizeNonNegativeInteger(input.turn_no) ?? "no-turn",
+          normalizeNonNegativeInteger(input.scene_turn_no) ?? "no-scene-turn",
+          featureKey,
+        ].join(":"),
+        requested_action: `${featureKey}_purchase`,
+        plan: actionPlan,
+      }),
+      "featureOffer",
+    );
     const featureInvoices = await Promise.all(
       storedFeatureInvoices.map((row) =>
         this.prepareStoredPaymentOptions(row, "featureOffer")),
@@ -1787,7 +1820,7 @@ export class MediaCommerceDecisionService {
       .map((row) => buildPaymentOption(row))
       .sort((left, right) => getSourceSortOrder(left.source) - getSourceSortOrder(right.source));
     const revealTokenRows =
-      actionPlan && featurePaymentOptions.length > 0
+      featurePaymentOptions.length > 0
         ? [
             buildPaymentUiTokenRow({
               action_kind: "reveal_feature_payment_options",
@@ -1819,12 +1852,12 @@ export class MediaCommerceDecisionService {
       operation: "feature_offer_required",
       chat_id: chatId,
       feature_key: featureKey,
-      invoice_kind: actionPlan ? "feature" : null,
-      invoice_sku: featureInvoice?.sku ?? actionPlan?.sku ?? null,
-      invoice_amount: featureInvoice?.amount_xtr ?? actionPlan?.amount_xtr ?? null,
+      invoice_kind: "feature",
+      invoice_sku: featureInvoice?.sku ?? actionPlan.sku,
+      invoice_amount: featureInvoice?.amount_xtr ?? actionPlan.amount_xtr,
       original_invoice_amount:
         normalizePositiveInteger(featureInvoice?.payload_json.original_amount_xtr)
-        ?? actionPlan?.original_amount_xtr
+        ?? actionPlan.original_amount_xtr
         ?? null,
       promo_key:
         normalizeString(
@@ -1832,14 +1865,14 @@ export class MediaCommerceDecisionService {
             ? featureInvoice.payload_json.promo_key
             : null,
         )
-        ?? actionPlan?.promo_key
+        ?? actionPlan.promo_key
         ?? null,
-      invoice_title: featureInvoice?.invoice_title ?? actionPlan?.title ?? null,
+      invoice_title: featureInvoice?.invoice_title ?? actionPlan.title,
       invoice_description:
-        featureInvoice?.invoice_description ?? actionPlan?.description ?? null,
-      invoice_label: featureInvoice?.invoice_label ?? actionPlan?.label ?? null,
+        featureInvoice?.invoice_description ?? actionPlan.description,
+      invoice_label: featureInvoice?.invoice_label ?? actionPlan.label,
       invoice_button_text:
-        featureInvoice?.invoice_button_text ?? actionPlan?.button_text ?? null,
+        featureInvoice?.invoice_button_text ?? actionPlan.button_text,
       invoice_payload_json: featureInvoice?.payload_json ?? null,
       token_rows: revealTokenRows,
       token_rows_prepared: revealTokenRows.length,
@@ -2022,14 +2055,6 @@ export class MediaCommerceDecisionService {
       panel_text: panelText,
       panel_entities_json: panelEntities ?? [],
     });
-
-    if (!context) {
-      return {
-        ...callbackBase,
-        operation: "noop",
-        reason: "media_context_not_found",
-      };
-    }
 
     return this.applyMediaActionDecision(callbackBase, context);
   }
@@ -2437,10 +2462,6 @@ export class MediaCommerceDecisionService {
           ?? base.panel_entities_json
           ?? [],
       });
-      if (!context) {
-        return { ...base, operation: "noop", reason: "media_context_not_found" };
-      }
-
       if (boundPhotoUuid) {
         const boundPhoto = await this.repository.loadPhotoByUuid(boundPhotoUuid);
         if (!boundPhoto?.photo_url) {
@@ -2568,7 +2589,7 @@ export class MediaCommerceDecisionService {
             media_signature: context.media_signature,
             target_message_id: context.target_message_id,
             current_uuid: decision.current_uuid,
-            base_price_xtr: Number(context.base_price_xtr ?? 10),
+            base_price_xtr: normalizePositiveInteger(context.base_price_xtr) ?? 10,
             requested_action: requestedPhotoAction,
             panel_text: decision.caption_text,
             panel_entities_json: decision.caption_entities_json,
@@ -2584,7 +2605,7 @@ export class MediaCommerceDecisionService {
         media_signature: context.media_signature,
         target_message_id: context.target_message_id,
         current_uuid: decision.current_uuid,
-        base_price_xtr: Number(context.base_price_xtr ?? 10),
+        base_price_xtr: normalizePositiveInteger(context.base_price_xtr) ?? 10,
         subscription_active: context.subscription_active === true,
         scene_access_active: context.scene_access_active === true,
       })
@@ -3126,6 +3147,12 @@ export class MediaCommerceDecisionService {
     const payload = parseJsonObject(loaded.payload_json) ?? {};
     const loadedToken = loaded.token;
     const loadedChatId = normalizePositiveInteger(loaded.chat_id);
+    if (!loadedChatId) {
+      throw new MediaRepositoryContractError("payment.external.loadInvoiceTokenByExternalPaymentId", {
+        field: "chat_id",
+        reason: "invalid",
+      });
+    }
     const actionResolution = resolveInvoiceActionResult(payload, loaded.action_kind);
     if (actionResolution.reason != null || !actionResolution.action) {
       return {
@@ -3165,7 +3192,7 @@ export class MediaCommerceDecisionService {
       });
       return {
         ...base,
-        chat_id: loadedChatId ?? base.chat_id,
+        chat_id: loadedChatId,
         payment_source: "sbp",
         payment_kind: resolvedAction.payment_kind,
         payment_token: loaded.token,
@@ -3173,9 +3200,11 @@ export class MediaCommerceDecisionService {
         reason: "payment_status_conflict",
       };
     }
+    const paymentTotalAmount = normalizePositiveInteger(input.payment_total_amount);
     if (
       normalizeString(loaded.currency ?? "RUB") !== "RUB"
       || normalizeString(input.payment_currency) !== "RUB"
+      || !paymentTotalAmount
     ) {
       return {
         ...base,
@@ -3217,7 +3246,7 @@ export class MediaCommerceDecisionService {
         },
         () => this.repository.markInvoicePaid({
           token: loadedToken,
-          chat_id: loadedChatId ?? 0,
+          chat_id: loadedChatId,
           expected_kind: INVOICE_PAYLOAD_KIND,
           expected_action_kind: resolvedAction.action_kind,
           payment_source: "sbp",
@@ -3225,7 +3254,7 @@ export class MediaCommerceDecisionService {
           provider_payment_charge_id: null,
           external_payment_id: externalPaymentId,
           payment_currency: normalizeString(input.payment_currency),
-          payment_total_amount: normalizeNonNegativeInteger(input.payment_total_amount),
+          payment_total_amount: paymentTotalAmount,
           checkout_url: normalizeString(input.checkout_url),
         }),
       );
@@ -3574,18 +3603,6 @@ export class MediaCommerceDecisionService {
       () => this.repository.loadMediaContext(mediaContextInput),
     );
 
-    if (!context) {
-      return {
-        ...base,
-        chat_id: paidRow.chat_id,
-        scene_session_id: paidRow.scene_session_id,
-        turn_no: paidRow.turn_no,
-        payment_kind: "photo",
-        payment_token: paidRow.token,
-        reason: "media_context_not_found",
-      };
-    }
-
     const response = await this.applyMediaActionDecision(
       {
         ...base,
@@ -3765,10 +3782,10 @@ export class MediaCommerceDecisionService {
       .slice()
       .sort(
         (left, right) =>
-          Number(left.payload_json.sort_order ?? 100)
-          - Number(right.payload_json.sort_order ?? 100)
-          || Number(left.payload_json.subscription_days ?? 0)
-          - Number(right.payload_json.subscription_days ?? 0)
+          (normalizeNonNegativeInteger(left.payload_json.sort_order) ?? 100)
+          - (normalizeNonNegativeInteger(right.payload_json.sort_order) ?? 100)
+          || (normalizePositiveInteger(left.payload_json.subscription_days) ?? 0)
+          - (normalizePositiveInteger(right.payload_json.subscription_days) ?? 0)
           || getSourceSortOrder(normalizePaymentSource(left.payment_source))
           - getSourceSortOrder(normalizePaymentSource(right.payment_source)),
       );

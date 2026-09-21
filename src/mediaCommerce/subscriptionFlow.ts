@@ -8,6 +8,7 @@ import type {
   PaymentSource,
 } from "../mediaCommerceTypes.js";
 import { buildTelegramInvoicePayload, INVOICE_TTL_MS } from "./utils.js";
+import { MediaRepositoryContractError } from "../mediaCommerceRepository/errors.js";
 
 type CommercePlan = {
   sku: string;
@@ -63,9 +64,13 @@ function buildPaymentInputRow(input: {
   plan: CommercePlan;
 }): UpsertInvoiceTokenInput {
   const isStars = input.source === "stars";
-  const amount = isStars
-    ? input.plan.amount_xtr
-    : Math.max(1, Math.trunc(input.plan.amount_rub ?? 0));
+  const amount = isStars ? input.plan.amount_xtr : input.plan.amount_rub;
+  if (amount == null || !Number.isInteger(amount) || amount <= 0) {
+    throw new MediaRepositoryContractError("buildPaymentInputRow", {
+      field: input.source === "sbp" ? "amount_rub" : "amount_xtr",
+      reason: "invalid",
+    });
+  }
   const currency: PaymentCurrency = isStars ? "XTR" : "RUB";
 
   return {

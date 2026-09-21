@@ -1,18 +1,20 @@
 import { z } from "zod";
 import { loadExperimentConfigsFromEnv } from "./abTesting.js";
 
+const positiveIntegerSchema = z.number().int().positive();
+
 const invoicePlanSchema = z.object({
   sku: z.string().min(1),
-  amount_xtr: z.coerce.number().int().positive(),
-  amount_rub: z.coerce.number().int().positive().nullable().optional(),
+  amount_xtr: positiveIntegerSchema,
+  amount_rub: positiveIntegerSchema.nullable().optional(),
   title: z.string().min(1),
   description: z.string().min(1),
   label: z.string().min(1),
   button_text: z.string().min(1),
-});
+}).strict();
 
 const mediaSubscriptionPlanSchema = invoicePlanSchema.extend({
-  days: z.coerce.number().int().positive(),
+  days: positiveIntegerSchema,
 });
 
 const mediaPhotoPlanSchema = invoicePlanSchema;
@@ -23,22 +25,69 @@ const mediaActionPlanSchema = invoicePlanSchema.extend({
 
 const mediaPromotionItemSchema = z.object({
   sku: z.string().min(1),
-  promo_amount_xtr: z.coerce.number().int().positive(),
-  promo_amount_rub: z.coerce.number().int().positive().nullable().optional(),
-});
+  promo_amount_xtr: positiveIntegerSchema,
+  promo_amount_rub: positiveIntegerSchema.nullable().optional(),
+}).strict();
 
 const mediaPromotionSchema = z.object({
   promo_key: z.string().min(1),
   items: z.array(mediaPromotionItemSchema).min(1),
   starts_at: z.string().datetime({ offset: true }),
   ends_at: z.string().datetime({ offset: true }),
-}).superRefine((value, ctx) => {
+}).strict().superRefine((value, ctx) => {
   if (Date.parse(value.starts_at) > Date.parse(value.ends_at)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: "starts_at must be before or equal to ends_at",
       path: ["starts_at"],
     });
+  }
+  addUniqueStringIssue(
+    value.items.map((item) => item.sku),
+    "Promotion item skus must be unique",
+    ctx,
+    ["items"],
+  );
+});
+
+const mediaSubscriptionPlansSchema = z.array(mediaSubscriptionPlanSchema).min(1).superRefine((value, ctx) => {
+  addUniqueStringIssue(value.map((plan) => plan.sku), "Subscription plan skus must be unique", ctx);
+});
+
+const mediaPhotoPlansSchema = z.array(mediaPhotoPlanSchema).min(1).superRefine((value, ctx) => {
+  addUniqueStringIssue(value.map((plan) => plan.sku), "Photo plan skus must be unique", ctx);
+});
+
+const mediaActionPlansSchema = z.array(mediaActionPlanSchema).min(1).superRefine((value, ctx) => {
+  addUniqueStringIssue(value.map((plan) => plan.sku), "Action plan skus must be unique", ctx);
+  addUniqueStringIssue(value.map((plan) => plan.feature_key), "Action plan feature keys must be unique", ctx);
+});
+
+const mediaPromotionsSchema = z.array(mediaPromotionSchema).superRefine((value, ctx) => {
+  for (let leftIndex = 0; leftIndex < value.length; leftIndex += 1) {
+    const left = value[leftIndex]!;
+    const leftStart = Date.parse(left.starts_at);
+    const leftEnd = Date.parse(left.ends_at);
+    const leftSkus = new Set(left.items.map((item) => item.sku));
+
+    for (let rightIndex = leftIndex + 1; rightIndex < value.length; rightIndex += 1) {
+      const right = value[rightIndex]!;
+      const rightStart = Date.parse(right.starts_at);
+      const rightEnd = Date.parse(right.ends_at);
+      const overlaps = leftStart <= rightEnd && rightStart <= leftEnd;
+      if (!overlaps) {
+        continue;
+      }
+
+      const duplicateSku = right.items.find((item) => leftSkus.has(item.sku))?.sku;
+      if (duplicateSku) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Promotion windows for sku ${duplicateSku} must not overlap`,
+          path: [rightIndex, "items"],
+        });
+      }
+    }
   }
 });
 
@@ -193,6 +242,21 @@ function parseJsonEnv<T>(
   }
 }
 
+function addUniqueStringIssue(
+  values: string[],
+  message: string,
+  ctx: z.RefinementCtx,
+  path: (string | number)[] = [],
+): void {
+  if (new Set(values).size !== values.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message,
+      path,
+    });
+  }
+}
+
 const rawEnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().min(1).default("0.0.0.0"),
@@ -237,21 +301,21 @@ const rawEnvSchema = z.object({
     .transform((raw) =>
       parseJsonEnv(
         raw,
-        z.array(mediaSubscriptionPlanSchema).min(1),
+        mediaSubscriptionPlansSchema,
       )),
   MEDIA_PHOTO_PLANS_JSON: z
     .string()
     .transform((raw) =>
       parseJsonEnv(
         raw,
-        z.array(mediaPhotoPlanSchema).min(1),
+        mediaPhotoPlansSchema,
       )),
   MEDIA_ACTION_PLANS_JSON: z
     .string()
     .transform((raw) =>
       parseJsonEnv(
         raw,
-        z.array(mediaActionPlanSchema).min(1),
+        mediaActionPlansSchema,
       )),
   MEDIA_PROMOTIONS_JSON: z
     .string()
@@ -259,7 +323,7 @@ const rawEnvSchema = z.object({
     .transform((raw) =>
       parseJsonEnv(
         raw,
-        z.array(mediaPromotionSchema),
+        mediaPromotionsSchema,
       )),
   REWARD_SLOTS_JSON: z
     .string()

@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { sql } from "../db.js";
+import { normalizeNonNegativeInteger } from "../numeric.js";
 import type { MediaContext, MediaOfferStats } from "../mediaCommerceTypes.js";
 import {
   asJsonValue,
@@ -28,7 +29,7 @@ export class MediaCatalogRepository {
       uuid: typeof entry.uuid === "string" ? entry.uuid : null,
       bucket_name: typeof entry.bucket_name === "string" ? entry.bucket_name : null,
       storage_path: typeof entry.storage_path === "string" ? entry.storage_path : null,
-      sort_order: Number(entry.sort_order ?? 0),
+      sort_order: normalizeNonNegativeInteger(entry.sort_order) ?? 0,
       first_unlocked_at:
         typeof entry.first_unlocked_at === "string"
           ? entry.first_unlocked_at
@@ -66,7 +67,7 @@ export class MediaCatalogRepository {
     };
   }
 
-  async loadOfferStats(input: LoadOfferStatsInput): Promise<MediaOfferStats | null> {
+  async loadOfferStats(input: LoadOfferStatsInput): Promise<MediaOfferStats> {
     const rows = await this.query<MediaOfferStats[]>`
       SELECT *
       FROM public.media_load_offer_stats(
@@ -103,7 +104,7 @@ export class MediaCatalogRepository {
     return this.hydrateCatalogRow({ ...row, uuid: row.uuid });
   }
 
-  async loadMediaContext(input: LoadMediaContextInput): Promise<MediaContext | null> {
+  async loadMediaContext(input: LoadMediaContextInput): Promise<MediaContext> {
     const rows = await this.query<MediaContext[]>`
       SELECT *
       FROM public.media_load_media_context(

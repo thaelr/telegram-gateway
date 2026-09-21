@@ -504,6 +504,31 @@ test("preserves active scene id for /subscription when scene turn is unavailable
   assert.equal(result.scene_turn_no, null);
 });
 
+test("preserves reserved scene session on /start without treating it as started", async () => {
+  const { service, calls } = createService(
+    buildAccessContext({
+      active_scene_session_id: "scene-1",
+      scene_turn_no: -1,
+    }),
+  );
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/start",
+      event_type: "command.received",
+      message_type: "command",
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.action, "show_character_gallery");
+  assert.equal(result.reason, "scene_start");
+  assert.equal(result.scene_session_id, "scene-1");
+  assert.equal(result.active_scene_session_id, "scene-1");
+  assert.equal(result.scene_turn_no, null);
+  assert.equal(calls.length, 1);
+});
+
 test("returns character mode screen for character_select callback without repository call", async () => {
   const { service, calls } = createService(buildAccessContext(), {
     throwOnCall: true,
@@ -524,6 +549,79 @@ test("returns character mode screen for character_select callback without reposi
   assert.equal(typeof result.ux_copy, "object");
   assert.notEqual(result.ux_copy, null);
   assert.equal(calls.length, 0);
+});
+
+test("routes valid structured callbacks by exact contract", async () => {
+  const cases = [
+    {
+      callback_data: "reward_claim:2",
+      intent: "reward_claim",
+      action: "handle_reward_claim",
+      reward_slot: 2,
+    },
+    {
+      callback_data: "character_select:3",
+      intent: "character_select",
+      action: "show_character_mode_screen",
+      character_i: 3,
+    },
+    {
+      callback_data: "character_menu:back",
+      intent: "character_back",
+      action: "handle_character_back",
+    },
+    {
+      callback_data: "newscene_confirm:yes",
+      intent: "newscene_confirm",
+      action: "handle_newscene_confirm",
+    },
+    {
+      callback_data: "newscene_confirm:no",
+      intent: "newscene_confirm",
+      action: "handle_newscene_confirm",
+    },
+    {
+      callback_data: "terms_accept:start",
+      intent: "terms_accept",
+      action: "handle_terms_accept",
+    },
+    {
+      callback_data: "terms_accept:menu",
+      intent: "terms_accept",
+      action: "handle_terms_accept",
+    },
+    {
+      callback_data: "terms_accept:subscription",
+      intent: "terms_accept",
+      action: "handle_terms_accept",
+    },
+    {
+      callback_data: "terms_accept:paysupport",
+      intent: "terms_accept",
+      action: "handle_terms_accept",
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    const { service, calls } = createService(buildAccessContext(), {
+      throwOnCall: true,
+    });
+    const result = await service.evaluate(
+      buildRequest({
+        event_type: "callback_query.received",
+        callback_data: entry.callback_data,
+        character_i: null,
+        user_message: null,
+      }),
+    );
+
+    assert.equal(result.intent, entry.intent);
+    assert.equal(result.action, entry.action);
+    assert.equal(result.allowed, true);
+    if ("reward_slot" in entry) assert.equal(result.reward_slot, entry.reward_slot);
+    if ("character_i" in entry) assert.equal(result.character_i, entry.character_i);
+    assert.equal(calls.length, 0);
+  }
 });
 
 test("returns handle_character_back without repository call", async () => {
@@ -656,6 +754,80 @@ test("scene mode callback is not blocked by daily limit", async () => {
   assert.equal(result.allowed, true);
   assert.equal(result.reason, "scene_mode");
   assert.equal(calls.length, 1);
+});
+
+test("scene mode callback accepts mode with character id", async () => {
+  const { service, calls } = createService(buildAccessContext({ turns_today: 20 }));
+
+  const result = await service.evaluate(
+    buildRequest({
+      event_type: "callback_query.received",
+      callback_data: "scene_mode:fast:2",
+      character_i: null,
+      scene_mode: null,
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.intent, "scene_mode");
+  assert.equal(result.action, "handle_scene_mode");
+  assert.equal(result.scene_mode, "fast");
+  assert.equal(result.character_i, 2);
+  assert.equal(result.allowed, true);
+  assert.equal(calls.length, 1);
+});
+
+test("scene mode callback keeps two-part compatibility", async () => {
+  const { service, calls } = createService(buildAccessContext());
+
+  const result = await service.evaluate(
+    buildRequest({
+      event_type: "callback_query.received",
+      callback_data: "scene_mode:roleplay",
+      scene_mode: null,
+      user_message: null,
+    }),
+  );
+
+  assert.equal(result.intent, "scene_mode");
+  assert.equal(result.action, "handle_scene_mode");
+  assert.equal(result.scene_mode, "roleplay");
+  assert.equal(result.allowed, true);
+  assert.equal(calls.length, 1);
+});
+
+test("malformed known structured callbacks are ignored before commerce fallback", async () => {
+  const callbacks = [
+    "scene_mode:banana",
+    "scene_mode:fast:abc",
+    "scene_mode:fast:2:extra",
+    "character_select:abc",
+    "character_select:2:extra",
+    "newscene_confirm:maybe",
+    "terms_accept:whatever",
+    "reward_claim:1:extra",
+  ];
+
+  for (const callbackData of callbacks) {
+    const { service, calls } = createService(buildAccessContext(), {
+      throwOnCall: true,
+    });
+    const result = await service.evaluate(
+      buildRequest({
+        event_type: "callback_query.received",
+        callback_data: callbackData,
+        character_i: null,
+        scene_mode: null,
+        user_message: null,
+      }),
+    );
+
+    assert.equal(result.intent, "interaction_event");
+    assert.equal(result.action, "ignore");
+    assert.equal(result.decision, "noop");
+    assert.equal(result.allowed, true);
+    assert.equal(calls.length, 0);
+  }
 });
 
 test("payment is classified by event_type without route_target", async () => {

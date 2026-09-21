@@ -1,6 +1,10 @@
 import type { JSONValue } from "postgres";
 import type { AbTestAssignment, AbTestContext } from "../abTesting.js";
 import { sql } from "../db.js";
+import {
+  parseJsonArray as parseLenientJsonArray,
+  parseJsonObject as parseLenientJsonObject,
+} from "../json.js";
 import type {
   FreeActionRedeemResult,
   FreeCredits,
@@ -10,6 +14,7 @@ import type {
   PaymentCurrency,
   PaymentSource,
 } from "../mediaCommerceTypes.js";
+import { MediaRepositoryContractError } from "./errors.js";
 
 export type QueryClient = typeof sql;
 
@@ -48,12 +53,12 @@ export type UpsertInvoiceTokenInput = SceneTurnRef & {
   payload_json: Record<string, unknown>;
   action_kind: string;
   sku: string;
-  payment_source?: PaymentSource | null;
-  amount?: number | null;
-  currency?: PaymentCurrency | null;
+  payment_source: PaymentSource;
+  amount: number;
+  currency: PaymentCurrency;
   amount_xtr: number | null;
   telegram_invoice_payload: string | null;
-  checkout_url?: string | null;
+  checkout_url: string | null;
   external_payment_id?: string | null;
   expires_at: string;
   invoice_title: string;
@@ -180,39 +185,39 @@ export type FinalizeFreePhotoUnlockInput = SceneTurnRef & {
 };
 
 export function parseJsonArray(value: unknown): unknown[] {
-  if (Array.isArray(value)) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
-
-  return [];
+  return parseLenientJsonArray(value) ?? [];
 }
 
 export function parseJsonObject(value: unknown): Record<string, unknown> | null {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
+  return parseLenientJsonObject(value);
+}
 
+function describeJsonObjectFailure(value: unknown): string {
+  if (value == null) return "missing";
   if (typeof value === "string") {
     try {
       const parsed = JSON.parse(value) as unknown;
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? (parsed as Record<string, unknown>)
-        : null;
+      return Array.isArray(parsed) ? "array" : "scalar";
     } catch {
-      return null;
+      return "malformed_json";
     }
   }
+  if (Array.isArray(value)) return "array";
+  return "scalar";
+}
 
-  return null;
+export function parseStrictJsonObject(
+  value: unknown,
+  operation: string,
+  field = "payload_json",
+): Record<string, unknown> {
+  const parsed = parseJsonObject(value);
+  if (parsed) return parsed;
+
+  throw new MediaRepositoryContractError(operation, {
+    field,
+    reason: describeJsonObjectFailure(value),
+  });
 }
 
 export function asJsonValue(value: unknown): JSONValue {

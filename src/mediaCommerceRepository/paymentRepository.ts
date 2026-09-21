@@ -1,4 +1,5 @@
 import type { PaidInvoiceToken } from "../mediaCommerceTypes.js";
+import { parseStrictJsonObject } from "./shared.js";
 import type {
   ActivateSceneAccessInput,
   ActivateSubscriptionInput,
@@ -13,6 +14,28 @@ import type {
 
 export class MediaPaymentRepository {
   constructor(private readonly query: QueryClient) {}
+
+  private validateRedeemResult(
+    row: RedeemFreeActionResult | null,
+    operation: string,
+  ): RedeemFreeActionResult | null {
+    if (
+      row
+      && (
+        row.token != null
+        || row.redeemed === true
+        || row.already_consumed === true
+        || row.already_fulfilled === true
+      )
+    ) {
+      return {
+        ...row,
+        payload_json: parseStrictJsonObject(row.payload_json, operation),
+      };
+    }
+
+    return row;
+  }
 
   async storePrecheckoutResult(input: StorePrecheckoutResultInput): Promise<void> {
     await this.query`
@@ -151,7 +174,10 @@ export class MediaPaymentRepository {
       )
     `;
 
-    return rows[0] ?? null;
+    return this.validateRedeemResult(
+      rows[0] ?? null,
+      "media_redeem_free_fast_scene_skip",
+    );
   }
 
   async redeemFreeSceneUnlock(
@@ -166,7 +192,10 @@ export class MediaPaymentRepository {
       )
     `;
 
-    return rows[0] ?? null;
+    return this.validateRedeemResult(
+      rows[0] ?? null,
+      "media_redeem_free_scene_unlock",
+    );
   }
 
   async redeemFreePhotoUnlock(
@@ -181,6 +210,9 @@ export class MediaPaymentRepository {
       )
     `;
 
-    return rows[0] ?? null;
+    return this.validateRedeemResult(
+      rows[0] ?? null,
+      "media_redeem_free_photo_unlock",
+    );
   }
 }

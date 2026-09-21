@@ -99,8 +99,15 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
   },
 ]);
 
-const { MediaCommerceDecisionService } = await import(
+const { MediaCommerceDecisionService, buildPaymentOption } = await import(
   "../src/mediaCommerceDecisionService.js"
+);
+const { toPaidInvoiceToken } = await import("../src/mediaCommerce/paymentFlow.js");
+const { buildSubscriptionPaymentInputs } = await import(
+  "../src/mediaCommerce/subscriptionFlow.js"
+);
+const { MediaRepositoryContractError } = await import(
+  "../src/mediaCommerceRepository/errors.js"
 );
 const { config } = await import("../src/config.js");
 const { SbpPaymentError } = await import("../src/payments/sbp.js");
@@ -113,7 +120,7 @@ const {
 type MockRepository = {
   loadOfferStats: (
     input: unknown,
-  ) => Promise<MediaOfferStats | null>;
+  ) => Promise<MediaOfferStats>;
   upsertCallbackTokens: (
     tokenRows: InteractionTokenRow[],
   ) => Promise<number>;
@@ -129,7 +136,7 @@ type MockRepository = {
   ) => Promise<LoadedCallbackToken | null>;
   loadMediaContext: (
     input: unknown,
-  ) => Promise<MediaContext | null>;
+  ) => Promise<MediaContext>;
   loadPhotoByUuid: (uuid: string) => Promise<{
     uuid: string;
     bucket_name: string | null;
@@ -545,6 +552,100 @@ function buildRequest(
     ...overrides,
   };
 }
+
+test("toPaidInvoiceToken preserves valid paid persisted payload", () => {
+  const paid = toPaidInvoiceToken(buildLoadedInvoiceToken({
+    status: "paid",
+    payload_json: { action_kind: "photo_payment", current_uuid: "u1" },
+  }));
+
+  assert.ok(paid);
+  assert.equal(paid.token, "inv_payload");
+  assert.equal(paid.status, "paid");
+  assert.deepEqual(paid.payload_json, {
+    action_kind: "photo_payment",
+    current_uuid: "u1",
+  });
+});
+
+test("toPaidInvoiceToken rejects fake paid defaults", () => {
+  assert.throws(
+    () => toPaidInvoiceToken(buildLoadedInvoiceToken({ status: null })),
+    MediaRepositoryContractError,
+  );
+  assert.throws(
+    () => toPaidInvoiceToken(buildLoadedInvoiceToken({ status: "invoice_sent" })),
+    MediaRepositoryContractError,
+  );
+  assert.throws(
+    () => toPaidInvoiceToken(buildLoadedInvoiceToken({
+      status: "paid",
+      payload_json: null,
+    })),
+    MediaRepositoryContractError,
+  );
+  assert.throws(
+    () => toPaidInvoiceToken(buildLoadedInvoiceToken({
+      status: "paid",
+      payload_json: "not-json" as never,
+    })),
+    MediaRepositoryContractError,
+  );
+});
+
+test("buildPaymentOption requires explicit persisted payment fields", () => {
+  const valid = buildStoredInvoiceToken({
+    payment_source: "stars",
+    amount: 10,
+    currency: "XTR",
+    checkout_url: null,
+    invoice_link: "https://t.me/invoice",
+    payload_json: { action_kind: "photo_payment" },
+  });
+
+  assert.equal(buildPaymentOption(valid).checkout_url, "https://t.me/invoice");
+
+  for (const row of [
+    { ...valid, payment_source: null },
+    { ...valid, currency: null },
+    { ...valid, amount: null },
+    { ...valid, checkout_url: null, invoice_link: null },
+    { ...valid, payload_json: null as never },
+  ] as StoredInvoiceToken[]) {
+    assert.throws(() => buildPaymentOption(row), MediaRepositoryContractError);
+  }
+});
+
+test("subscription payment inputs do not fabricate SBP amount", () => {
+  const previousEnabled = config.SBP_ENABLED;
+  config.SBP_ENABLED = true;
+  try {
+    const rows = buildSubscriptionPaymentInputs({
+      chat_id: 101,
+      idempotency_key: "idem-1",
+      subscription_offer_reason: "subscription_command",
+      turn_limit: 20,
+      turns_today: 0,
+      turn_limit_reset_text: "00:00 МСК",
+      sort_order: 0,
+      plan: {
+        sku: "payment_plan_2",
+        days: 14,
+        amount_xtr: 200,
+        amount_rub: null,
+        title: "Plan",
+        description: "Desc",
+        label: "Label",
+        button_text: "Button",
+      },
+    });
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.payment_source, "stars");
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+  }
+});
 
 function createRepository(
   overrides: Partial<MockRepository> = {},
@@ -1309,12 +1410,13 @@ test("prepare_offer defers active photo promotion pricing until click", async ()
   });
 });
 
-test("feature_offer is routed in TS and returns a ready Stars invoice", async () => {
+test("feature_offer is routed in TS and returns a ready Stars invoice for configured custom feature", async () => {
   const { service, calls } = createRepository();
 
   const result = await service.evaluate(
     buildRequest({
       interaction_mode: "feature_offer",
+      feature_key: "future_action_3",
       character_i: 2,
       scene_mode: "fast",
       target_message_id: 777,
@@ -1324,8 +1426,9 @@ test("feature_offer is routed in TS and returns a ready Stars invoice", async ()
   assert.equal(result.route, "feature_offer");
   assert.equal(result.operation, "feature_offer_required");
   assert.equal(result.chat_id, 101);
-  assert.equal(result.invoice_sku, "payment_action_1");
-  assert.equal(result.invoice_amount, 50);
+  assert.equal(result.feature_key, "future_action_3");
+  assert.equal(result.invoice_sku, "payment_action_3");
+  assert.equal(result.invoice_amount, 100);
   assert.equal(result.invoice_link, "https://t.me/generated-invoice-1");
   assert.equal(findPaymentOption(result.payment_options, "stars")?.checkout_url, "https://t.me/generated-invoice-1");
   assert.equal(result.token_rows?.length, 1);
@@ -1335,6 +1438,23 @@ test("feature_offer is routed in TS and returns a ready Stars invoice", async ()
   assert.equal(result.scene_mode, "fast");
   assert.equal(result.target_message_id, 777);
   assert.equal(calls.createStarsInvoice, 1);
+});
+
+test("feature_offer rejects missing or unconfigured feature_key without defaulting", async () => {
+  for (const featureKey of [undefined, "unknown_feature"]) {
+    const { service, calls } = createRepository();
+
+    const result = await service.evaluate(
+      buildRequest({
+        interaction_mode: "feature_offer",
+        feature_key: featureKey,
+      }),
+    );
+
+    assert.equal(result.reason, "feature_key_invalid");
+    assert.equal(calls.loadFreeCredits, 0);
+    assert.equal(calls.createStarsInvoice, 0);
+  }
 });
 
 test("feature_offer returns free fast scene skip callback when credit is available", async () => {
@@ -1356,6 +1476,7 @@ test("feature_offer returns free fast scene skip callback when credit is availab
   const result = await service.evaluate(
     buildRequest({
       interaction_mode: "feature_offer",
+      feature_key: "fast_scene_skip",
       character_i: 2,
       scene_mode: "fast",
       target_message_id: 777,
@@ -1398,6 +1519,7 @@ test("feature_offer returns Stars and lazy SBP options without creating a transa
     const result = await service.evaluate(
       buildRequest({
         interaction_mode: "feature_offer",
+        feature_key: "fast_scene_skip",
         character_i: 2,
         scene_mode: "fast",
         target_message_id: 777,
@@ -1469,6 +1591,7 @@ test("feature_offer does not inspect or reuse provider checkout while rendering"
     const result = await service.evaluate(
       buildRequest({
         interaction_mode: "feature_offer",
+        feature_key: "fast_scene_skip",
         character_i: 2,
         scene_mode: "fast",
         target_message_id: 777,
@@ -1557,6 +1680,7 @@ test("concurrent feature offer renders do not create SBP transactions", async ()
       service.evaluate(
         buildRequest({
           interaction_mode: "feature_offer",
+          feature_key: "fast_scene_skip",
           character_i: 2,
           scene_mode: "fast",
           target_message_id: 777,
@@ -1565,6 +1689,7 @@ test("concurrent feature offer renders do not create SBP transactions", async ()
       service.evaluate(
         buildRequest({
           interaction_mode: "feature_offer",
+          feature_key: "fast_scene_skip",
           character_i: 2,
           scene_mode: "fast",
           target_message_id: 777,
@@ -1680,6 +1805,7 @@ test("feature_offer reveal preparation leaves SBP transaction creation to GET", 
       service.evaluate(
         buildRequest({
           interaction_mode: "feature_offer",
+          feature_key: "fast_scene_skip",
           character_i: 2,
           scene_mode: "fast",
           target_message_id: 777,
@@ -1688,6 +1814,7 @@ test("feature_offer reveal preparation leaves SBP transaction creation to GET", 
       service.evaluate(
         buildRequest({
           interaction_mode: "feature_offer",
+          feature_key: "fast_scene_skip",
           character_i: 2,
           scene_mode: "fast",
           target_message_id: 777,
@@ -1795,6 +1922,7 @@ test("feature_offer render never reaches an ambiguous SBP provider failure", asy
         service.evaluate(
           buildRequest({
             interaction_mode: "feature_offer",
+            feature_key: "fast_scene_skip",
             character_i: 2,
             scene_mode: "fast",
             target_message_id: 777,
@@ -1803,6 +1931,7 @@ test("feature_offer render never reaches an ambiguous SBP provider failure", asy
         service.evaluate(
           buildRequest({
             interaction_mode: "feature_offer",
+            feature_key: "fast_scene_skip",
             character_i: 2,
             scene_mode: "fast",
             target_message_id: 777,
@@ -1874,6 +2003,7 @@ test("feature_offer render does not acquire a claim or call a timing-out provide
       await service.evaluate(
         buildRequest({
           interaction_mode: "feature_offer",
+          feature_key: "fast_scene_skip",
           character_i: 2,
           scene_mode: "fast",
           target_message_id: 777,
@@ -2967,8 +3097,28 @@ test("pre_checkout validates token and stores decision", async () => {
   });
 });
 
+test("pre_checkout allows missing expires_at as no expiry", async () => {
+  const { service } = createRepository({
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({ expires_at: null });
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "payment.pre_checkout.received",
+    chat_id: 101,
+    invoice_payload: "inv_payload",
+    pre_checkout_query_id: "pcq-missing-expiry",
+    payment_currency: "XTR",
+    payment_total_amount: 10,
+  }));
+
+  assert.equal(result.operation, "answer_precheckout");
+  assert.equal(result.precheckout_ok, true);
+});
+
 for (const expiry of [
-  { name: "missing", value: null },
   { name: "malformed", value: "not-a-date" },
   { name: "expired", value: new Date(Date.now() - 60_000).toISOString() },
   {
@@ -3020,6 +3170,38 @@ test("pre_checkout rejects missing row action_kind even if payload action_kind i
       chat_id: 101,
       invoice_payload: "inv_payload",
       pre_checkout_query_id: "pcq-action-null",
+      payment_currency: "XTR",
+      payment_total_amount: 10,
+    }),
+  );
+
+  assert.equal(result.operation, "answer_precheckout");
+  assert.equal(result.precheckout_ok, false);
+  assert.equal(result.reason, "invoice_action_kind_invalid");
+});
+
+test("pre_checkout rejects subscription invoice without valid subscription_days", async () => {
+  const { service } = createRepository({
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        action_kind: "subscription_payment",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 0,
+          subscription_sku: "payment_plan_2",
+          chat_id: 101,
+        },
+      });
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.pre_checkout.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      pre_checkout_query_id: "pcq-subscription-days-invalid",
       payment_currency: "XTR",
       payment_total_amount: 10,
     }),
@@ -3328,6 +3510,46 @@ test("payment.confirmed.received resolves SBP payment by external id without int
   assert.deepEqual(calls.loadInvoiceTokenByExternalPaymentIdArgs, ["platega-transaction-1"]);
   assert.equal(calls.markInvoicePaid, 1);
   assert.equal(calls.activateSubscription, 1);
+});
+
+test("payment.confirmed.received rejects persisted SBP invoice without chat_id", async () => {
+  const { service, calls } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId(externalPaymentId) {
+      calls.loadInvoiceTokenByExternalPaymentIdArgs.push(externalPaymentId);
+      return buildLoadedInvoiceToken({
+        chat_id: null,
+        token: "telegram:1:payment_plan_2:sbp",
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        payment_source: "sbp",
+        amount: 299,
+        amount_xtr: null,
+        currency: "RUB",
+        external_payment_id: "platega-transaction-missing-chat",
+        checkout_url: "https://platega.example/checkout/missing-chat",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 14,
+          subscription_sku: "payment_plan_2",
+        },
+      });
+    },
+  });
+
+  await assert.rejects(() =>
+    service.evaluate(
+      buildRequest({
+        interaction_mode: null,
+        event_type: "payment.confirmed.received",
+        payment_source: "sbp",
+        external_payment_id: "platega-transaction-missing-chat",
+        payment_currency: "RUB",
+        payment_total_amount: 299,
+        chat_id: null,
+      }),
+    ), MediaRepositoryContractError);
+
+  assert.equal(calls.markInvoicePaid, 0);
 });
 
 for (const [invoiceAmount, webhookAmount] of [[50, 52], [300, 312]] as const) {
@@ -3868,17 +4090,17 @@ test("payment_success does not re-activate an already processed subscription", a
   assert.equal(calls.activateSubscription, 1);
 });
 
-test("payment_success returns deferred feature fulfillment for supported feature keys", async () => {
+test("payment_success returns deferred feature fulfillment for configured custom feature keys", async () => {
   const { service, calls } = createRepository({
     async loadInvoiceToken(token, chatId) {
       calls.loadInvoiceTokenArgs.push({ token, chatId });
       return buildLoadedInvoiceToken({
         action_kind: "feature_payment",
-        sku: "payment_action_1",
-        amount_xtr: 50,
+        sku: "payment_action_3",
+        amount_xtr: 100,
         payload_json: {
           action_kind: "feature_payment",
-          feature_key: "fast_scene_skip",
+          feature_key: "future_action_3",
           chat_id: 101,
           scene_session_id: "scene-1",
           turn_no: 5,
@@ -3894,11 +4116,11 @@ test("payment_success returns deferred feature fulfillment for supported feature
       calls.markInvoicePaid += 1;
       return buildPaidInvoiceToken({
         action_kind: "feature_payment",
-        sku: "payment_action_1",
-        amount_xtr: 50,
+        sku: "payment_action_3",
+        amount_xtr: 100,
         payload_json: {
           action_kind: "feature_payment",
-          feature_key: "fast_scene_skip",
+          feature_key: "future_action_3",
           chat_id: 101,
           scene_session_id: "scene-1",
           turn_no: 5,
@@ -3921,17 +4143,17 @@ test("payment_success returns deferred feature fulfillment for supported feature
       telegram_payment_charge_id: "charge-feature",
       provider_payment_charge_id: "provider-feature",
       payment_currency: "XTR",
-      payment_total_amount: 50,
+      payment_total_amount: 100,
     }),
   );
 
   assert.equal(result.operation, "feature_fulfillment_required");
   assert.equal(result.payment_kind, "feature");
-  assert.equal(result.feature_key, "fast_scene_skip");
+  assert.equal(result.feature_key, "future_action_3");
   assert.equal(result.character_i, 2);
   assert.equal(result.scene_mode, "fast");
   assert.equal(result.target_message_id, 777);
-  assert.equal(result.reason, "feature_fast_scene_skip_fulfillment_required");
+  assert.equal(result.reason, "feature_future_action_3_fulfillment_required");
 });
 
 test("payment_success activates scene access for scene unlock invoices", async () => {
@@ -5735,7 +5957,6 @@ test("SBP checkout rejects stale and malformed invoice lifecycle before provider
   const cases: Array<{ name: string; overrides: Partial<StoredInvoiceToken> }> = [
     { name: "expired", overrides: { expires_at: new Date(Date.now() - 1_000).toISOString() } },
     { name: "malformed expiry", overrides: { expires_at: "not-a-date" } },
-    { name: "missing expiry", overrides: { expires_at: null } },
     { name: "paid", overrides: { status: "paid" } },
     { name: "fulfilled", overrides: { status: "fulfilled" } },
     { name: "canceled", overrides: { status: "canceled" } },

@@ -9,29 +9,46 @@ import { sql } from "../db.js";
 import {
   asJsonValue,
   type QueryClient,
-  parseJsonObject,
+  parseStrictJsonObject,
   type LoadAbTestAssignmentResult,
   type SbpCheckoutCreationClaim,
   type UpsertInvoiceTokenBatchInput,
   type UpsertInvoiceTokenInput,
 } from "./shared.js";
+import { normalizePositiveInteger } from "../numeric.js";
+import { MediaRepositoryContractError } from "./errors.js";
 
 export class MediaInteractionTokenRepository {
   constructor(private readonly query: QueryClient) {}
 
-  private normalizeInvoiceTokenInput(
+  private validateInvoiceTokenInput(
     input: UpsertInvoiceTokenInput,
   ): UpsertInvoiceTokenInput {
-    const paymentSource = input.payment_source ?? "stars";
-    const amount = input.amount ?? input.amount_xtr ?? null;
-    const currency = input.currency ?? (paymentSource === "sbp" ? "RUB" : "XTR");
+    if (input.payment_source !== "stars" && input.payment_source !== "sbp") {
+      throw new MediaRepositoryContractError("media_upsert_invoice_token", {
+        field: "payment_source",
+        reason: "invalid",
+      });
+    }
+    if (input.currency !== "XTR" && input.currency !== "RUB") {
+      throw new MediaRepositoryContractError("media_upsert_invoice_token", {
+        field: "currency",
+        reason: "invalid",
+      });
+    }
+    if (normalizePositiveInteger(input.amount) == null) {
+      throw new MediaRepositoryContractError("media_upsert_invoice_token", {
+        field: "amount",
+        reason: "invalid",
+      });
+    }
 
     return {
       ...input,
-      payment_source: paymentSource,
-      amount,
-      currency,
-      payload_json: parseJsonObject(input.payload_json) ?? {},
+      payload_json: parseStrictJsonObject(
+        input.payload_json,
+        "media_upsert_invoice_token",
+      ),
     };
   }
 
@@ -48,7 +65,7 @@ export class MediaInteractionTokenRepository {
   async upsertInvoiceToken(
     input: UpsertInvoiceTokenInput,
   ): Promise<StoredInvoiceToken | null> {
-    const normalizedInput = this.normalizeInvoiceTokenInput(input);
+    const normalizedInput = this.validateInvoiceTokenInput(input);
 
     const rows = await this.query<StoredInvoiceToken[]>`
       SELECT *
@@ -87,7 +104,7 @@ export class MediaInteractionTokenRepository {
       return [];
     }
 
-    const normalizedInputs = inputs.map((input) => this.normalizeInvoiceTokenInput(input));
+    const normalizedInputs = inputs.map((input) => this.validateInvoiceTokenInput(input));
 
     return this.query<StoredInvoiceToken[]>`
       SELECT *
@@ -125,7 +142,9 @@ export class MediaInteractionTokenRepository {
           chat_id: row.chat_id,
           scene_session_id: row.scene_session_id,
           turn_no: row.turn_no,
-          payload_json: row.payload_json,
+          payload_json: row.found
+            ? parseStrictJsonObject(row.payload_json, "media_load_interaction_token")
+            : row.payload_json,
           status: row.status,
           action_kind: row.action_kind,
           expires_at: row.expires_at,
@@ -154,7 +173,9 @@ export class MediaInteractionTokenRepository {
           chat_id: row.chat_id,
           scene_session_id: row.scene_session_id,
           turn_no: row.turn_no,
-          payload_json: row.payload_json,
+          payload_json: row.found
+            ? parseStrictJsonObject(row.payload_json, "media_load_invoice_token")
+            : row.payload_json,
           status: row.status,
           action_kind: row.action_kind,
           sku: row.sku ?? null,
@@ -190,7 +211,12 @@ export class MediaInteractionTokenRepository {
           chat_id: row.chat_id,
           scene_session_id: row.scene_session_id,
           turn_no: row.turn_no,
-          payload_json: row.payload_json,
+          payload_json: row.found
+            ? parseStrictJsonObject(
+                row.payload_json,
+                "media_load_invoice_token_by_external_payment_id",
+              )
+            : row.payload_json,
           status: row.status,
           action_kind: row.action_kind,
           sku: row.sku ?? null,
@@ -273,12 +299,20 @@ export class MediaInteractionTokenRepository {
       return [];
     }
 
-    return this.query<StoredInvoiceToken[]>`
+    const rows = await this.query<StoredInvoiceToken[]>`
       SELECT *
       FROM public.media_load_stored_invoice_tokens(
         ${sql.json(asJsonValue(tokens))}
       )
     `;
+
+    return rows.map((row) => ({
+      ...row,
+      payload_json: parseStrictJsonObject(
+        row.payload_json,
+        "media_load_stored_invoice_tokens",
+      ),
+    }));
   }
 
   async loadAbTestAssignment(

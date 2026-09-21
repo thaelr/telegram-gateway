@@ -11,7 +11,8 @@
     "start": "node --enable-source-maps dist/server.js",
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test --import tsx"
+    "test": "node --test --import tsx \"test/*.test.ts\"",
+    "test:workspace": "node --test --import tsx \"test/workspace/*.test.ts\""
   },
   "dependencies": {
     "dotenv": "^16.4.7",

@@ -8,8 +8,12 @@ import {
   normalizeNonNegativeInteger,
   normalizePositiveInteger,
   normalizeString,
+  isExpired,
   parseJsonObject,
 } from "./utils.js";
+import { resolveActionPlanByFeatureKey } from "./plans.js";
+import { MediaRepositoryContractError } from "../mediaCommerceRepository/errors.js";
+import { parseStrictJsonObject } from "../mediaCommerceRepository/shared.js";
 
 const SUPPORTED_PAYMENT_ACTIONS = new Set([
   "subscription_payment",
@@ -17,7 +21,6 @@ const SUPPORTED_PAYMENT_ACTIONS = new Set([
   "feature_payment",
 ]);
 
-const SUPPORTED_FEATURE_KEYS = new Set(["fast_scene_skip", "scene_unlock"]);
 const SUPPORTED_PAYMENT_SOURCES = new Set(["stars", "sbp"]);
 
 export const INVOICE_PAYLOAD_KIND = "invoice_payload";
@@ -47,7 +50,7 @@ export type ResolvedInvoiceAction =
   | {
     action_kind: "feature_payment";
     payment_kind: "feature";
-    feature_key: "fast_scene_skip" | "scene_unlock";
+    feature_key: string;
     subscription_days: 0;
     subscription_sku: null;
   };
@@ -64,12 +67,15 @@ export function normalizePaymentActionKind(
 
 export function normalizeFeatureKey(
   value: string | null | undefined,
-): "fast_scene_skip" | "scene_unlock" | null {
+): string | null {
   const normalized = normalizeString(value);
-  if (!normalized || !SUPPORTED_FEATURE_KEYS.has(normalized)) {
-    return null;
-  }
-  return normalized as "fast_scene_skip" | "scene_unlock";
+  return normalized && resolveActionPlanByFeatureKey(normalized) ? normalized : null;
+}
+
+export function normalizeFeatureKeyValue(
+  value: string | null | undefined,
+): string | null {
+  return normalizeString(value);
 }
 
 export function hasExpectedPaymentDetails(
@@ -80,8 +86,8 @@ export function hasExpectedPaymentDetails(
 ): boolean {
   return (
     normalizeString(currency) === normalizeString(expectedCurrency)
-    && normalizeNonNegativeInteger(totalAmount) != null
-    && normalizeNonNegativeInteger(totalAmount) === normalizeNonNegativeInteger(amount)
+    && normalizePositiveInteger(totalAmount) != null
+    && normalizePositiveInteger(totalAmount) === normalizePositiveInteger(amount)
   );
 }
 
@@ -128,11 +134,16 @@ export function resolveInvoiceAction(
   }
 
   if (actionKind === "subscription_payment") {
+    const subscriptionDays = normalizePositiveInteger(payload.subscription_days);
+    if (!subscriptionDays) {
+      return null;
+    }
+
     return {
       action_kind: actionKind,
       payment_kind: "subscription",
       feature_key: null,
-      subscription_days: normalizePositiveInteger(payload.subscription_days) ?? 0,
+      subscription_days: subscriptionDays,
       subscription_sku: normalizeString(
         typeof payload.subscription_sku === "string"
           ? payload.subscription_sku
@@ -197,11 +208,22 @@ export function resolveInvoiceActionResult(
 
 export function toPaidInvoiceToken(
   row: LoadedInvoiceToken,
-): PaidInvoiceToken | null {
+): PaidInvoiceToken {
   const token = normalizeString(row.token);
   const chatId = normalizePositiveInteger(row.chat_id);
   if (!token || !chatId) {
-    return null;
+    throw new MediaRepositoryContractError("toPaidInvoiceToken", {
+      field: !token ? "token" : "chat_id",
+      reason: "invalid",
+    });
+  }
+
+  const status = normalizeString(row.status);
+  if (status !== "paid") {
+    throw new MediaRepositoryContractError("toPaidInvoiceToken", {
+      field: "status",
+      reason: "not_paid",
+    });
   }
 
   return {
@@ -210,12 +232,12 @@ export function toPaidInvoiceToken(
     chat_id: chatId,
     scene_session_id: normalizeString(row.scene_session_id),
     turn_no: normalizeNonNegativeInteger(row.turn_no),
-    payload_json: parseJsonObject(row.payload_json) ?? {},
-    status: normalizeString(row.status) ?? "paid",
+    payload_json: parseStrictJsonObject(row.payload_json, "toPaidInvoiceToken"),
+    status,
     action_kind: normalizeString(row.action_kind),
     sku: normalizeString(row.sku),
     payment_source: normalizePaymentSource(row.payment_source),
-    amount: normalizeNonNegativeInteger(row.amount),
+    amount: normalizePositiveInteger(row.amount),
     currency:
       normalizeString(row.currency) === "RUB"
         ? "RUB"
@@ -224,7 +246,7 @@ export function toPaidInvoiceToken(
           : null,
     checkout_url: normalizeString(row.checkout_url),
     external_payment_id: normalizeString(row.external_payment_id),
-    amount_xtr: normalizeNonNegativeInteger(row.amount_xtr),
+    amount_xtr: normalizePositiveInteger(row.amount_xtr),
     telegram_invoice_message_id:
       normalizePositiveInteger(row.telegram_invoice_message_id) ?? null,
   };
@@ -268,13 +290,7 @@ export function validatePrecheckout(
     };
   }
 
-  const expiresAt: unknown = tokenRow.expires_at;
-  const expiresAtMs = expiresAt instanceof Date
-    ? expiresAt.getTime()
-    : typeof expiresAt === "string" && expiresAt.trim()
-      ? Date.parse(expiresAt)
-      : Number.NaN;
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+  if (isExpired(tokenRow.expires_at)) {
     return {
       ok: false,
       error: config.TELEGRAM_UX_COPY_JSON.payment_errors.expired,
