@@ -624,6 +624,47 @@ test("routes valid structured callbacks by exact contract", async () => {
   }
 });
 
+test("structured callback payload fields are returned for n8n contracts", async () => {
+  const cases = [
+    {
+      callback_data: "newscene_confirm:yes",
+      field: "newscene_action",
+      value: "yes",
+    },
+    {
+      callback_data: "newscene_confirm:no",
+      field: "newscene_action",
+      value: "no",
+    },
+    {
+      callback_data: "terms_accept:menu",
+      field: "post_accept_intent",
+      value: "menu",
+    },
+    {
+      callback_data: "terms_accept:paysupport",
+      field: "post_accept_intent",
+      value: "paysupport",
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    const { service, calls } = createService(buildAccessContext(), {
+      throwOnCall: true,
+    });
+    const result = await service.evaluate(
+      buildRequest({
+        event_type: "callback_query.received",
+        callback_data: entry.callback_data,
+        user_message: null,
+      }),
+    );
+
+    assert.equal(result[entry.field], entry.value);
+    assert.equal(calls.length, 0);
+  }
+});
+
 test("returns handle_character_back without repository call", async () => {
   const { service, calls } = createService(buildAccessContext(), {
     throwOnCall: true,

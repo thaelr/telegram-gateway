@@ -32,6 +32,8 @@ type RouterClassification = {
   character_i?: number | null;
   scene_mode?: string | null;
   reward_slot?: number | null;
+  post_accept_intent?: "start" | "menu" | "subscription" | "paysupport" | null;
+  newscene_action?: "yes" | "no" | null;
 };
 
 type AccessRepository = Pick<ChatAccessRepository, "ensureAndLoadAccessContext">;
@@ -143,6 +145,7 @@ function parseStructuredCallback(
         domain: "interaction",
         intent: "terms_accept",
         action: "handle_terms_accept",
+        post_accept_intent: parts[1] as "start" | "menu" | "subscription" | "paysupport",
       };
     }
     case "newscene_confirm": {
@@ -153,6 +156,7 @@ function parseStructuredCallback(
         domain: "interaction",
         intent: "newscene_confirm",
         action: "handle_newscene_confirm",
+        newscene_action: parts[1] as "yes" | "no",
       };
     }
     case "character_select": {
@@ -400,6 +404,8 @@ export class AccessDecisionService {
       character_i: effectiveCharacterId,
       scene_mode: effectiveSceneMode,
       reward_slot: classification.reward_slot ?? null,
+      post_accept_intent: classification.post_accept_intent ?? null,
+      newscene_action: classification.newscene_action ?? null,
       ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
 
