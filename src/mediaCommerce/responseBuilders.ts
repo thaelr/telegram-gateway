@@ -29,6 +29,7 @@ export function buildBaseResponse(
     character_i: normalizePositiveInteger(input.character_i),
     scene_mode: normalizeString(input.scene_mode),
     media_signature: normalizeString(input.media_signature),
+    photo_sku: normalizeString(input.photo_sku),
     base_price_xtr: normalizePositiveInteger(input.base_price_xtr),
     price_required: normalizeNonNegativeInteger(input.price_required),
     callback_query_id: normalizeString(input.callback_query_id),

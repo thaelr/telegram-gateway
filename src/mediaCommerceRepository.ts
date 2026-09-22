@@ -248,4 +248,11 @@ export class MediaCommerceRepository {
       offerMessageId,
     );
   }
+
+  async clearActiveSubscriptionOffer(
+    chatId: number,
+    offerId: string | null,
+  ): Promise<number> {
+    return this.tokenRepository.clearActiveSubscriptionOffer(chatId, offerId);
+  }
 }

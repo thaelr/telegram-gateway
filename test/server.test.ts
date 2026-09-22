@@ -58,7 +58,7 @@ const { buildApp } = await import("../src/server.js");
 const { MediaCommerceDecisionService, MediaCommerceOperationError } = await import(
   "../src/mediaCommerceDecisionService.js"
 );
-const { UnknownPhotoPriceError } = await import("../src/mediaCommerce/plans.js");
+const { UnknownPhotoSkuError } = await import("../src/mediaCommerce/plans.js");
 
 test("media-commerce endpoint rejects missing internal api key", async (t) => {
   let called = false;
@@ -378,12 +378,12 @@ test("public SBP payment endpoint leaves true internal failures as 500", async (
   assert.equal(response.statusCode, 500);
 });
 
-test("unknown photo price keeps its typed code in the commerce HTTP response", async (t) => {
+test("unknown photo sku keeps its typed code in the commerce HTTP response", async (t) => {
   const app = buildApp({
     logger: false,
     mediaCommerceDecisionService: {
       async evaluate() {
-        throw new UnknownPhotoPriceError(999);
+        throw new UnknownPhotoSkuError("unknown_media");
       },
     },
   });
@@ -396,7 +396,7 @@ test("unknown photo price keeps its typed code in the commerce HTTP response", a
     payload: { chat_id: 101 },
   });
   assert.equal(response.statusCode, 500);
-  assert.equal(response.json().code, "unknown_photo_price");
+  assert.equal(response.json().code, "unknown_photo_sku");
 });
 
 test("router endpoint is registered and uses the same auth and validation wiring", async (t) => {

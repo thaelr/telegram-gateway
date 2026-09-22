@@ -15,6 +15,7 @@ export const mediaCommerceRequestSchema = z.object({
   character_i: positiveIntegerInputSchema.nullable().optional(),
   scene_mode: z.string().trim().nullable().optional(),
   media_signature: z.string().trim().nullable().optional(),
+  photo_sku: z.string().trim().min(1).nullable().optional(),
   base_price_xtr: nonNegativeIntegerInputSchema.nullable().optional(),
   should_offer: z.boolean().nullable().optional(),
   panel_message_id: positiveIntegerInputSchema.nullable().optional(),

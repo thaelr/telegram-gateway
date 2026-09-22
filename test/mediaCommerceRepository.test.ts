@@ -49,6 +49,9 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
 const { MediaCommerceRepository } = await import(
   "../src/mediaCommerceRepository.js"
 );
+const { ChatAccessRepository } = await import(
+  "../src/chatAccessRepository.js"
+);
 const { MediaRepositoryContractError } = await import(
   "../src/mediaCommerceRepository/errors.js"
 );
@@ -856,6 +859,25 @@ test("storeSubscriptionOfferMessageId delegates to media_store_subscription_offe
   assert.equal(result, 2);
   assert.match(calls[0]?.sql ?? "", /public\.media_store_subscription_offer_message_id/u);
   assertJsonbParameter(calls[0]?.values[0], ["inv-1", "inv-2"]);
+});
+
+test("active subscription offer pointer delegates compare-and-pop and clear RPCs", async () => {
+  const { query, calls } = createTaggedQueryStub([
+    [{ message_id: 777 }],
+    [{ cleared_count: 1 }],
+  ]);
+  const chatRepository = new ChatAccessRepository(query as never);
+  const commerceRepository = new MediaCommerceRepository(query as never);
+
+  const popped = await chatRepository.popActiveSubscriptionOffer(101, "telegram:2");
+  const cleared = await commerceRepository.clearActiveSubscriptionOffer(101, "telegram:1");
+
+  assert.equal(popped, 777);
+  assert.equal(cleared, 1);
+  assert.match(calls[0]?.sql ?? "", /public\.media_pop_active_subscription_offer/u);
+  assert.deepEqual(calls[0]?.values, [101, "telegram:2"]);
+  assert.match(calls[1]?.sql ?? "", /public\.media_clear_active_subscription_offer/u);
+  assert.deepEqual(calls[1]?.values, [101, "telegram:1"]);
 });
 
 test("loadAbTestAssignment reads one assignment from chat_state json", async () => {

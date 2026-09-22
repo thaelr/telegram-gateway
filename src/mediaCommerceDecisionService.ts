@@ -39,7 +39,7 @@ import {
 import {
   resolveSubscriptionPlans,
   resolveActionPlanByFeatureKey,
-  resolvePhotoPlanByAmount,
+  resolvePhotoPlanBySku,
 } from "./mediaCommerce/plans.js";
 import {
   INVOICE_TTL_MS,
@@ -124,6 +124,7 @@ type MediaRepository = Pick<
   | "storeAbTestAssignment"
   | "recordAbTestDelivered"
   | "storeSubscriptionOfferMessageId"
+  | "clearActiveSubscriptionOffer"
 >;
 
 type SubscriptionPaymentAction = Extract<
@@ -254,6 +255,7 @@ function buildFreeActionTokenRow(input: {
   target_message_id?: number | null;
   current_uuid?: string | null;
   base_price_xtr?: number | null;
+  photo_sku?: string | null;
   feature_key: "fast_scene_skip" | "scene_unlock" | "photo_unlock";
   action_button_text: string;
   requested_action?: string | null;
@@ -261,6 +263,9 @@ function buildFreeActionTokenRow(input: {
   panel_entities_json?: unknown[] | null;
   ab_test?: AbTestContext | null;
 }): InteractionTokenRow {
+  const normalizedPhotoSku = input.feature_key === "photo_unlock"
+    ? normalizeString(input.photo_sku)
+    : null;
   const token = buildStableCallbackToken([
     input.action_kind,
     input.chat_id,
@@ -269,6 +274,7 @@ function buildFreeActionTokenRow(input: {
     input.scene_turn_no,
     input.target_message_id,
     input.feature_key,
+    normalizedPhotoSku,
   ]);
 
   return {
@@ -289,6 +295,9 @@ function buildFreeActionTokenRow(input: {
       target_message_id: input.target_message_id ?? null,
       current_uuid: input.current_uuid ?? null,
       base_price_xtr: input.base_price_xtr ?? 0,
+      ...(input.feature_key === "photo_unlock"
+        ? { photo_sku: normalizedPhotoSku }
+        : {}),
       feature_key: input.feature_key,
       requested_action:
         input.requested_action
@@ -1448,6 +1457,7 @@ export class MediaCommerceDecisionService {
     target_message_id: number | null;
     current_uuid: string | null;
     base_price_xtr: number;
+    photo_sku?: string | null;
     requested_action: string;
     panel_text?: string | null;
     panel_entities_json?: unknown[] | null;
@@ -1462,6 +1472,7 @@ export class MediaCommerceDecisionService {
       target_message_id: input.target_message_id,
       current_uuid: input.current_uuid,
       base_price_xtr: input.base_price_xtr,
+      photo_sku: input.photo_sku,
       feature_key: "photo_unlock",
       requested_action: input.requested_action,
       panel_text: input.panel_text,
@@ -1480,16 +1491,17 @@ export class MediaCommerceDecisionService {
     target_message_id: number | null;
     current_uuid: string | null;
     base_price_xtr: number;
+    photo_sku: string | null;
     requested_action: string;
     panel_text: string | null;
     panel_entities_json: unknown[];
   }): Promise<MediaPaymentOption[]> {
-    const plan = resolvePhotoPlanByAmount(input.base_price_xtr);
+    const plan = resolvePhotoPlanBySku(input.photo_sku);
     if (!plan) {
       throw new MediaCommerceOperationError(
-        `Unknown configured photo price: ${input.base_price_xtr}`,
+        `Unknown configured photo SKU: ${input.photo_sku ?? "<missing>"}`,
         "photoUnlock.resolvePlan",
-        "unknown_photo_price",
+        "unknown_photo_sku",
       );
     }
     const stored = await this.repository.upsertInvoiceToken(
@@ -1521,6 +1533,7 @@ export class MediaCommerceDecisionService {
           target_message_id: input.target_message_id,
           current_uuid: input.current_uuid,
           base_price_xtr: input.base_price_xtr,
+          photo_sku: plan.sku,
           requested_action: input.requested_action,
           panel_text: input.panel_text,
           panel_entities_json: input.panel_entities_json,
@@ -1556,12 +1569,13 @@ export class MediaCommerceDecisionService {
       should_offer: normalizeBoolean(input.should_offer),
     });
 
-    return this.resolvePrepareOffer(base, stats);
+    return this.resolvePrepareOffer(base, stats, normalizeString(input.photo_sku));
   }
 
   private async resolvePrepareOffer(
     base: MediaCommerceDecisionResponse,
     stats: MediaOfferStats,
+    photoSku: string | null,
   ): Promise<MediaCommerceDecisionResponse> {
     const deliveredInScene = normalizeNonNegativeInteger(stats.delivered_in_scene) ?? 0;
     const subscriptionActive = stats.subscription_active === true;
@@ -1624,6 +1638,7 @@ export class MediaCommerceDecisionService {
         target_message_id: null,
         current_uuid: null,
         base_price_xtr: basePrice,
+        photo_sku: photoSku,
         requested_action: "photo_request",
       });
       const tokenRows = [photoUnlockTokenRow, ...sceneUnlockTokenRows];
@@ -1660,6 +1675,7 @@ export class MediaCommerceDecisionService {
       next_action: "photo_request",
       requested_action: "photo_request",
       button_text: config.TELEGRAM_UX_COPY_JSON.media.get_photo_button,
+      extraPayload: { photo_sku: photoSku },
     });
     const tokenRows = [tokenRow, ...sceneUnlockTokenRows];
     const insertedCount = await this.repository.upsertCallbackTokens(tokenRows);
@@ -1946,6 +1962,10 @@ export class MediaCommerceDecisionService {
             ? payload.media_signature
             : null,
         ) ?? base.media_signature,
+      photo_sku:
+        normalizeString(
+          typeof payload.photo_sku === "string" ? payload.photo_sku : null,
+        ) ?? base.photo_sku,
       target_message_id:
         normalizePositiveInteger(payload.target_message_id)
         ?? normalizePositiveInteger(input.inbound_message_id)
@@ -2033,7 +2053,7 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    const context = await this.repository.loadMediaContext({
+    const loadedContext = await this.repository.loadMediaContext({
       chat_id: callbackBase.chat_id,
       scene_session_id: callbackBase.scene_session_id ?? null,
       turn_no: callbackBase.turn_no ?? null,
@@ -2055,6 +2075,10 @@ export class MediaCommerceDecisionService {
       panel_text: panelText,
       panel_entities_json: panelEntities ?? [],
     });
+    const context = {
+      ...loadedContext,
+      photo_sku: callbackBase.photo_sku ?? null,
+    };
 
     return this.applyMediaActionDecision(callbackBase, context);
   }
@@ -2428,7 +2452,7 @@ export class MediaCommerceDecisionService {
       if (usedFreeCredit && !boundPhotoUuid) {
         return { ...base, operation: "noop", reason: "free_photo_uuid_missing" };
       }
-      const context = await this.repository.loadMediaContext({
+      const loadedContext = await this.repository.loadMediaContext({
         chat_id: chatId,
         scene_session_id: sceneSessionId,
         turn_no:
@@ -2462,6 +2486,12 @@ export class MediaCommerceDecisionService {
           ?? base.panel_entities_json
           ?? [],
       });
+      const context = {
+        ...loadedContext,
+        photo_sku: normalizeString(
+          typeof payload.photo_sku === "string" ? payload.photo_sku : null,
+        ),
+      };
       if (boundPhotoUuid) {
         const boundPhoto = await this.repository.loadPhotoByUuid(boundPhotoUuid);
         if (!boundPhoto?.photo_url) {
@@ -2516,6 +2546,9 @@ export class MediaCommerceDecisionService {
           typeof payload.current_uuid === "string" ? payload.current_uuid : null,
         ),
         base_price_xtr: normalizePositiveInteger(payload.base_price_xtr) ?? 10,
+        photo_sku: normalizeString(
+          typeof payload.photo_sku === "string" ? payload.photo_sku : null,
+        ),
         requested_action: requestedAction,
         panel_text: normalizeString(
           typeof payload.panel_text === "string" ? payload.panel_text : base.panel_text,
@@ -2590,6 +2623,7 @@ export class MediaCommerceDecisionService {
             target_message_id: context.target_message_id,
             current_uuid: decision.current_uuid,
             base_price_xtr: normalizePositiveInteger(context.base_price_xtr) ?? 10,
+            photo_sku: normalizeString(context.photo_sku),
             requested_action: requestedPhotoAction,
             panel_text: decision.caption_text,
             panel_entities_json: decision.caption_entities_json,
@@ -2628,6 +2662,7 @@ export class MediaCommerceDecisionService {
       turn_no: context.turn_no,
       scene_turn_no: context.scene_turn_no,
       media_signature: context.media_signature,
+      photo_sku: normalizeString(context.photo_sku),
       target_message_id: context.target_message_id,
       current_uuid: decision.current_uuid,
       photo_url: decision.photo_url,
@@ -3363,6 +3398,24 @@ export class MediaCommerceDecisionService {
       }),
     );
 
+    const offerId = normalizeString(
+      typeof paidRow.payload_json?.idempotency_key === "string"
+        ? paidRow.payload_json.idempotency_key
+        : null,
+    );
+    if (offerId) {
+      await this.runRepositoryOperation(
+        "payment.subscription.clearActiveOffer",
+        {
+          chat_id: paidRow.chat_id,
+          payment_kind: "subscription",
+          sku: subscriptionSku,
+          invoice_status: paidRow.status,
+        },
+        () => this.repository.clearActiveSubscriptionOffer(paidRow.chat_id, offerId),
+      );
+    }
+
     if (activatedCount <= 0) {
       return {
         ...base,
@@ -3551,6 +3604,9 @@ export class MediaCommerceDecisionService {
           ? payload.requested_action
           : null,
       ) ?? "photo_request";
+    const photoSku =
+      normalizeString(typeof payload.photo_sku === "string" ? payload.photo_sku : null)
+      ?? normalizeString(paidRow.sku);
 
     const mediaContextInput = {
       chat_id:
@@ -3592,7 +3648,7 @@ export class MediaCommerceDecisionService {
       panel_entities_json:
         parseJsonArray(payload.panel_entities_json) ?? [],
     };
-    const context = await this.runRepositoryOperation(
+    const loadedContext = await this.runRepositoryOperation(
       "payment.photo.loadMediaContext",
       {
         chat_id: mediaContextInput.chat_id,
@@ -3602,6 +3658,10 @@ export class MediaCommerceDecisionService {
       },
       () => this.repository.loadMediaContext(mediaContextInput),
     );
+    const context = {
+      ...loadedContext,
+      photo_sku: photoSku,
+    };
 
     const response = await this.applyMediaActionDecision(
       {
@@ -3612,6 +3672,7 @@ export class MediaCommerceDecisionService {
         turn_no: context.turn_no,
         scene_turn_no: context.scene_turn_no,
         media_signature: context.media_signature,
+        photo_sku: normalizeString(context.photo_sku),
         target_message_id: context.target_message_id,
         current_uuid: context.current_uuid,
         base_price_xtr: context.base_price_xtr,
@@ -3700,9 +3761,10 @@ export class MediaCommerceDecisionService {
       || input.subscription_offer_reason === "subscription_command"
         ? input.subscription_offer_reason
         : null;
-    const idempotencyKey =
-      normalizeString(input.idempotency_key)
-      ?? `telegram:chat:${chatId}`;
+    const offerId = normalizeString(input.idempotency_key);
+    if (!offerId) {
+      return { ...base, chat_id: chatId, reason: "subscription_offer_id_required" };
+    }
     const turnLimit = normalizePositiveInteger(input.turn_limit) ?? config.TURN_LIMIT;
     const turnsToday =
       normalizeNonNegativeInteger(input.turns_today) ?? turnLimit;
@@ -3717,8 +3779,8 @@ export class MediaCommerceDecisionService {
     const abTokenSuffix = buildAbTokenSuffix(abSelection);
     const effectiveIdempotencyKey =
       abTokenSuffix != null
-        ? `${idempotencyKey}:ab_${abTokenSuffix}`
-        : idempotencyKey;
+        ? `${offerId}:ab_${abTokenSuffix}`
+        : offerId;
     const offerText = resolveSubscriptionOfferText(
       abParams,
       subscriptionOfferReason,
@@ -3758,7 +3820,7 @@ export class MediaCommerceDecisionService {
     const invoiceInputs = subscriptionPlans.flatMap((plan, index) =>
       buildSubscriptionPaymentInputs({
         chat_id: chatId,
-        idempotency_key: effectiveIdempotencyKey,
+        idempotency_key: offerId,
         subscription_offer_reason: subscriptionOfferReason,
         turn_limit: turnLimit,
         turns_today: turnsToday,

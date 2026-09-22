@@ -67,14 +67,24 @@ type RepositoryCall = {
   timeZone: string;
 };
 
+type DismissCall = {
+  chatId: number;
+  currentOfferId: string | null;
+};
+
 type MockRepository = {
   calls: RepositoryCall[];
+  dismissCalls: DismissCall[];
   ensureAndLoadAccessContext: (
     chatId: number,
     source: string | null,
     sourceUserId: number | null,
     timeZone: string,
   ) => Promise<AccessContext>;
+  popActiveSubscriptionOffer: (
+    chatId: number,
+    currentOfferId: string | null,
+  ) => Promise<number | null>;
 };
 
 function buildAccessContext(
@@ -136,11 +146,14 @@ function createService(
   context: AccessContext = buildAccessContext(),
   options: {
     throwOnCall?: boolean;
+    dismissMessageId?: number | null;
   } = {},
 ) {
   const calls: RepositoryCall[] = [];
+  const dismissCalls: DismissCall[] = [];
   const repository: MockRepository = {
     calls,
+    dismissCalls,
     async ensureAndLoadAccessContext(chatId, source, sourceUserId, timeZone) {
       calls.push({ chatId, source, sourceUserId, timeZone });
       if (options.throwOnCall) {
@@ -148,11 +161,16 @@ function createService(
       }
       return context;
     },
+    async popActiveSubscriptionOffer(chatId, currentOfferId) {
+      dismissCalls.push({ chatId, currentOfferId });
+      return options.dismissMessageId ?? null;
+    },
   };
 
   return {
     service: new AccessDecisionService(repository),
     calls,
+    dismissCalls,
   };
 }
 
@@ -1131,6 +1149,79 @@ test("returns stable idempotency_key for same update", async () => {
   assert.equal(first.idempotency_key, "telegram:777");
   assert.equal(second.idempotency_key, "telegram:777");
   assert.equal(first.idempotency_key, second.idempotency_key);
+});
+
+test("subscription offer retry preserves its own active panel", async () => {
+  const { service, dismissCalls } = createService(buildAccessContext());
+
+  const result = await service.evaluate(
+    buildRequest({
+      command: "/subscription",
+      event_type: "command.received",
+      message_type: "command",
+      update_id: 777,
+      user_message: "/subscription",
+    }),
+  );
+
+  assert.equal(result.action, "show_subscription_offer");
+  assert.equal(result.dismiss_subscription_offer_message_id, undefined);
+  assert.deepEqual(dismissCalls, [
+    { chatId: 101, currentOfferId: "telegram:777" },
+  ]);
+});
+
+test("new ordinary user action dismisses the previous subscription offer panel", async () => {
+  const { service, dismissCalls } = createService(buildAccessContext(), {
+    dismissMessageId: 888,
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      event_type: "message.text.received",
+      message_type: "text",
+      user_message: "next message",
+      update_id: 778,
+    }),
+  );
+
+  assert.equal(result.action, "run_scene_core");
+  assert.equal(result.dismiss_subscription_offer_message_id, 888);
+  assert.deepEqual(dismissCalls, [
+    { chatId: 101, currentOfferId: null },
+  ]);
+});
+
+test("payment and opaque commerce events do not dismiss subscription offer panels", async () => {
+  const requests = [
+    buildRequest({
+      event_type: "payment.pre_checkout.received",
+      message_type: null,
+      route_target: null,
+      callback_data: null,
+      user_message: null,
+      command: null,
+    }),
+    buildRequest({
+      event_type: "callback_query.received",
+      message_type: null,
+      route_target: null,
+      callback_data: "btn_abcdef0123456789abcdef0123456789",
+      user_message: null,
+      command: null,
+    }),
+  ];
+
+  for (const request of requests) {
+    const { service, dismissCalls } = createService(buildAccessContext(), {
+      dismissMessageId: 888,
+    });
+
+    const result = await service.evaluate(request);
+
+    assert.equal(result.action, "handle_commerce_interaction");
+    assert.deepEqual(dismissCalls, []);
+  }
 });
 
 test("uses special post_accept_intent for gated subscription, paysupport, and menu commands", async () => {

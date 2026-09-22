@@ -385,4 +385,18 @@ export class MediaInteractionTokenRepository {
 
     return rows[0]?.updated_count ?? 0;
   }
+
+  async clearActiveSubscriptionOffer(
+    chatId: number,
+    offerId: string | null,
+  ): Promise<number> {
+    const rows = await this.query<Array<{ cleared_count: number }>>`
+      SELECT public.media_clear_active_subscription_offer(
+        ${chatId}::bigint,
+        ${offerId}::text
+      ) AS cleared_count
+    `;
+
+    return rows[0]?.cleared_count ?? 0;
+  }
 }

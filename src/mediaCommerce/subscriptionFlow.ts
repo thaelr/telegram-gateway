@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { config, type MediaActionPlan } from "../config.js";
 import type { UpsertInvoiceTokenInput } from "../mediaCommerceRepository/shared.js";
 import type {
@@ -25,6 +26,26 @@ type CommercePlan = {
 
 function buildPaymentToken(baseToken: string, source: PaymentSource): string {
   return source === "stars" ? baseToken : `${baseToken}:${source}`;
+}
+
+function buildHashedPaymentToken(parts: Array<string | number | null | undefined>): string {
+  const hash = createHash("sha256")
+    .update(parts.map((part) => String(part ?? "")).join("\u001f"))
+    .digest("hex")
+    .slice(0, 32);
+
+  return `pay_${hash}`;
+}
+
+function buildAbIdentity(abTest: AbTestContext | null | undefined): string | null {
+  return abTest
+    ? [
+      abTest.key,
+      abTest.starts_at,
+      abTest.version,
+      abTest.variant,
+    ].join("|")
+    : null;
 }
 
 function applyPaymentTemplate(
@@ -290,7 +311,11 @@ export function buildSubscriptionPaymentInputs(input: {
     sort_order: input.sort_order,
     ab_test: input.ab_test ?? null,
   };
-  const baseToken = `${input.idempotency_key}:${input.plan.sku}`;
+  const baseToken = buildHashedPaymentToken([
+    input.idempotency_key,
+    input.plan.sku,
+    buildAbIdentity(input.ab_test),
+  ]);
 
   return buildPaymentInputs({
     base_token: baseToken,

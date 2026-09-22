@@ -135,6 +135,7 @@ export interface AccessDecisionResponse {
   selected_character_i?: number | null;
   active_menu_screen?: string | null;
   active_menu_message_id?: number | null;
+  dismiss_subscription_offer_message_id?: number | null;
   ux_copy?: unknown;
 }
 

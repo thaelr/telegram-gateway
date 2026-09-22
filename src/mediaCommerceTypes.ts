@@ -109,6 +109,7 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
   character_i?: number | null;
   scene_mode?: string | null;
   media_signature?: string | null;
+  photo_sku?: string | null;
   target_message_id?: number | null;
   current_uuid?: string | null;
   base_price_xtr?: number | null;
@@ -141,6 +142,7 @@ export interface MediaCommerceDecisionResponse {
   character_i?: number | null;
   scene_mode?: string | null;
   media_signature?: string | null;
+  photo_sku?: string | null;
   base_price_xtr?: number | null;
   price_required?: number | null;
   has_media_offer?: boolean;
@@ -300,6 +302,7 @@ export interface MediaContext {
   current_uuid: string | null;
   target_message_id: number | null;
   base_price_xtr: number;
+  photo_sku?: string | null;
   action_kind: string | null;
   requested_action: string | null;
   invoice_token: string | null;

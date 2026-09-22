@@ -36,7 +36,10 @@ type RouterClassification = {
   newscene_action?: "yes" | "no" | null;
 };
 
-type AccessRepository = Pick<ChatAccessRepository, "ensureAndLoadAccessContext">;
+type AccessRepository = Pick<
+  ChatAccessRepository,
+  "ensureAndLoadAccessContext" | "popActiveSubscriptionOffer"
+>;
 
 function isAllowedClassification(classification: RouterClassification): boolean {
   switch (classification.intent) {
@@ -106,6 +109,22 @@ function requiresTermsGate(classification: RouterClassification): boolean {
 
 function requiresSceneAccessCheck(classification: RouterClassification): boolean {
   return classification.intent === "scene_message";
+}
+
+function shouldDismissSubscriptionOffer(classification: RouterClassification): boolean {
+  if (
+    classification.action === "handle_commerce_interaction" ||
+    classification.action === "update_reachability_state" ||
+    classification.action === "ignore"
+  ) {
+    return false;
+  }
+
+  return classification.intent !== "interaction_event"
+    && classification.intent !== "commerce_callback"
+    && classification.intent !== "reachability_update"
+    && classification.intent !== "unknown_command"
+    && classification.intent !== "noop";
 }
 
 function ignoreStructuredCallback(): RouterClassification {
@@ -372,6 +391,28 @@ export class AccessDecisionService {
     const effectiveCharacterId =
       classification.character_i ?? input.character_i ?? null;
     const effectiveSceneMode = classification.scene_mode ?? input.scene_mode ?? null;
+    const attachDismissedSubscriptionOffer = async <T extends AccessDecisionResponse>(
+      response: T,
+    ): Promise<T> => {
+      if (!shouldDismissSubscriptionOffer(classification)) {
+        return response;
+      }
+
+      const currentOfferId = response.action === "show_subscription_offer"
+        ? idempotencyKey
+        : null;
+      const dismissedMessageId = await this.repository.popActiveSubscriptionOffer(
+        input.chat_id,
+        currentOfferId,
+      );
+
+      return dismissedMessageId
+        ? {
+          ...response,
+          dismiss_subscription_offer_message_id: dismissedMessageId,
+        }
+        : response;
+    };
 
     const passthrough = {
       domain: classification.domain,
@@ -410,12 +451,12 @@ export class AccessDecisionService {
     } as const;
 
     if (!requiresAccessContext(classification)) {
-      return {
+      return attachDismissedSubscriptionOffer({
         ...passthrough,
         decision: "noop",
         allowed: isAllowedClassification(classification),
         reason: classification.intent,
-      };
+      });
     }
 
     const accessContext = await this.repository.ensureAndLoadAccessContext(
@@ -454,7 +495,7 @@ export class AccessDecisionService {
       requiresTermsGate(classification) &&
       accessContext.terms_accepted_at == null
     ) {
-      return {
+      return attachDismissedSubscriptionOffer({
         ...passthrough,
         ...contextFields,
         decision: "show_terms_gate",
@@ -462,34 +503,34 @@ export class AccessDecisionService {
         allowed: false,
         post_accept_intent: resolvePostAcceptIntent(classification),
         reason: "terms_not_accepted",
-      };
+      });
     }
 
     if (classification.intent === "scene_start") {
-      return {
+      return attachDismissedSubscriptionOffer({
         ...passthrough,
         ...contextFields,
         decision: "noop",
         action: hasStartedScene ? "show_newscene_confirm" : "show_character_gallery",
         allowed: true,
         reason: hasStartedScene ? "scene_start_requires_scene_reset" : "scene_start",
-      };
+      });
     }
 
     if (classification.intent === "menu") {
-      return {
+      return attachDismissedSubscriptionOffer({
         ...passthrough,
         ...contextFields,
         decision: "noop",
         action: hasStartedScene ? "show_newscene_confirm" : "show_character_gallery",
         allowed: true,
         reason: hasStartedScene ? "menu_requires_scene_reset" : "menu",
-      };
+      });
     }
 
     if (classification.intent === "subscription") {
       if (accessContext.subscription_active) {
-        return {
+        return attachDismissedSubscriptionOffer({
           ...passthrough,
           ...contextFields,
           decision: "show_subscription_status",
@@ -499,10 +540,10 @@ export class AccessDecisionService {
           parse_mode: null,
           disable_web_page_preview: true,
           reason: "subscription_active",
-        };
+        });
       }
 
-      return {
+      return attachDismissedSubscriptionOffer({
         ...passthrough,
         ...contextFields,
         decision: "show_subscription_offer",
@@ -510,11 +551,11 @@ export class AccessDecisionService {
         allowed: true,
         subscription_offer_reason: "subscription_command",
         reason: "subscription_inactive",
-      };
+      });
     }
 
     if (classification.intent === "paysupport") {
-      return {
+      return attachDismissedSubscriptionOffer({
         ...passthrough,
         ...contextFields,
         decision: "noop",
@@ -524,7 +565,7 @@ export class AccessDecisionService {
         parse_mode: "HTML",
         disable_web_page_preview: true,
         reason: "paysupport",
-      };
+      });
     }
 
     if (requiresSceneAccessCheck(classification)) {
@@ -533,7 +574,7 @@ export class AccessDecisionService {
         accessContext.scene_access_active ||
         accessContext.turns_today < config.TURN_LIMIT
       ) {
-        return {
+        return attachDismissedSubscriptionOffer({
           ...passthrough,
           ...contextFields,
           decision: "allow_scene",
@@ -544,10 +585,10 @@ export class AccessDecisionService {
             : accessContext.scene_access_active
               ? "scene_access_active"
             : "within_daily_limit",
-        };
+        });
       }
 
-      return {
+      return attachDismissedSubscriptionOffer({
         ...passthrough,
         ...contextFields,
         decision: "show_subscription_offer",
@@ -555,15 +596,15 @@ export class AccessDecisionService {
         allowed: false,
         subscription_offer_reason: "daily_turn_limit",
         reason: "daily_turn_limit_reached",
-      };
+      });
     }
 
-    return {
+    return attachDismissedSubscriptionOffer({
       ...passthrough,
       ...contextFields,
       decision: "noop",
       allowed: true,
       reason: classification.intent,
-    };
+    });
   }
 }

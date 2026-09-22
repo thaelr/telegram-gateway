@@ -17,7 +17,7 @@ import {
   parseJsonArray,
   parseJsonObject,
 } from "./utils.js";
-import { resolvePhotoPlanByAmount, UnknownPhotoPriceError } from "./plans.js";
+import { resolvePhotoPlanBySku, UnknownPhotoSkuError } from "./plans.js";
 
 export type MediaActionDecision = {
   operation: "noop" | "edit_photo";
@@ -115,6 +115,7 @@ export function buildCallbackTokenRow(input: {
   target_message_id: number | null;
   current_uuid: string | null;
   base_price_xtr: number;
+  photo_sku?: string | null;
   next_action: string;
   requested_action: string;
   button_text?: string | null;
@@ -138,6 +139,7 @@ export function buildCallbackTokenRow(input: {
       target_message_id: input.target_message_id,
       current_uuid: input.current_uuid,
       base_price_xtr: input.base_price_xtr,
+      photo_sku: normalizeString(input.photo_sku) ?? null,
       requested_action:
         input.next_action === "photo_regen"
           ? "photo_regen"
@@ -211,6 +213,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   const sceneAccessActive = context.scene_access_active === true;
   const deliveredInScene = normalizeNonNegativeInteger(context.delivered_in_scene) ?? 0;
   const basePrice = normalizePositiveInteger(context.base_price_xtr) ?? 10;
+  const photoSku = normalizeString(context.photo_sku);
   const forceDeliver = context.force_deliver_after_payment === true;
   const priceRequired = calculateMediaPriceRequired({
     subscription_active: subscriptionActive,
@@ -365,6 +368,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
         target_message_id: targetMessageId,
         current_uuid: selected.uuid,
         base_price_xtr: basePrice,
+        photo_sku: photoSku,
         next_action: button.action,
         requested_action:
           normalizeString(context.requested_action) ?? "photo_request",
@@ -396,9 +400,9 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
 
   if (unseenAfter > 0) {
     if (nextPrice > 0) {
-      const photoPlan = resolvePhotoPlanByAmount(nextPrice);
+      const photoPlan = resolvePhotoPlanBySku(photoSku);
       if (!photoPlan) {
-        throw new UnknownPhotoPriceError(nextPrice);
+        throw new UnknownPhotoSkuError(photoSku);
       }
       finalOperation = "edit_photo";
       invoiceKind = "photo";
@@ -420,6 +424,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
         target_message_id: targetMessageId,
         current_uuid: selected.uuid,
         base_price_xtr: basePrice,
+        photo_sku: photoPlan.sku,
         requested_action: "photo_regen",
         panel_text: captionText,
         panel_entities_json: captionEntities,

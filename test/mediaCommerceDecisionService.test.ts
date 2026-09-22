@@ -254,6 +254,10 @@ type MockRepository = {
     chatId: number,
     offerMessageId: number,
   ) => Promise<number>;
+  clearActiveSubscriptionOffer: (
+    chatId: number,
+    offerId: string | null,
+  ) => Promise<number>;
   recordAbTestDelivered: (
     input: unknown,
   ) => Promise<number>;
@@ -312,6 +316,7 @@ function buildLoadedCallbackToken(
       target_message_id: 555,
       current_uuid: "u1",
       base_price_xtr: 10,
+      photo_sku: "payment_media_1",
       requested_action: "photo_request",
     },
     status: "active",
@@ -334,6 +339,7 @@ function buildMediaContext(
     current_uuid: "u1",
     target_message_id: 555,
     base_price_xtr: 10,
+    photo_sku: "payment_media_1",
     action_kind: "photo_request",
     requested_action: "photo_request",
     invoice_token: null,
@@ -436,6 +442,7 @@ function buildLoadedInvoiceToken(
       target_message_id: 555,
       current_uuid: "u1",
       base_price_xtr: 10,
+      photo_sku: "payment_media_1",
       requested_action: "photo_request",
     },
     status: "invoice_sent",
@@ -491,6 +498,7 @@ function buildPaidInvoiceToken(
       target_message_id: 555,
       current_uuid: "u1",
       base_price_xtr: 10,
+      photo_sku: "payment_media_1",
       requested_action: "photo_request",
     },
     status: "paid",
@@ -548,6 +556,7 @@ function buildRequest(
     scene_turn_no: 3,
     media_signature: "hotel_corridor_close",
     base_price_xtr: 10,
+    photo_sku: "payment_media_1",
     should_offer: true,
     ...overrides,
   };
@@ -681,6 +690,11 @@ function createRepository(
     loadAbTestAssignment: 0,
     storeAbTestAssignment: 0,
     recordAbTestDelivered: 0,
+    clearActiveSubscriptionOffer: 0,
+    clearActiveSubscriptionOfferArgs: [] as Array<{
+      chatId: number;
+      offerId: string | null;
+    }>,
   };
 
   const repository: MockRepository = {
@@ -1062,6 +1076,11 @@ function createRepository(
     async storeSubscriptionOfferMessageId() {
       return 2;
     },
+    async clearActiveSubscriptionOffer(chatId, offerId) {
+      calls.clearActiveSubscriptionOffer += 1;
+      calls.clearActiveSubscriptionOfferArgs.push({ chatId, offerId });
+      return 1;
+    },
     async recordAbTestDelivered() {
       calls.recordAbTestDelivered += 1;
       return 1;
@@ -1106,6 +1125,19 @@ async function withPromotions<T>(
     return await run();
   } finally {
     config.MEDIA_PROMOTIONS_JSON = previous;
+  }
+}
+
+async function withPhotoPlans<T>(
+  plans: typeof config.MEDIA_PHOTO_PLANS_JSON,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = config.MEDIA_PHOTO_PLANS_JSON;
+  config.MEDIA_PHOTO_PLANS_JSON = plans;
+  try {
+    return await run();
+  } finally {
+    config.MEDIA_PHOTO_PLANS_JSON = previous;
   }
 }
 
@@ -1407,6 +1439,119 @@ test("prepare_offer defers active photo promotion pricing until click", async ()
     assert.equal(result.invoice_sku, undefined);
     assert.equal(result.token_rows?.[0]?.action_kind, "free_photo_unlock");
     assert.equal(result.token_rows?.[0]?.payload_json.base_price_xtr, 10);
+  });
+});
+
+test("photo payment resolves by photo_sku when prices overlap and promo applies", async () => {
+  const photoPlans = [
+    {
+      sku: "payment_media_1",
+      amount_xtr: 10,
+      title: "media one",
+      description: "media one",
+      label: "media one",
+      button_text: "media one",
+    },
+    {
+      sku: "payment_media_2",
+      amount_xtr: 10,
+      title: "media two",
+      description: "media two",
+      label: "media two",
+      button_text: "media two",
+    },
+  ];
+  await withPhotoPlans(photoPlans, async () => {
+    await withPromotions([
+      {
+        promo_key: "media_two_sale",
+        items: [{ sku: "payment_media_2", promo_amount_xtr: 7 }],
+        starts_at: "2026-09-01T00:00:00+03:00",
+        ends_at: "2026-09-30T23:59:59+03:00",
+      },
+    ], async () => {
+      const payload = {
+        action_kind: "free_photo_unlock",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        turn_no: 5,
+        scene_turn_no: 3,
+        media_signature: "hotel_corridor_close",
+        target_message_id: 777,
+        current_uuid: "u1",
+        base_price_xtr: 10,
+        photo_sku: "payment_media_2",
+        requested_action: "photo_regen",
+      };
+      const capturedInvoices: Array<{
+        sku?: string;
+        amount_xtr?: number;
+        payload_json?: Record<string, unknown>;
+      }> = [];
+      const { service } = createRepository({
+        async loadCallbackToken() {
+          return buildLoadedCallbackToken({
+            token: "photo-sku-two-entry",
+            action_kind: "free_photo_unlock",
+            payload_json: payload,
+          });
+        },
+        async redeemFreePhotoUnlock(token, chatId) {
+          return {
+            token,
+            chat_id: chatId,
+            scene_session_id: "scene-1",
+            turn_no: 5,
+            payload_json: payload,
+            action_kind: "free_photo_unlock",
+            status: "active",
+            redeemed: false,
+            already_consumed: false,
+            already_fulfilled: false,
+            remaining_credits: 0,
+            reason: "free_credit_unavailable",
+          };
+        },
+        async upsertInvoiceToken(input) {
+          capturedInvoices.push(input as {
+            sku?: string;
+            amount_xtr?: number;
+            payload_json?: Record<string, unknown>;
+          });
+          const row = input as {
+            token: string;
+            payload_json: Record<string, unknown>;
+            sku: string;
+            amount_xtr: number;
+          };
+          return buildStoredInvoiceToken({
+            token: row.token,
+            telegram_invoice_payload: row.token,
+            payload_json: row.payload_json,
+            sku: row.sku,
+            amount_xtr: row.amount_xtr,
+            invoice_link: "https://t.me/photo-two",
+          });
+        },
+      });
+
+      const response = await service.evaluate(buildRequest({
+        interaction_mode: null,
+        event_type: "callback_query.received",
+        callback_data: "photo-sku-two-entry",
+        inbound_message_id: 777,
+      }));
+
+      assert.equal(response.operation, "feature_payment_options_revealed");
+      assert.equal(response.payment_options?.[0]?.sku, "payment_media_2");
+      assert.equal(response.payment_options?.[0]?.amount, 7);
+      const [capturedInvoice] = capturedInvoices;
+      assert.equal(capturedInvoice?.sku, "payment_media_2");
+      assert.equal(capturedInvoice?.amount_xtr, 7);
+      assert.equal(capturedInvoice?.payload_json?.photo_sku, "payment_media_2");
+      assert.equal(capturedInvoice?.payload_json?.original_amount_xtr, 10);
+      assert.equal(capturedInvoice?.payload_json?.promo_key, "media_two_sale");
+    });
   });
 });
 
@@ -2586,6 +2731,7 @@ test("free photo unlock callback redeems current credit and delivers the photo",
     target_message_id: 777,
     current_uuid: "u1",
     base_price_xtr: 10,
+    photo_sku: "payment_media_1",
     requested_action: "photo_regen",
     free_photo_uuid: "u2",
   };
@@ -2637,6 +2783,7 @@ test("free photo unlock callback reveals only Stars when no credit remains", asy
     target_message_id: 777,
     current_uuid: "u1",
     base_price_xtr: 10,
+    photo_sku: "payment_media_1",
     requested_action: "photo_regen",
     free_photo_uuid: "u2",
   };
@@ -2679,6 +2826,7 @@ test("free photo unlock callback reveals only Stars when no credit remains", asy
   assert.equal(response.feature_key, "photo_unlock");
   assert.equal(response.payment_options?.length, 1);
   assert.equal(response.payment_options?.[0]?.source, "stars");
+  assert.equal(response.payment_options?.[0]?.sku, "payment_media_1");
   assert.equal(response.payment_options?.[0]?.amount, 10);
   assert.equal(calls.createStarsInvoice, 1);
   assert.equal(calls.createSbpPayment, 0);
@@ -2695,6 +2843,7 @@ test("consumed free photo callback retries delivery without another credit debit
     media_signature: "hotel_corridor_close",
     current_uuid: "u1",
     base_price_xtr: 10,
+    photo_sku: "payment_media_1",
     requested_action: "photo_regen",
     free_photo_uuid: "u2",
   };
@@ -2808,6 +2957,7 @@ for (const scenario of [
       target_message_id: 777,
       current_uuid: "u1",
       base_price_xtr: 10,
+      photo_sku: "payment_media_1",
       requested_action: "photo_regen",
     };
     const { service, calls } = createRepository({
@@ -3016,13 +3166,35 @@ test("callback photo request returns next media step with neutral photo unlock",
     true,
   );
   assert.equal(result.token_rows?.some((row) => row.action_kind === "free_photo_unlock"), true);
+  assert.equal(
+    result.token_rows?.find((row) => row.action_kind === "free_photo_unlock")
+      ?.payload_json.photo_sku,
+    "payment_media_1",
+  );
   assert.equal(calls.createStarsInvoice, 0);
 });
 
 test("callback photo request unlocks through scene pass with zero price", async () => {
   const { service } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        payload_json: {
+          action_kind: "photo_request",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          media_signature: "hotel_corridor_close",
+          target_message_id: 555,
+          current_uuid: "u1",
+          base_price_xtr: 10,
+          requested_action: "photo_request",
+        },
+      });
+    },
     async loadMediaContext() {
       return buildMediaContext({
+        photo_sku: null,
         delivered_in_scene: 3,
         scene_access_active: true,
         next_unseen_json: {
@@ -3404,6 +3576,7 @@ test("payment_success activates subscription for subscription invoices", async (
         amount_xtr: 200,
         payload_json: {
           action_kind: "subscription_payment",
+          idempotency_key: "telegram:offer-1",
           subscription_days: 14,
           subscription_sku: "payment_plan_2",
         },
@@ -3416,6 +3589,7 @@ test("payment_success activates subscription for subscription invoices", async (
         amount_xtr: 200,
         payload_json: {
           action_kind: "subscription_payment",
+          idempotency_key: "telegram:offer-1",
           subscription_days: 14,
           subscription_sku: "payment_plan_2",
         },
@@ -3442,6 +3616,10 @@ test("payment_success activates subscription for subscription invoices", async (
   assert.equal(result.subscription_sku, "payment_plan_2");
   assert.equal(result.offer_message_id, 777);
   assert.equal(calls.activateSubscription, 1);
+  assert.equal(calls.clearActiveSubscriptionOffer, 1);
+  assert.deepEqual(calls.clearActiveSubscriptionOfferArgs, [
+    { chatId: 101, offerId: "telegram:offer-1" },
+  ]);
 });
 
 test("payment.confirmed.received resolves SBP payment by external id without internal token", async () => {
@@ -3463,6 +3641,7 @@ test("payment.confirmed.received resolves SBP payment by external id without int
         checkout_url: "https://platega.example/checkout/1",
         payload_json: {
           action_kind: "subscription_payment",
+          idempotency_key: "telegram:offer-1",
           subscription_days: 14,
           subscription_sku: "payment_plan_2",
         },
@@ -3482,6 +3661,7 @@ test("payment.confirmed.received resolves SBP payment by external id without int
         checkout_url: "https://platega.example/checkout/1",
         payload_json: {
           action_kind: "subscription_payment",
+          idempotency_key: "telegram:offer-1",
           subscription_days: 14,
           subscription_sku: "payment_plan_2",
         },
@@ -3529,6 +3709,7 @@ test("payment.confirmed.received rejects persisted SBP invoice without chat_id",
         checkout_url: "https://platega.example/checkout/missing-chat",
         payload_json: {
           action_kind: "subscription_payment",
+          idempotency_key: "telegram:offer-1",
           subscription_days: 14,
           subscription_sku: "payment_plan_2",
         },
@@ -3683,6 +3864,7 @@ test("payment.confirmed.received is idempotent for duplicate fulfilled SBP webho
         checkout_url: "https://platega.example/checkout/1",
         payload_json: {
           action_kind: "subscription_payment",
+          idempotency_key: "telegram:offer-1",
           subscription_days: 14,
           subscription_sku: "payment_plan_2",
         },
@@ -4047,6 +4229,7 @@ test("payment_success does not re-activate an already processed subscription", a
         amount_xtr: 200,
         payload_json: {
           action_kind: "subscription_payment",
+          idempotency_key: "telegram:offer-1",
           subscription_days: 14,
           subscription_sku: "payment_plan_2",
         },
@@ -4060,6 +4243,7 @@ test("payment_success does not re-activate an already processed subscription", a
         amount_xtr: 200,
         payload_json: {
           action_kind: "subscription_payment",
+          idempotency_key: "telegram:offer-1",
           subscription_days: 14,
           subscription_sku: "payment_plan_2",
         },
@@ -4088,6 +4272,10 @@ test("payment_success does not re-activate an already processed subscription", a
   assert.equal(result.reason, "subscription_already_activated");
   assert.equal(calls.markInvoicePaid, 1);
   assert.equal(calls.activateSubscription, 1);
+  assert.equal(calls.clearActiveSubscriptionOffer, 1);
+  assert.deepEqual(calls.clearActiveSubscriptionOfferArgs, [
+    { chatId: 101, offerId: "telegram:offer-1" },
+  ]);
 });
 
 test("payment_success returns deferred feature fulfillment for configured custom feature keys", async () => {
@@ -4409,23 +4597,40 @@ test("subscription_offer creates missing invoice links internally", async () => 
     },
   });
 
-  const result = await service.evaluate(
-    buildRequest({
-      interaction_mode: "subscription_offer",
-      idempotency_key: "telegram:1",
-      subscription_offer_reason: "subscription_command",
-      turns_today: 0,
-      turn_limit: 20,
-      turn_limit_reset_text: "00:00 МСК",
-    }),
-  );
+  const request = buildRequest({
+    interaction_mode: "subscription_offer",
+    idempotency_key: "telegram:1",
+    subscription_offer_reason: "subscription_command",
+    turns_today: 0,
+    turn_limit: 20,
+    turn_limit_reset_text: "00:00 МСК",
+  });
+  const result = await service.evaluate(request);
+  const retry = await service.evaluate(request);
+  const nextOffer = await service.evaluate({
+    ...request,
+    idempotency_key: "telegram:2",
+  });
+  const missingOfferId = await service.evaluate({
+    ...request,
+    idempotency_key: null,
+  });
 
   assert.equal(result.operation, "subscription_offer_ready");
+  assert.equal(retry.operation, "subscription_offer_ready");
+  assert.equal(nextOffer.operation, "subscription_offer_ready");
+  assert.equal(missingOfferId.reason, "subscription_offer_id_required");
   assert.equal(result.subscription_invoice_tokens?.length, 2);
-  assert.deepEqual(result.subscription_invoice_tokens, [
-    "telegram:1:payment_plan_2",
-    "telegram:1:payment_plan_3",
-  ]);
+  assert.deepEqual(retry.subscription_invoice_tokens, result.subscription_invoice_tokens);
+  assert.notDeepEqual(nextOffer.subscription_invoice_tokens, result.subscription_invoice_tokens);
+  assert.equal(
+    result.subscription_invoice_tokens?.some((token) => token.startsWith("telegram:chat:")),
+    false,
+  );
+  for (const token of result.subscription_invoice_tokens ?? []) {
+    assert.match(token, /^pay_[0-9a-f]{32}$/u);
+    assert.ok(Buffer.byteLength(token, "utf8") < 64);
+  }
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => item.sku),
     ["payment_plan_2", "payment_plan_3"],
@@ -4441,9 +4646,9 @@ test("subscription_offer creates missing invoice links internally", async () => 
       "https://t.me/generated-invoice-2",
     ],
   );
-  assert.equal(calls.storeInvoiceLinks, 2);
+  assert.equal(calls.storeInvoiceLinks, 6);
   assert.equal(calls.loadStoredInvoiceTokens, 0);
-  assert.equal(calls.createStarsInvoice, 2);
+  assert.equal(calls.createStarsInvoice, 6);
 });
 
 test("subscription_offer assigns sticky ab group and stores compact context in payment tokens", async () => {
@@ -4566,7 +4771,7 @@ test("subscription_offer assigns sticky ab group and stores compact context in p
       first.token_rows?.some((row) => row.action_kind === "free_scene_unlock"),
       false,
     );
-    assert.equal(first.subscription_invoice_tokens?.[0]?.includes(":ab_"), true);
+    assert.match(first.subscription_invoice_tokens?.[0] ?? "", /^pay_[0-9a-f]{32}$/u);
     assert.deepEqual(second.subscription_invoice_tokens, first.subscription_invoice_tokens);
     assert.equal(first.subscription_offer_items?.[0]?.title, "B title");
     assert.equal(first.subscription_offer_items?.[0]?.description, "B description");
@@ -5006,9 +5211,11 @@ test("subscription_offer returns SBP default source and toggle callback tokens w
     assert.equal(toggleRows.length, 2);
     assert.ok(result.payment_source_toggle_tokens?.stars);
     assert.ok(result.payment_source_toggle_tokens?.sbp);
+    const sbpOption = firstOfferPaymentOption(result.subscription_offer_items?.[0], "sbp");
+    assert.match(sbpOption?.token ?? "", /^pay_[0-9a-f]{32}:sbp$/u);
     assert.equal(
-      firstOfferPaymentOption(result.subscription_offer_items?.[0], "sbp")?.checkout_url,
-      "https://gateway.example/v1/pay/sbp/telegram%3Asubscription-toggle%3Apayment_plan_7%3Asbp",
+      sbpOption?.checkout_url,
+      `https://gateway.example/v1/pay/sbp/${encodeURIComponent(String(sbpOption?.token))}`,
     );
     assert.equal(calls.createStarsInvoice, 2);
     assert.equal(calls.createSbpPayment, 0);
@@ -5214,10 +5421,10 @@ test("subscription_offer returns one scene unlock entry button regardless of fre
   );
 
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.deepEqual(result.subscription_invoice_tokens, [
-    "telegram:1:payment_plan_2",
-    "telegram:1:payment_plan_3",
-  ]);
+  assert.equal(result.subscription_invoice_tokens?.length, 2);
+  for (const token of result.subscription_invoice_tokens ?? []) {
+    assert.match(token, /^pay_[0-9a-f]{32}$/u);
+  }
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => item.sku),
     ["payment_plan_2", "payment_plan_3"],
@@ -5373,10 +5580,10 @@ test("subscription_offer does not include scene pass without active scene", asyn
   );
 
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.deepEqual(result.subscription_invoice_tokens, [
-    "telegram:no-scene:payment_plan_2",
-    "telegram:no-scene:payment_plan_3",
-  ]);
+  assert.equal(result.subscription_invoice_tokens?.length, 2);
+  for (const token of result.subscription_invoice_tokens ?? []) {
+    assert.match(token, /^pay_[0-9a-f]{32}$/u);
+  }
 });
 
 test("subscription_offer does not include scene unlock when request is outside current scene", async () => {
@@ -5418,10 +5625,10 @@ test("subscription_offer does not include scene unlock when request is outside c
   );
 
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.deepEqual(result.subscription_invoice_tokens, [
-    "telegram:outside-scene:payment_plan_2",
-    "telegram:outside-scene:payment_plan_3",
-  ]);
+  assert.equal(result.subscription_invoice_tokens?.length, 2);
+  for (const token of result.subscription_invoice_tokens ?? []) {
+    assert.match(token, /^pay_[0-9a-f]{32}$/u);
+  }
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => item.sku),
     ["payment_plan_2", "payment_plan_3"],
@@ -5741,11 +5948,22 @@ test("prepare_offer uses stable neutral callback tokens for the same paid photo 
 
   const first = await service.evaluate(buildRequest());
   const second = await service.evaluate(buildRequest());
+  const differentSku = await service.evaluate(buildRequest({
+    photo_sku: "payment_media_2",
+  }));
+  const firstToken = first.token_rows?.[0]?.token;
+  const secondToken = second.token_rows?.[0]?.token;
+  const differentSkuToken = differentSku.token_rows?.[0]?.token;
 
   assert.equal(first.operation, "prepare_offer_callback");
   assert.equal(second.operation, "prepare_offer_callback");
-  assert.equal(first.token_rows?.[0]?.token, second.token_rows?.[0]?.token);
+  assert.equal(differentSku.operation, "prepare_offer_callback");
+  assert.equal(firstToken, secondToken);
+  assert.notEqual(firstToken, differentSkuToken);
+  assert.match(firstToken ?? "", /^btn_[0-9a-f]{32}$/u);
+  assert.ok(Buffer.byteLength(firstToken ?? "", "utf8") <= 64);
   assert.equal(first.token_rows?.[0]?.action_kind, "free_photo_unlock");
+  assert.equal(differentSku.token_rows?.[0]?.action_kind, "free_photo_unlock");
 });
 
 test("finalize_photo_event is idempotent when the same photo event is retried", async () => {
@@ -6504,7 +6722,7 @@ test("late CONFIRMED is not rejected solely because the offer expired", async ()
   assert.equal(calls.markInvoicePaid, 1);
 });
 
-test("unknown photo price fails closed before Telegram invoice creation", async () => {
+test("missing photo_sku fails closed before Telegram invoice creation", async () => {
   const payload = {
     action_kind: "free_photo_unlock",
     chat_id: 101,
@@ -6521,7 +6739,7 @@ test("unknown photo price fails closed before Telegram invoice creation", async 
   const { service, calls } = createRepository({
     async loadCallbackToken() {
       return buildLoadedCallbackToken({
-        token: "unknown-price-photo-entry",
+        token: "missing-sku-photo-entry",
         action_kind: "free_photo_unlock",
         payload_json: payload,
       });
@@ -6548,11 +6766,11 @@ test("unknown photo price fails closed before Telegram invoice creation", async 
     () => service.evaluate(buildRequest({
       interaction_mode: null,
       event_type: "callback_query.received",
-      callback_data: "unknown-price-photo-entry",
+      callback_data: "missing-sku-photo-entry",
       inbound_message_id: 777,
     })),
     (error: unknown) => error instanceof Error && "code" in error
-      && error.code === "unknown_photo_price",
+      && error.code === "unknown_photo_sku",
   );
   assert.equal(calls.createStarsInvoice, 0);
   assert.equal(calls.createSbpPayment, 0);

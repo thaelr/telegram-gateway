@@ -24,6 +24,20 @@ type AccessContextRow = {
 export class ChatAccessRepository {
   constructor(private readonly query: typeof sql = sql) {}
 
+  async popActiveSubscriptionOffer(
+    chatId: number,
+    currentOfferId: string | null,
+  ): Promise<number | null> {
+    const rows = await this.query<Array<{ message_id: number | null }>>`
+      SELECT public.media_pop_active_subscription_offer(
+        ${chatId}::bigint,
+        ${currentOfferId}::text
+      ) AS message_id
+    `;
+
+    return rows[0]?.message_id ?? null;
+  }
+
   async ensureAndLoadAccessContext(
     chatId: number,
     source: string | null,

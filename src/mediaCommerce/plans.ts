@@ -26,12 +26,12 @@ export type PromotedInvoicePlan<T extends InvoicePlan> = T & {
   promo_active: boolean;
 };
 
-export class UnknownPhotoPriceError extends Error {
-  readonly code = "unknown_photo_price";
+export class UnknownPhotoSkuError extends Error {
+  readonly code = "unknown_photo_sku";
 
-  constructor(readonly amountXtr: number) {
-    super(`No configured photo plan for ${amountXtr} XTR`);
-    this.name = "UnknownPhotoPriceError";
+  constructor(readonly photoSku: string | null | undefined) {
+    super(`No configured photo plan for SKU ${photoSku ?? "<missing>"}`);
+    this.name = "UnknownPhotoSkuError";
   }
 }
 
@@ -130,13 +130,16 @@ export function applyPromotionToPlan<T extends InvoicePlan>(
   };
 }
 
-export function resolvePhotoPlanByAmount(
-  amountXtr: number,
+export function resolvePhotoPlanBySku(
+  photoSku: string | null | undefined,
 ): PromotedInvoicePlan<MediaPhotoPlan> | null {
-  const normalizedAmount = Math.max(1, Math.trunc(amountXtr));
+  const normalizedSku = normalizeString(photoSku);
+  if (!normalizedSku) {
+    return null;
+  }
 
   const plan = config.MEDIA_PHOTO_PLANS_JSON.find(
-    (plan) => plan.amount_xtr === normalizedAmount,
+    (plan) => normalizeString(plan.sku) === normalizedSku,
   ) ?? null;
 
   return plan ? applyPromotionToPlan(plan) : null;
