@@ -122,6 +122,7 @@ type MediaRepository = Pick<
   | "markSbpInvoiceCanceled"
   | "markSbpInvoiceExpired"
   | "recordSbpStatusConflict"
+  | "recordSbpProviderEvent"
   | "loadStoredInvoiceTokens"
   | "loadActiveSubscriptionOfferId"
   | "loadAbTestAssignment"
@@ -833,6 +834,12 @@ function buildSbpGatewayRow(row: StoredInvoiceToken): StoredInvoiceToken {
   };
 }
 
+function normalizePositiveFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : null;
+}
+
 function groupOfferItems(rows: StoredInvoiceToken[]): MediaOfferItem[] {
   const grouped = new Map<string, StoredInvoiceToken[]>();
 
@@ -934,6 +941,7 @@ function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute 
     eventType === "payment.success.received"
     || eventType === "payment.confirmed.received"
     || eventType === "payment.canceled.received"
+    || eventType === "payment.chargebacked.received"
   ) {
     return "payment_success";
   }
@@ -3380,6 +3388,9 @@ export class MediaCommerceDecisionService {
     input: MediaCommerceDecisionRequest,
   ): Promise<MediaCommerceDecisionResponse> {
     const base = buildBaseResponse(input, "payment_success");
+    if (normalizeString(input.event_type) === "payment.chargebacked.received") {
+      return this.evaluateExternalPaymentChargeback(base, input);
+    }
     if (normalizeString(input.event_type) === "payment.canceled.received") {
       return this.evaluateExternalPaymentCancellation(base, input);
     }
@@ -3646,6 +3657,49 @@ export class MediaCommerceDecisionService {
     return this.fulfillPhotoPayment(base, paidRow, payload);
   }
 
+  private async recordSbpProviderEvent(
+    input: MediaCommerceDecisionRequest,
+    providerStatus: "CONFIRMED" | "CANCELED" | "CHARGEBACKED",
+    loaded: LoadedInvoiceToken,
+    operationPrefix: string,
+  ): Promise<void> {
+    const externalPaymentId = normalizeString(input.external_payment_id);
+    const providerAmount = normalizePositiveFiniteNumber(input.provider_payment_amount);
+    const providerCurrency = normalizeString(input.payment_currency);
+    const providerPaymentMethod = normalizePositiveInteger(input.provider_payment_method);
+    if (!externalPaymentId || !providerAmount || !providerCurrency) {
+      throw new MediaCommerceOperationError(
+        "SBP provider event is incomplete",
+        `${operationPrefix}.recordProviderEvent`,
+        "payment_details_mismatch",
+      );
+    }
+
+    const updatedCount = await this.runRepositoryOperation(
+      `${operationPrefix}.recordProviderEvent`,
+      {
+        chat_id: normalizePositiveInteger(loaded.chat_id),
+        payment_kind: normalizeString(loaded.action_kind),
+        sku: normalizeString(loaded.sku),
+        invoice_status: normalizeString(loaded.status),
+      },
+      () => this.repository.recordSbpProviderEvent({
+        external_payment_id: externalPaymentId,
+        provider_status: providerStatus,
+        provider_amount: providerAmount,
+        provider_currency: providerCurrency,
+        provider_payment_method: providerPaymentMethod,
+      }),
+    );
+    if (updatedCount !== 1) {
+      throw new MediaCommerceOperationError(
+        "SBP provider event was not persisted",
+        `${operationPrefix}.recordProviderEvent`,
+        "sbp_provider_event_persistence_failed",
+      );
+    }
+  }
+
   private async evaluateExternalPaymentCancellation(
     base: MediaCommerceDecisionResponse,
     input: MediaCommerceDecisionRequest,
@@ -3670,6 +3724,13 @@ export class MediaCommerceDecisionService {
     ) {
       return { ...base, payment_source: "sbp", reason: "payment_not_found" };
     }
+
+    await this.recordSbpProviderEvent(
+      input,
+      "CANCELED",
+      loaded,
+      "payment.externalCanceled",
+    );
 
     const status = normalizeString(loaded.status);
     if (status === "canceled") {
@@ -3716,6 +3777,57 @@ export class MediaCommerceDecisionService {
       payment_source: "sbp",
       payment_token: loaded.token,
       reason: "payment_canceled",
+    };
+  }
+
+  private async evaluateExternalPaymentChargeback(
+    base: MediaCommerceDecisionResponse,
+    input: MediaCommerceDecisionRequest,
+  ): Promise<MediaCommerceDecisionResponse> {
+    const externalPaymentId = normalizeString(input.external_payment_id);
+    if (!externalPaymentId) {
+      return { ...base, payment_source: "sbp", reason: "external_payment_id_required" };
+    }
+
+    const loaded = await this.runRepositoryOperation(
+      "payment.externalChargeback.loadInvoiceTokenByExternalPaymentId",
+      { chat_id: null, payment_kind: null, sku: null, invoice_status: null },
+      () => this.repository.loadInvoiceTokenByExternalPaymentId(externalPaymentId),
+    );
+    if (!loaded?.found || !loaded.token) {
+      return { ...base, payment_source: "sbp", reason: "payment_not_found" };
+    }
+    if (
+      normalizeString(loaded.external_payment_id) !== externalPaymentId
+      || normalizePaymentSource(loaded.payment_source) !== "sbp"
+      || normalizeString(loaded.kind) !== INVOICE_PAYLOAD_KIND
+    ) {
+      return { ...base, payment_source: "sbp", reason: "payment_not_found" };
+    }
+
+    await this.recordSbpProviderEvent(
+      input,
+      "CHARGEBACKED",
+      loaded,
+      "payment.externalChargeback",
+    );
+
+    console.error("[media_commerce] sbp_chargeback_recorded", {
+      external_payment_id: externalPaymentId,
+      token: loaded.token,
+      chat_id: loaded.chat_id,
+      local_status: loaded.status,
+    });
+
+    return {
+      ...base,
+      operation: "noop",
+      chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+      scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+      turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+      payment_source: "sbp",
+      payment_token: loaded.token,
+      reason: "payment_chargeback_recorded",
     };
   }
 
@@ -3807,6 +3919,31 @@ export class MediaCommerceDecisionService {
 
     const resolvedAction = actionResolution.action;
     const existingStatus = normalizeString(loaded.status);
+    const providerAmount = normalizePositiveFiniteNumber(input.provider_payment_amount);
+    if (
+      normalizeString(loaded.currency) !== "RUB"
+      || normalizeString(input.payment_currency) !== "RUB"
+      || !providerAmount
+    ) {
+      return {
+        ...base,
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        payment_kind: resolvedAction.payment_kind,
+        feature_key: resolvedAction.feature_key,
+        reason: "payment_details_mismatch",
+      };
+    }
+
+    await this.recordSbpProviderEvent(
+      input,
+      "CONFIRMED",
+      loaded,
+      "payment.externalConfirmed",
+    );
+
     if (existingStatus === "canceled") {
       const conflictRecorded = await this.runRepositoryOperation(
         "payment.external.recordStatusConflict",
@@ -3838,23 +3975,6 @@ export class MediaCommerceDecisionService {
         payment_token: loaded.token,
         feature_key: resolvedAction.feature_key,
         reason: "payment_status_conflict",
-      };
-    }
-    const paymentTotalAmount = normalizePositiveInteger(input.payment_total_amount);
-    if (
-      normalizeString(loaded.currency ?? "RUB") !== "RUB"
-      || normalizeString(input.payment_currency) !== "RUB"
-      || !paymentTotalAmount
-    ) {
-      return {
-        ...base,
-        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
-        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
-        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
-        payment_source: "sbp",
-        payment_kind: resolvedAction.payment_kind,
-        feature_key: resolvedAction.feature_key,
-        reason: "payment_details_mismatch",
       };
     }
 
@@ -3894,7 +4014,7 @@ export class MediaCommerceDecisionService {
           provider_payment_charge_id: null,
           external_payment_id: externalPaymentId,
           payment_currency: normalizeString(input.payment_currency),
-          payment_total_amount: paymentTotalAmount,
+          payment_total_amount: normalizePositiveInteger(loaded.amount),
           checkout_url: normalizeString(input.checkout_url),
         }),
       );

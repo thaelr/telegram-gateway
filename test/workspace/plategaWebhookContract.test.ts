@@ -82,9 +82,9 @@ async function loadSbpMigration(name: string): Promise<string> {
   return readFile(migrationPath, "utf8");
 }
 
-test("SBP paid claim validates external id and RUB currency without amount equality", async () => {
+test("SBP paid claim validates provider identity without using provider amount as invoice identity", async () => {
   const migration = await loadSbpMigration(
-    "20260915165838_media_commerce_sbp_lifecycle_followup.sql",
+    "20260923110000_sbp_provider_event_facts.sql",
   );
   const functionStart = migration.indexOf(
     "CREATE OR REPLACE FUNCTION public.media_mark_invoice_paid",
@@ -98,11 +98,37 @@ test("SBP paid claim validates external id and RUB currency without amount equal
   );
   assert.match(
     functionSql,
-    /t\.currency[\s\S]*= COALESCE\(NULLIF\(BTRIM\(p_payment_currency\), ''\), 'RUB'\)/u,
+    /NULLIF\(BTRIM\(t\.currency\), ''\) = NULLIF\(BTRIM\(p_payment_currency\), ''\)/u,
   );
+  assert.match(functionSql, /NULLIF\(BTRIM\(t\.payment_source\), ''\) = NULLIF\(BTRIM\(p_payment_source\), ''\)/u);
   assert.doesNotMatch(
     functionSql,
     /COALESCE\(t\.amount, t\.amount_xtr\) = p_payment_total_amount/u,
+  );
+  assert.doesNotMatch(functionSql, /amount = COALESCE/u);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.media_record_sbp_provider_event/u);
+  assert.match(migration, /sbp_provider_amount = i\.provider_amount/u);
+  assert.match(migration, /provider_amount::text <> 'NaN'/u);
+  assert.match(migration, /interaction_tokens_invoice_payment_fields_check/u);
+});
+
+test("SBP provider event migration preserves payment method when retry omits it", async () => {
+  const migration = await loadSbpMigration(
+    "20260923110000_sbp_provider_event_facts.sql",
+  );
+  const functionStart = migration.indexOf(
+    "CREATE OR REPLACE FUNCTION public.media_record_sbp_provider_event",
+  );
+  const functionSql = migration.slice(functionStart);
+
+  assert.ok(functionStart >= 0);
+  assert.match(
+    functionSql,
+    /sbp_provider_payment_method = COALESCE\(i\.provider_payment_method, t\.sbp_provider_payment_method\)/u,
+  );
+  assert.doesNotMatch(
+    functionSql,
+    /sbp_provider_payment_method = i\.provider_payment_method/u,
   );
 });
 
@@ -323,7 +349,8 @@ test("Normalize SBP webhook event maps Platega CONFIRMED callback to gateway con
       body: {
         id: "platega-transaction-1",
         status: "CONFIRMED",
-        amount: 299,
+        amount: 299.75,
+        paymentMethod: 12,
         currency: "RUB",
       },
     },
@@ -339,24 +366,15 @@ test("Normalize SBP webhook event maps Platega CONFIRMED callback to gateway con
     payment_source: "sbp",
     external_payment_id: "platega-transaction-1",
     payment_currency: "RUB",
-    payment_total_amount: 299,
+    payment_total_amount: null,
+    provider_payment_amount: 299.75,
+    provider_payment_method: 12,
     checkout_url: null,
     source: "sbp_webhook",
     sbp_webhook_action: "confirmed",
     response_code: 200,
     reason: null,
-    raw_update: {
-      headers: {
-        "x-merchantid": "merchant-1",
-        "x-secret": "secret-1",
-      },
-      body: {
-        id: "platega-transaction-1",
-        status: "CONFIRMED",
-        amount: 299,
-        currency: "RUB",
-      },
-    },
+    raw_update: null,
   });
   assert.equal("payment_token" in normalized, false);
   assert.equal("chat_id" in normalized, false);
@@ -385,6 +403,37 @@ test("Normalize SBP webhook event maps Platega CANCELED callback to gateway cont
   assert.equal(normalized.event_type, "payment.canceled.received");
   assert.equal(normalized.sbp_webhook_action, "canceled");
   assert.equal(normalized.external_payment_id, "platega-canceled-1");
+  assert.equal(normalized.payment_total_amount, null);
+  assert.equal(normalized.provider_payment_amount, 299);
+  assert.equal(normalized.response_code, 200);
+  assert.equal(normalized.reason, null);
+});
+
+test("Normalize SBP webhook event maps Platega CHARGEBACKED callback to audit-only gateway contract", async () => {
+  const normalized = await runNormalizeSbpWebhookContract(
+    {
+      headers: {
+        "x-merchantid": "merchant-1",
+        "x-secret": "secret-1",
+      },
+      body: {
+        id: "platega-chargebacked-1",
+        status: "CHARGEBACKED",
+        amount: 299.75,
+        currency: "RUB",
+      },
+    },
+    {
+      SBP_MERCHANT_ID: "merchant-1",
+      SBP_API_SECRET: "secret-1",
+    },
+  );
+
+  assert.equal(normalized.event_type, "payment.chargebacked.received");
+  assert.equal(normalized.sbp_webhook_action, "chargebacked");
+  assert.equal(normalized.external_payment_id, "platega-chargebacked-1");
+  assert.equal(normalized.payment_total_amount, null);
+  assert.equal(normalized.provider_payment_amount, 299.75);
   assert.equal(normalized.response_code, 200);
   assert.equal(normalized.reason, null);
 });
@@ -461,7 +510,8 @@ test("Normalize SBP webhook event ignores non-CONFIRMED Platega callback", async
   assert.equal(normalized.event_type, null);
   assert.equal(normalized.payment_source, "sbp");
   assert.equal(normalized.external_payment_id, "platega-transaction-2");
-  assert.equal(normalized.payment_total_amount, 299);
+  assert.equal(normalized.payment_total_amount, null);
+  assert.equal(normalized.provider_payment_amount, 299);
   assert.equal(normalized.payment_currency, "RUB");
   assert.equal(normalized.reason, "sbp_webhook_ignored");
   assert.equal(normalized.sbp_webhook_action, "ack");
@@ -516,7 +566,7 @@ test("Normalize SBP webhook event rejects malformed confirmed callback", async (
   assert.equal(normalized.response_code, 400);
 });
 
-test("SBP webhook topology responds once after confirmed fulfillment and bypasses fulfillment for canceled", async () => {
+test("SBP webhook topology responds once after confirmed fulfillment and bypasses fulfillment for canceled or chargebacked", async () => {
   const workflow = await loadWorkflow();
   const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
   const webhook = nodes.find((entry) => entry.name === "SBP payment webhook");
@@ -527,9 +577,13 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
   const cancellationValidation = nodes.find(
     (entry) => entry.name === "Validate SBP cancellation persisted",
   );
+  const chargebackValidation = nodes.find(
+    (entry) => entry.name === "Validate SBP chargeback recorded",
+  );
 
   assert.equal(webhook?.parameters?.responseMode, "responseNode");
-  assert.match(String(route?.parameters?.output ?? ""), /confirmed.*canceled/u);
+  assert.equal(route?.parameters?.numberOutputs, 5);
+  assert.match(String(route?.parameters?.output ?? ""), /confirmed.*canceled.*chargebacked/u);
   assert.match(
     String(terminalRoute?.parameters?.output ?? ""),
     /subscription_activated.*feature_fulfillment_required.*scene_access_activated/u,
@@ -550,6 +604,10 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
     String(cancellationValidation?.parameters?.jsCode ?? ""),
     /payment_canceled.*payment_already_canceled/u,
   );
+  assert.match(
+    String(chargebackValidation?.parameters?.jsCode ?? ""),
+    /payment_chargeback_recorded/u,
+  );
   assert.deepEqual(
     workflow.connections?.["Normalize SBP webhook event"]?.main?.[0]?.map((entry) => entry.node),
     ["Route SBP webhook event"],
@@ -561,6 +619,7 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
     [
       ["Send SBP payment event to gateway"],
       ["Send SBP cancellation event to gateway"],
+      ["Send SBP chargeback event to gateway"],
       ["Return SBP webhook ignored"],
       ["Return SBP webhook invalid"],
     ],
@@ -579,6 +638,14 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
   );
   assert.deepEqual(
     workflow.connections?.["Validate SBP cancellation persisted"]?.main?.[0]?.map((entry) => entry.node),
+    ["Return SBP webhook success"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Send SBP chargeback event to gateway"]?.main?.[0]?.map((entry) => entry.node),
+    ["Validate SBP chargeback recorded"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Validate SBP chargeback recorded"]?.main?.[0]?.map((entry) => entry.node),
     ["Return SBP webhook success"],
   );
   for (const terminal of [
@@ -610,6 +677,7 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
   );
   const confirmedReachable = reachableNodeNames(workflow, "Send SBP payment event to gateway");
   const canceledReachable = reachableNodeNames(workflow, "Send SBP cancellation event to gateway");
+  const chargebackedReachable = reachableNodeNames(workflow, "Send SBP chargeback event to gateway");
   assert.deepEqual(
     [...confirmedReachable].filter((name) => respondNodes.has(name)),
     ["Return SBP webhook success"],
@@ -618,8 +686,14 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
     [...canceledReachable].filter((name) => respondNodes.has(name)),
     ["Return SBP webhook success"],
   );
+  assert.deepEqual(
+    [...chargebackedReachable].filter((name) => respondNodes.has(name)),
+    ["Return SBP webhook success"],
+  );
   assert.equal(canceledReachable.has("Route operation group"), false);
   assert.equal(canceledReachable.has("Need noop callback answer?"), false);
+  assert.equal(chargebackedReachable.has("Route operation group"), false);
+  assert.equal(chargebackedReachable.has("Need noop callback answer?"), false);
   const successIncoming = Object.entries(workflow.connections ?? {})
     .filter(([, connection]) => (connection.main ?? []).flat().some(
       (target) => target.node === "Return SBP webhook success",
@@ -629,6 +703,7 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
   assert.deepEqual(successIncoming, [
     "Route SBP confirmed terminal response",
     "Validate SBP cancellation persisted",
+    "Validate SBP chargeback recorded",
   ]);
 });
 

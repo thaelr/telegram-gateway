@@ -35,6 +35,8 @@ export const mediaCommerceRequestSchema = z.object({
   payment_source: z.enum(["stars", "sbp"]).nullable().optional(),
   payment_currency: z.string().trim().nullable().optional(),
   payment_total_amount: nonNegativeIntegerInputSchema.nullable().optional(),
+  provider_payment_amount: z.number().finite().positive().nullable().optional(),
+  provider_payment_method: positiveIntegerInputSchema.nullable().optional(),
   payment_token: z.string().trim().nullable().optional(),
   external_payment_id: z.string().trim().nullable().optional(),
   checkout_url: z.string().trim().nullable().optional(),

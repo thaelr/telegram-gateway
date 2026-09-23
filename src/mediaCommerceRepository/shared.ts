@@ -123,6 +123,14 @@ export type MarkInvoicePaidInput = {
   checkout_url?: string | null;
 };
 
+export type RecordSbpProviderEventInput = {
+  external_payment_id: string;
+  provider_status: "CONFIRMED" | "CANCELED" | "CHARGEBACKED";
+  provider_amount: number;
+  provider_currency: string;
+  provider_payment_method?: number | null;
+};
+
 export type ActivateSubscriptionInput = {
   payment_token: string;
   chat_id: number;

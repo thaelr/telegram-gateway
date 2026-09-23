@@ -25,6 +25,7 @@ import {
   type MarkInvoicePaidInput,
   type QueryClient,
   type RecordAbTestDeliveredInput,
+  type RecordSbpProviderEventInput,
   type SceneAccessStatus,
   type SceneAccessStatusInput,
   type SbpCheckoutCreationClaim,
@@ -211,6 +212,10 @@ export class MediaCommerceRepository {
     providerStatus: string,
   ): Promise<number> {
     return this.paymentRepository.recordSbpStatusConflict(externalPaymentId, providerStatus);
+  }
+
+  async recordSbpProviderEvent(input: RecordSbpProviderEventInput): Promise<number> {
+    return this.paymentRepository.recordSbpProviderEvent(input);
   }
 
   async loadStoredInvoiceTokens(tokens: string[]): Promise<StoredInvoiceToken[]> {

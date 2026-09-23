@@ -1577,6 +1577,29 @@ test("markInvoicePaid delegates to media_mark_invoice_paid function", async () =
   assert.match(calls[0]?.sql ?? "", /FROM public\.media_mark_invoice_paid\(/u);
 });
 
+test("recordSbpProviderEvent delegates to media_record_sbp_provider_event function", async () => {
+  const { query, calls } = createTaggedQueryStub([[{ updated_count: 1 }]]);
+  const repository = new MediaCommerceRepository(query as never);
+
+  const result = await repository.recordSbpProviderEvent({
+    external_payment_id: "platega-1",
+    provider_status: "CHARGEBACKED",
+    provider_amount: 199.75,
+    provider_currency: "RUB",
+    provider_payment_method: 7,
+  });
+
+  assert.equal(result, 1);
+  assert.match(calls[0]?.sql ?? "", /SELECT public\.media_record_sbp_provider_event\(/u);
+  assert.deepEqual(calls[0]?.values, [
+    "platega-1",
+    "CHARGEBACKED",
+    199.75,
+    "RUB",
+    7,
+  ]);
+});
+
 test("activateSubscription delegates to media_activate_subscription function", async () => {
   const { query, calls } = createTaggedQueryStub([[{ activated_count: 1 }]]);
   const repository = new MediaCommerceRepository(query as never);

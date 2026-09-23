@@ -7,6 +7,7 @@ import type {
   MarkInvoicePaidInput,
   QueryClient,
   RedeemFreeActionResult,
+  RecordSbpProviderEventInput,
   SceneAccessStatus,
   SceneAccessStatusInput,
   StorePrecheckoutResultInput,
@@ -96,6 +97,19 @@ export class MediaPaymentRepository {
       SELECT public.media_record_sbp_status_conflict(
         ${externalPaymentId}::text,
         ${providerStatus}::text
+      ) AS updated_count
+    `;
+    return rows[0]?.updated_count ?? 0;
+  }
+
+  async recordSbpProviderEvent(input: RecordSbpProviderEventInput): Promise<number> {
+    const rows = await this.query<Array<{ updated_count: number }>>`
+      SELECT public.media_record_sbp_provider_event(
+        ${input.external_payment_id}::text,
+        ${input.provider_status}::text,
+        ${input.provider_amount}::numeric,
+        ${input.provider_currency}::text,
+        ${input.provider_payment_method ?? null}::integer
       ) AS updated_count
     `;
     return rows[0]?.updated_count ?? 0;

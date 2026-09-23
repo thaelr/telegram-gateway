@@ -238,6 +238,9 @@ type MockRepository = {
     externalPaymentId: string,
     providerStatus: string,
   ) => Promise<number>;
+  recordSbpProviderEvent: (
+    input: unknown,
+  ) => Promise<number>;
   loadStoredInvoiceTokens: (
     tokens: string[],
   ) => Promise<StoredInvoiceToken[]>;
@@ -698,6 +701,8 @@ function createRepository(
     markSbpInvoiceCanceled: 0,
     markSbpInvoiceExpired: 0,
     recordSbpStatusConflict: 0,
+    recordSbpProviderEvent: 0,
+    recordSbpProviderEventArgs: [] as unknown[],
     loadCallbackTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
     loadInvoiceTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
     loadInvoiceTokenByExternalPaymentIdArgs: [] as Array<string | null>,
@@ -1080,6 +1085,11 @@ function createRepository(
     },
     async recordSbpStatusConflict() {
       calls.recordSbpStatusConflict += 1;
+      return 1;
+    },
+    async recordSbpProviderEvent(input) {
+      calls.recordSbpProviderEvent += 1;
+      calls.recordSbpProviderEventArgs.push(input);
       return 1;
     },
     async loadStoredInvoiceTokens(tokens) {
@@ -4092,7 +4102,7 @@ test("payment.confirmed.received resolves SBP payment by external id without int
       payment_source: "sbp",
       external_payment_id: "platega-transaction-1",
       payment_currency: "RUB",
-      payment_total_amount: 299,
+      provider_payment_amount: 299.75,
       payment_token: null,
       invoice_token: null,
       chat_id: null,
@@ -4141,7 +4151,7 @@ test("payment.confirmed.received rejects persisted SBP invoice without chat_id",
         payment_source: "sbp",
         external_payment_id: "platega-transaction-missing-chat",
         payment_currency: "RUB",
-        payment_total_amount: 299,
+        provider_payment_amount: 299,
         chat_id: null,
       }),
     ), MediaRepositoryContractError);
@@ -4188,7 +4198,7 @@ for (const [invoiceAmount, webhookAmount] of [[50, 52], [300, 312]] as const) {
         payment_source: "sbp",
         external_payment_id: externalPaymentId,
         payment_currency: "RUB",
-        payment_total_amount: webhookAmount,
+        provider_payment_amount: webhookAmount,
         chat_id: null,
       }),
     );
@@ -4197,7 +4207,15 @@ for (const [invoiceAmount, webhookAmount] of [[50, 52], [300, 312]] as const) {
     assert.equal(result.payment_token, paymentRow.token);
     assert.equal(calls.markInvoicePaid, 1);
     assert.equal(calls.activateSubscription, 1);
-    assert.equal(capturedMarkInputs[0]?.payment_total_amount, webhookAmount);
+    assert.equal(capturedMarkInputs[0]?.payment_total_amount, invoiceAmount);
+    assert.equal(calls.recordSbpProviderEvent, 1);
+    assert.deepEqual(calls.recordSbpProviderEventArgs[0], {
+      external_payment_id: externalPaymentId,
+      provider_status: "CONFIRMED",
+      provider_amount: webhookAmount,
+      provider_currency: "RUB",
+      provider_payment_method: null,
+    });
   });
 }
 
@@ -4222,7 +4240,7 @@ test("payment.confirmed.received rejects a mismatched SBP external payment id", 
       payment_source: "sbp",
       external_payment_id: "requested-platega-id",
       payment_currency: "RUB",
-      payment_total_amount: 52,
+      provider_payment_amount: 52,
       chat_id: null,
     }),
   );
@@ -4253,7 +4271,7 @@ test("payment.confirmed.received rejects a non-RUB SBP currency", async () => {
       payment_source: "sbp",
       external_payment_id: "platega-50",
       payment_currency: "USD",
-      payment_total_amount: 52,
+      provider_payment_amount: 52,
       chat_id: null,
     }),
   );
@@ -4295,7 +4313,7 @@ test("payment.confirmed.received is idempotent for duplicate fulfilled SBP webho
       payment_source: "sbp",
       external_payment_id: "platega-transaction-1",
       payment_currency: "RUB",
-      payment_total_amount: 299,
+      provider_payment_amount: 299,
       payment_token: null,
       invoice_token: null,
       chat_id: null,
@@ -4339,7 +4357,7 @@ test("payment.confirmed.received retries fulfillment for already paid SBP webhoo
       payment_source: "sbp",
       external_payment_id: "platega-transaction-1",
       payment_currency: "RUB",
-      payment_total_amount: 299,
+      provider_payment_amount: 299,
       payment_token: null,
       invoice_token: null,
       chat_id: null,
@@ -7317,10 +7335,18 @@ test("CANCELED webhook stores terminal state and canceled checkout cannot be reo
     payment_source: "sbp",
     external_payment_id: externalPaymentId,
     payment_currency: "RUB",
-    payment_total_amount: 199,
+    provider_payment_amount: 199,
   }));
   assert.equal(result.reason, "payment_canceled");
   assert.equal(calls.markSbpInvoiceCanceled, 1);
+  assert.equal(calls.recordSbpProviderEvent, 1);
+  assert.deepEqual(calls.recordSbpProviderEventArgs[0], {
+    external_payment_id: externalPaymentId,
+    provider_status: "CANCELED",
+    provider_amount: 199,
+    provider_currency: "RUB",
+    provider_payment_method: null,
+  });
   await assert.rejects(() => service.resolveSbpCheckout(token));
   assert.equal(calls.createSbpPayment, 0);
 });
@@ -7999,7 +8025,7 @@ test("canceled subscription attempt rolls over to a new SBP token and transactio
       payment_source: "sbp",
       external_payment_id: externalA,
       payment_currency: "RUB",
-      payment_total_amount: 199,
+      provider_payment_amount: 199,
     }));
     assert.equal(canceled.reason, "payment_canceled");
 
@@ -8050,7 +8076,7 @@ test("CONFIRMED after local cancellation records an explicit status conflict", a
       payment_source: "sbp",
       external_payment_id: externalPaymentId,
       payment_currency: "RUB",
-      payment_total_amount: 199,
+      provider_payment_amount: 199,
     }));
     assert.equal(result.reason, "payment_status_conflict");
   } finally {
@@ -8089,12 +8115,146 @@ test("CONFIRMED after cancellation fails closed when status conflict is not pers
       payment_source: "sbp",
       external_payment_id: externalPaymentId,
       payment_currency: "RUB",
-      payment_total_amount: 199,
+      provider_payment_amount: 199,
     })),
     (error: unknown) => error instanceof Error
       && "code" in error
       && error.code === "sbp_status_conflict_persistence_failed",
   );
+});
+
+test("CHARGEBACKED webhook records provider fact without changing fulfilled invoice state", async () => {
+  const externalPaymentId = "sbp-chargebacked-1";
+  const { service, calls } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId() {
+      return buildLoadedInvoiceToken({
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        external_payment_id: externalPaymentId,
+        status: "fulfilled",
+        action_kind: "subscription_payment",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 7,
+          subscription_sku: "payment_plan_7",
+        },
+      });
+    },
+  });
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.chargebacked.received",
+      payment_source: "sbp",
+      external_payment_id: externalPaymentId,
+      payment_currency: "RUB",
+      provider_payment_amount: 199.75,
+      provider_payment_method: 7,
+    }));
+
+    assert.equal(result.operation, "noop");
+    assert.equal(result.reason, "payment_chargeback_recorded");
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(calls.recordSbpProviderEvent, 1);
+  assert.deepEqual(calls.recordSbpProviderEventArgs[0], {
+    external_payment_id: externalPaymentId,
+    provider_status: "CHARGEBACKED",
+    provider_amount: 199.75,
+    provider_currency: "RUB",
+    provider_payment_method: 7,
+  });
+  assert.equal(calls.markInvoicePaid, 0);
+  assert.equal(calls.activateSubscription, 0);
+  assert.equal(calls.markSbpInvoiceCanceled, 0);
+});
+
+test("duplicate CHARGEBACKED webhook is acknowledged idempotently after recording provider fact", async () => {
+  const externalPaymentId = "sbp-chargebacked-duplicate";
+  const { service, calls } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId() {
+      return buildLoadedInvoiceToken({
+        payment_source: "sbp",
+        amount: 80,
+        currency: "RUB",
+        external_payment_id: externalPaymentId,
+        status: "fulfilled",
+        action_kind: "feature_payment",
+        payload_json: {
+          action_kind: "feature_payment",
+          feature_key: "fast_scene_skip",
+        },
+      });
+    },
+  });
+  const request = buildRequest({
+    interaction_mode: null,
+    event_type: "payment.chargebacked.received",
+    payment_source: "sbp",
+    external_payment_id: externalPaymentId,
+    payment_currency: "RUB",
+    provider_payment_amount: 80,
+  });
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    const first = await service.evaluate(request);
+    const second = await service.evaluate(request);
+    assert.equal(first.reason, "payment_chargeback_recorded");
+    assert.equal(second.reason, "payment_chargeback_recorded");
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(calls.recordSbpProviderEvent, 2);
+  assert.equal(calls.markInvoicePaid, 0);
+  assert.equal(calls.activateSubscription, 0);
+});
+
+test("SBP webhook fails closed when provider fact is not persisted", async () => {
+  const externalPaymentId = "sbp-provider-fact-not-persisted";
+  const { service, calls } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId() {
+      return buildLoadedInvoiceToken({
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        external_payment_id: externalPaymentId,
+        status: "invoice_sent",
+        action_kind: "subscription_payment",
+        payload_json: {
+          action_kind: "subscription_payment",
+          subscription_days: 7,
+          subscription_sku: "payment_plan_7",
+        },
+      });
+    },
+    async recordSbpProviderEvent(input) {
+      calls.recordSbpProviderEvent += 1;
+      calls.recordSbpProviderEventArgs.push(input);
+      return 0;
+    },
+  });
+
+  await assert.rejects(
+    () => service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.confirmed.received",
+      payment_source: "sbp",
+      external_payment_id: externalPaymentId,
+      payment_currency: "RUB",
+      provider_payment_amount: 199,
+    })),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "sbp_provider_event_persistence_failed",
+  );
+  assert.equal(calls.markInvoicePaid, 0);
 });
 
 test("late CONFIRMED is not rejected solely because the offer expired", async () => {
@@ -8129,7 +8289,7 @@ test("late CONFIRMED is not rejected solely because the offer expired", async ()
     payment_source: "sbp",
     external_payment_id: externalPaymentId,
     payment_currency: "RUB",
-    payment_total_amount: 82,
+    provider_payment_amount: 82,
   }));
   assert.equal(result.operation, "feature_fulfillment_required");
   assert.equal(calls.markInvoicePaid, 1);
