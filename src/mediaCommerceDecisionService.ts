@@ -348,6 +348,39 @@ function buildPaymentSourceToggleTokenMap(
   }, {});
 }
 
+function normalizeInvoiceTokens(value: unknown): string[] {
+  return Array.isArray(value)
+    ? Array.from(new Set(value.map((item) => normalizeString(item)).filter(
+      (item): item is string => item != null,
+    )))
+    : [];
+}
+
+function extractLegacyPaymentOptionTokens(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return normalizeInvoiceTokens(value.map((item) =>
+    item != null && typeof item === "object" && !Array.isArray(item)
+      ? (item as { token?: unknown }).token
+      : null,
+  ));
+}
+
+function extractLegacySubscriptionInvoiceTokens(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const tokens: unknown[] = [];
+  for (const item of value) {
+    if (item == null || typeof item !== "object" || Array.isArray(item)) continue;
+    const paymentOptions = (item as { payment_options?: unknown }).payment_options;
+    if (!Array.isArray(paymentOptions)) continue;
+    for (const option of paymentOptions) {
+      if (option != null && typeof option === "object" && !Array.isArray(option)) {
+        tokens.push((option as { token?: unknown }).token);
+      }
+    }
+  }
+  return normalizeInvoiceTokens(tokens);
+}
+
 function buildPaymentUiTokenRow(input: {
   action_kind: PaymentUiActionKind;
   chat_id: number;
@@ -356,16 +389,10 @@ function buildPaymentUiTokenRow(input: {
   scene_turn_no: number | null;
   target_message_id?: number | null;
   feature_key?: "fast_scene_skip" | "scene_unlock" | string | null;
-  action_button_text?: string | null;
-  payment_options?: MediaPaymentOption[];
-  subscription_offer_items?: MediaOfferItem[];
-  token_rows?: InteractionTokenRow[];
-  text?: string | null;
-  free_balance_text?: string | null;
-  offer_message_id?: number | null;
+  invoice_tokens?: string[];
   selected_payment_source?: PaymentSource | null;
   payment_source_toggle_tokens?: Partial<Record<PaymentSource, string>> | null;
-  ab_test?: AbTestContext | null;
+  offer_id?: string | null;
   idempotency_key?: string | null;
 }): InteractionTokenRow {
   const token = buildStableCallbackToken([
@@ -380,37 +407,40 @@ function buildPaymentUiTokenRow(input: {
     input.idempotency_key,
   ]);
 
+  const payload_json = input.action_kind === "subscription_payment_source_toggle"
+    ? {
+        action_kind: input.action_kind,
+        chat_id: input.chat_id,
+        offer_id: input.offer_id ?? null,
+        selected_payment_source: input.selected_payment_source ?? null,
+        invoice_tokens: input.invoice_tokens ?? [],
+        payment_source_toggle_tokens: input.payment_source_toggle_tokens ?? null,
+      }
+    : {
+        action_kind: input.action_kind,
+        chat_id: input.chat_id,
+        scene_session_id: input.scene_session_id,
+        turn_no: input.turn_no,
+        scene_turn_no: input.scene_turn_no,
+        target_message_id: input.target_message_id ?? null,
+        feature_key: input.feature_key ?? null,
+        invoice_tokens: input.invoice_tokens ?? [],
+      };
+
   return {
     token,
     kind: "button_callback",
     chat_id: input.chat_id,
     scene_session_id: input.scene_session_id,
     turn_no: input.turn_no,
-    payload_json: {
-      action_kind: input.action_kind,
-      chat_id: input.chat_id,
-      scene_session_id: input.scene_session_id,
-      turn_no: input.turn_no,
-      scene_turn_no: input.scene_turn_no,
-      target_message_id: input.target_message_id ?? null,
-      feature_key: input.feature_key ?? null,
-      requested_action: input.action_kind,
-      action_button_text: input.action_button_text ?? null,
-      payment_options: input.payment_options ?? [],
-      subscription_offer_items: input.subscription_offer_items ?? [],
-      token_rows: input.token_rows ?? [],
-      text: input.text ?? null,
-      free_balance_text: input.free_balance_text ?? null,
-      offer_message_id: input.offer_message_id ?? null,
-      selected_payment_source: input.selected_payment_source ?? null,
-      payment_source_toggle_tokens: input.payment_source_toggle_tokens ?? null,
-      feature_payment_hint_text: getFeaturePaymentHint(input.feature_key),
-      payment_ui: buildPaymentUiCopy(),
-      ab_test: input.ab_test ?? null,
-    },
+    payload_json,
     status: "active",
     action_kind: input.action_kind,
-    expires_at: new Date(Date.now() + INVOICE_TTL_MS).toISOString(),
+    expires_at:
+      input.action_kind === "subscription_payment_source_toggle"
+      || (input.action_kind === "reveal_feature_payment_options" && input.scene_session_id)
+        ? null
+        : new Date(Date.now() + INVOICE_TTL_MS).toISOString(),
   };
 }
 
@@ -742,6 +772,65 @@ function buildOfferGroupKey(row: StoredInvoiceToken): string {
     normalizePositiveInteger(payload.subscription_days) ?? null,
     normalizeNonNegativeInteger(payload.sort_order) ?? 100,
   ]);
+}
+
+function getInvoicePurchaseId(row: StoredInvoiceToken | LoadedInvoiceToken): string | null {
+  const payload = parseJsonObject(row.payload_json) ?? {};
+  return normalizeString(
+    typeof payload.idempotency_key === "string" ? payload.idempotency_key : null,
+  );
+}
+
+function getInvoiceFeatureKey(row: StoredInvoiceToken | LoadedInvoiceToken): string | null {
+  const payload = parseJsonObject(row.payload_json) ?? {};
+  return normalizeFeatureKeyValue(
+    typeof payload.feature_key === "string" ? payload.feature_key : null,
+  );
+}
+
+function buildPurchaseGroupKey(row: StoredInvoiceToken): string | null {
+  const purchaseId = getInvoicePurchaseId(row);
+  const sku = normalizeString(row.sku);
+  if (!purchaseId || !sku) return null;
+  return `${purchaseId}\u001f${sku}`;
+}
+
+function isRenderableStoredInvoiceRow(row: StoredInvoiceToken): boolean {
+  const paymentSource = normalizePaymentSource(row.payment_source);
+  const status = normalizeString(row.status);
+  if (paymentSource === "stars") {
+    return status === "invoice_sent";
+  }
+  if (paymentSource === "sbp") {
+    return status === "invoice_sent" || isRetryableSbpCancellation(row);
+  }
+  return false;
+}
+
+function getTelegramStarsInvoiceError(error: unknown): TelegramStarsInvoiceError | null {
+  if (error instanceof TelegramStarsInvoiceError) return error;
+  if (error instanceof Error && error.cause instanceof TelegramStarsInvoiceError) {
+    return error.cause;
+  }
+  return null;
+}
+
+function isTransientStarsInvoiceError(error: unknown): boolean {
+  const starsError = getTelegramStarsInvoiceError(error);
+  return starsError != null
+    && (
+      starsError.stage === "request"
+      || starsError.statusCode === 429
+      || (starsError.statusCode != null && starsError.statusCode >= 500)
+    );
+}
+
+function buildSbpGatewayRow(row: StoredInvoiceToken): StoredInvoiceToken {
+  return {
+    ...row,
+    checkout_url: buildSbpGatewayCheckoutUrl(row.token),
+    external_payment_id: null,
+  };
 }
 
 function groupOfferItems(rows: StoredInvoiceToken[]): MediaOfferItem[] {
@@ -1597,17 +1686,49 @@ export class MediaCommerceDecisionService {
     return checkoutUrl;
   }
 
-  private async prepareStoredPaymentOptions(
-    row: StoredInvoiceToken,
+  private async prepareRenderablePaymentRows(
+    rows: StoredInvoiceToken[],
     operationPrefix: string,
-  ): Promise<StoredInvoiceToken> {
-    return normalizePaymentSource(row.payment_source) === "sbp"
-      ? {
-          ...row,
-          checkout_url: buildSbpGatewayCheckoutUrl(row.token),
-          external_payment_id: null,
+  ): Promise<StoredInvoiceToken[]> {
+    const renderableRows = rows.filter(isRenderableStoredInvoiceRow);
+    const groupsWithUsableSbp = new Set(
+      renderableRows
+        .filter((row) => normalizePaymentSource(row.payment_source) === "sbp")
+        .map((row) => buildPurchaseGroupKey(row))
+        .filter((value): value is string => value != null),
+    );
+    const preparedRows: StoredInvoiceToken[] = [];
+
+    for (const row of renderableRows) {
+      const paymentSource = normalizePaymentSource(row.payment_source);
+      if (paymentSource === "sbp") {
+        preparedRows.push(buildSbpGatewayRow(row));
+        continue;
+      }
+
+      try {
+        preparedRows.push(await this.ensureStarsInvoiceLink(row, operationPrefix));
+      } catch (error) {
+        const purchaseGroup = buildPurchaseGroupKey(row);
+        if (
+          isTransientStarsInvoiceError(error)
+          && purchaseGroup != null
+          && groupsWithUsableSbp.has(purchaseGroup)
+        ) {
+          const starsError = getTelegramStarsInvoiceError(error);
+          console.warn("[media_commerce] transient_stars_invoice_unavailable", {
+            token: row.token,
+            chat_id: row.chat_id,
+            sku: normalizeString(row.sku),
+            status_code: starsError?.statusCode ?? null,
+          });
+          continue;
         }
-      : this.ensureStarsInvoiceLink(row, operationPrefix);
+        throw error;
+      }
+    }
+
+    return preparedRows;
   }
 
   async evaluate(
@@ -1715,8 +1836,9 @@ export class MediaCommerceDecisionService {
       }),
       "sceneUnlock.click",
     );
-    const readyRows = await Promise.all(
-      rows.map((row) => this.prepareStoredPaymentOptions(row, "sceneUnlock.click")),
+    const readyRows = await this.prepareRenderablePaymentRows(
+      rows,
+      "sceneUnlock.click",
     );
 
     return buildOfferItem(readyRows)?.payment_options ?? [];
@@ -2101,9 +2223,9 @@ export class MediaCommerceDecisionService {
       }),
       "featureOffer",
     );
-    const featureInvoices = await Promise.all(
-      storedFeatureInvoices.map((row) =>
-        this.prepareStoredPaymentOptions(row, "featureOffer")),
+    const featureInvoices = await this.prepareRenderablePaymentRows(
+      storedFeatureInvoices,
+      "featureOffer",
     );
     const featureInvoice = selectLegacyPrimaryRow(featureInvoices);
     const featurePaymentOptions = featureInvoices
@@ -2120,8 +2242,7 @@ export class MediaCommerceDecisionService {
               scene_turn_no: normalizeNonNegativeInteger(input.scene_turn_no),
               target_message_id: normalizePositiveInteger(input.target_message_id),
               feature_key: featureKey,
-              action_button_text: actionPlan.button_text,
-              payment_options: featurePaymentOptions,
+              invoice_tokens: storedFeatureInvoices.map((row) => row.token),
               idempotency_key: [
                 "feature-ui",
                 chatId,
@@ -2357,10 +2478,10 @@ export class MediaCommerceDecisionService {
     return this.applyMediaActionDecision(callbackBase, context);
   }
 
-  private evaluateRevealFeaturePaymentOptionsCallback(
+  private async evaluateRevealFeaturePaymentOptionsCallback(
     base: MediaCommerceDecisionResponse,
     payload: Record<string, unknown>,
-  ): MediaCommerceDecisionResponse {
+  ): Promise<MediaCommerceDecisionResponse> {
     if (base.callback_valid !== true) {
       return {
         ...base,
@@ -2372,18 +2493,102 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    const paymentOptions = Array.isArray(payload.payment_options)
-      ? payload.payment_options.filter(
-        (option): option is MediaPaymentOption =>
-          option != null
-          && typeof option === "object"
-          && !Array.isArray(option)
-          && typeof (option as { checkout_url?: unknown }).checkout_url === "string",
-      )
-      : [];
+    const invoiceTokens =
+      normalizeInvoiceTokens(payload.invoice_tokens).length > 0
+        ? normalizeInvoiceTokens(payload.invoice_tokens)
+        : extractLegacyPaymentOptionTokens(payload.payment_options);
     const featureKey = normalizeString(
       typeof payload.feature_key === "string" ? payload.feature_key : null,
     );
+    if (!base.chat_id || invoiceTokens.length === 0 || !featureKey) {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: false,
+        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_show_alert: false,
+        reason: "callback_invalid",
+      };
+    }
+
+    const rows = await this.repository.loadStoredInvoiceTokens(invoiceTokens);
+    const byToken = new Map(rows.map((row) => [row.token, row]));
+    const orderedRows = invoiceTokens.flatMap((token) => {
+      const row = byToken.get(token);
+      return row ? [row] : [];
+    });
+    const groups = new Set<string>();
+    let sceneSessionId: string | null = null;
+    for (const row of orderedRows) {
+      const purchaseGroup = buildPurchaseGroupKey(row);
+      const actionKind = normalizeString(row.action_kind);
+      const isPhotoUnlockRow =
+        featureKey === "photo_unlock" && actionKind === "photo_payment";
+      if (
+        row.chat_id !== base.chat_id
+        || (!isPhotoUnlockRow && actionKind !== "feature_payment")
+        || (!isPhotoUnlockRow && getInvoiceFeatureKey(row) !== featureKey)
+        || !purchaseGroup
+      ) {
+        return {
+          ...base,
+          operation: "noop",
+          callback_valid: false,
+          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_show_alert: false,
+          reason: "callback_invalid",
+        };
+      }
+      groups.add(purchaseGroup);
+      sceneSessionId = sceneSessionId ?? normalizeString(row.scene_session_id);
+    }
+    if (orderedRows.length !== invoiceTokens.length || groups.size !== 1) {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: false,
+        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_show_alert: false,
+        reason: "callback_invalid",
+      };
+    }
+    if (sceneSessionId) {
+      const sceneStatus = await this.repository.loadSceneAccessStatus({
+        chat_id: base.chat_id,
+        scene_session_id: sceneSessionId,
+      });
+      if (
+        sceneStatus?.scene_is_active !== true
+        || normalizeString(sceneStatus.active_scene_session_id) !== sceneSessionId
+      ) {
+        return {
+          ...base,
+          operation: "noop",
+          callback_valid: false,
+          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_show_alert: false,
+          reason: "callback_invalid",
+        };
+      }
+    }
+
+    const readyRows = await this.prepareRenderablePaymentRows(
+      orderedRows,
+      "featurePayment.rebuild",
+    );
+    if (readyRows.length === 0) {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: false,
+        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_show_alert: false,
+        reason: "callback_invalid",
+      };
+    }
+    const paymentOptions = readyRows
+      .map((row) => buildPaymentOption(row))
+      .sort((left, right) => getSourceSortOrder(left.source) - getSourceSortOrder(right.source));
 
     return {
       ...base,
@@ -2393,20 +2598,16 @@ export class MediaCommerceDecisionService {
       payment_options: paymentOptions,
       feature_key: featureKey,
       feature_payment_hint_text:
-        normalizeString(
-          typeof payload.feature_payment_hint_text === "string"
-            ? payload.feature_payment_hint_text
-            : null,
-        ) ?? getFeaturePaymentHint(featureKey),
+        getFeaturePaymentHint(featureKey),
       payment_ui: buildPaymentUiCopy(),
       reason: "feature_payment_options_revealed",
     };
   }
 
-  private evaluateSubscriptionPaymentSourceToggleCallback(
+  private async evaluateSubscriptionPaymentSourceToggleCallback(
     base: MediaCommerceDecisionResponse,
     payload: Record<string, unknown>,
-  ): MediaCommerceDecisionResponse {
+  ): Promise<MediaCommerceDecisionResponse> {
     if (base.callback_valid !== true) {
       return {
         ...base,
@@ -2423,43 +2624,105 @@ export class MediaCommerceDecisionService {
         ? payload.selected_payment_source
         : null,
     );
-    const offerItems = Array.isArray(payload.subscription_offer_items)
-      ? payload.subscription_offer_items.filter(
-        (item): item is MediaOfferItem =>
-          item != null
-          && typeof item === "object"
-          && !Array.isArray(item)
-          && Array.isArray((item as { payment_options?: unknown }).payment_options),
-      )
-      : [];
-    const tokenRows = Array.isArray(payload.token_rows)
-      ? payload.token_rows.filter(
-        (row): row is InteractionTokenRow =>
-          row != null
-          && typeof row === "object"
-          && !Array.isArray(row)
-          && typeof (row as { token?: unknown }).token === "string",
-      )
-      : [];
+    const callbackOfferId = normalizeString(
+      typeof payload.offer_id === "string" ? payload.offer_id : null,
+    );
+    const invoiceTokens =
+      normalizeInvoiceTokens(payload.invoice_tokens).length > 0
+        ? normalizeInvoiceTokens(payload.invoice_tokens)
+        : extractLegacySubscriptionInvoiceTokens(payload.subscription_offer_items);
+    if (!base.chat_id || invoiceTokens.length === 0 || !selectedPaymentSource) {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: false,
+        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_show_alert: false,
+        reason: "callback_invalid",
+      };
+    }
+    const rows = await this.repository.loadStoredInvoiceTokens(invoiceTokens);
+    const byToken = new Map(rows.map((row) => [row.token, row]));
+    const orderedRows = invoiceTokens.flatMap((token) => {
+      const row = byToken.get(token);
+      return row ? [row] : [];
+    });
+    const offerIds = new Set<string>();
+    for (const row of orderedRows) {
+      const offerId = getInvoicePurchaseId(row);
+      if (
+        row.chat_id !== base.chat_id
+        || normalizeString(row.action_kind) !== "subscription_payment"
+        || !offerId
+        || !normalizeString(row.sku)
+      ) {
+        return {
+          ...base,
+          operation: "noop",
+          callback_valid: false,
+          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_show_alert: false,
+          reason: "callback_invalid",
+        };
+      }
+      offerIds.add(offerId);
+    }
+    const [offerId] = Array.from(offerIds);
+    const activeOfferId = await this.repository.loadActiveSubscriptionOfferId(base.chat_id);
+    if (
+      orderedRows.length !== invoiceTokens.length
+      || offerIds.size !== 1
+      || (callbackOfferId != null && callbackOfferId !== offerId)
+      || activeOfferId !== offerId
+    ) {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: false,
+        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_show_alert: false,
+        reason: "callback_invalid",
+      };
+    }
+
+    const readyRows = await this.prepareRenderablePaymentRows(
+      orderedRows,
+      "subscription.rebuild",
+    );
+    const offerItems = groupOfferItems(readyRows);
+    if (offerItems.length === 0) {
+      return {
+        ...base,
+        operation: "noop",
+        callback_valid: false,
+        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_show_alert: false,
+        reason: "callback_invalid",
+      };
+    }
+    const hasRequestedSource = offerItems.some((item) =>
+      item.payment_options.some((option) => option.source === selectedPaymentSource));
+    const hasSbpOption = offerItems.some((item) =>
+      item.payment_options.some((option) => option.source === "sbp"));
+    const effectivePaymentSource: PaymentSource = hasRequestedSource
+      ? selectedPaymentSource
+      : hasSbpOption
+        ? "sbp"
+        : "stars";
 
     return {
       ...base,
       operation: "subscription_offer_ready",
       callback_valid: true,
       callback_answer_text: "",
-      selected_payment_source: selectedPaymentSource,
+      selected_payment_source: effectivePaymentSource,
       subscription_offer_items: offerItems,
-      token_rows: tokenRows,
-      token_rows_prepared: tokenRows.length,
-      text: normalizeString(typeof payload.text === "string" ? payload.text : null),
-      free_balance_text: normalizeString(
-        typeof payload.free_balance_text === "string"
-          ? payload.free_balance_text
-          : null,
-      ),
+      token_rows: [],
+      token_rows_prepared: 0,
+      text: base.panel_text,
+      free_balance_text: null,
       offer_message_id:
-        normalizePositiveInteger(payload.offer_message_id)
-        ?? base.target_message_id
+        base.target_message_id
         ?? base.inbound_message_id
         ?? null,
       payment_source_toggle_tokens:
@@ -2651,7 +2914,7 @@ export class MediaCommerceDecisionService {
         },
         {
           ...payload,
-          payment_options: paymentOptions,
+          invoice_tokens: paymentOptions.map((option) => option.token),
         },
       );
     }
@@ -2845,7 +3108,7 @@ export class MediaCommerceDecisionService {
         {
           ...payload,
           feature_key: "photo_unlock",
-          payment_options: paymentOptions,
+          invoice_tokens: paymentOptions.map((option) => option.token),
         },
       );
     }
@@ -4216,9 +4479,9 @@ export class MediaCommerceDecisionService {
       "subscription",
     );
     const tokenList = upsertedRows.map((row) => row.token);
-    const rows = await Promise.all(
-      upsertedRows.map((row) =>
-        this.prepareStoredPaymentOptions(row, "subscription")),
+    const rows = await this.prepareRenderablePaymentRows(
+      upsertedRows,
+      "subscription",
     );
 
     const sortedRows = rows
@@ -4269,14 +4532,10 @@ export class MediaCommerceDecisionService {
               turn_no: null,
               scene_turn_no: null,
               target_message_id: offerMessageId,
-              subscription_offer_items: subscriptionOfferItems,
-              token_rows: sceneUnlockEntryTokenRows,
-              text: offerText,
-              free_balance_text: freeBalanceText,
-              offer_message_id: offerMessageId,
+              invoice_tokens: tokenList,
+              offer_id: offerId,
               selected_payment_source: source,
               idempotency_key: `subscription-source-ui:${effectiveIdempotencyKey}`,
-              ab_test: abContext,
             }))
         : [];
     const paymentSourceToggleTokens = buildPaymentSourceToggleTokenMap(
