@@ -9,7 +9,6 @@ import type { UpsertInvoiceTokenInput } from "../mediaCommerceRepository/shared.
 import {
   buildRandomToken,
   buildTelegramInvoicePayload,
-  INVOICE_TTL_MS,
   normalizeLowerString,
   normalizeNonNegativeInteger,
   normalizePositiveInteger,
@@ -196,7 +195,7 @@ export function buildPhotoInvoiceInput(input: {
     telegram_invoice_payload: buildTelegramInvoicePayload(token),
     checkout_url: null,
     external_payment_id: null,
-    expires_at: new Date(Date.now() + INVOICE_TTL_MS).toISOString(),
+    expires_at: null,
     invoice_title: input.invoice_title,
     invoice_description: input.invoice_description,
     invoice_label: input.invoice_label,

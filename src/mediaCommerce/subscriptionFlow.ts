@@ -81,7 +81,7 @@ function buildPaymentInputRow(input: {
   scene_turn_no: number | null;
   payload_json: InvoiceTokenPayload;
   action_kind: string;
-  expires_at: string;
+  expires_at: string | null;
   plan: CommercePlan;
 }): UpsertInvoiceTokenInput {
   const isStars = input.source === "stars";
@@ -133,7 +133,7 @@ function buildPaymentInputs(input: {
   action_kind: string;
   plan: CommercePlan;
 }): UpsertInvoiceTokenInput[] {
-  const expiresAt = new Date(Date.now() + INVOICE_TTL_MS).toISOString();
+  const sbpExpiresAt = new Date(Date.now() + INVOICE_TTL_MS).toISOString();
   const sources: PaymentSource[] = ["stars"];
 
   if (config.SBP_ENABLED && input.plan.amount_rub != null) {
@@ -150,7 +150,7 @@ function buildPaymentInputs(input: {
       scene_turn_no: input.scene_turn_no,
       payload_json: input.payload_json,
       action_kind: input.action_kind,
-      expires_at: expiresAt,
+      expires_at: source === "sbp" ? sbpExpiresAt : null,
       plan: input.plan,
     }));
 }
@@ -244,6 +244,7 @@ export function buildFeaturePaymentInputs(input: {
     target_message_id: input.target_message_id ?? null,
     current_uuid: input.current_uuid ?? null,
     base_price_xtr: input.base_price_xtr ?? 0,
+    idempotency_key: input.idempotency_key,
     requested_action: input.requested_action,
     original_amount_xtr: input.plan.original_amount_xtr ?? input.plan.amount_xtr,
     original_amount_rub: input.plan.original_amount_rub ?? input.plan.amount_rub ?? null,

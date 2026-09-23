@@ -348,6 +348,7 @@ export interface StoredInvoiceToken {
   invoice_button_text: string;
   status?: string | null;
   action_kind?: string | null;
+  failure_reason?: string | null;
 }
 
 export interface LoadedInvoiceToken {
@@ -360,6 +361,7 @@ export interface LoadedInvoiceToken {
   payload_json: Record<string, unknown> | null;
   status: string | null;
   action_kind: string | null;
+  failure_reason?: string | null;
   sku: string | null;
   payment_source?: PaymentSource | null;
   amount?: number | null;

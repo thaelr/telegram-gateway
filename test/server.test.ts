@@ -220,7 +220,12 @@ test("public SBP payment endpoint redirects without internal API auth", async (t
         scene_session_id: null,
         turn_no: null,
         scene_turn_no: null,
-        payload_json: { action_kind: "subscription_payment" },
+        payload_json: {
+          action_kind: "subscription_payment",
+          idempotency_key: "server-offer",
+          subscription_days: 7,
+          subscription_sku: "plan",
+        },
         sku: "plan",
         payment_source: "sbp",
         amount: 199,
@@ -278,7 +283,12 @@ test("public SBP payment endpoint redirects without internal API auth", async (t
         chat_id: 101,
         scene_session_id: null,
         turn_no: null,
-        payload_json: { action_kind: "subscription_payment" },
+        payload_json: {
+          action_kind: "subscription_payment",
+          idempotency_key: "server-offer",
+          subscription_days: 7,
+          subscription_sku: "plan",
+        },
         status: "invoice_sent",
         action_kind: "subscription_payment",
         sku: "plan",
@@ -292,6 +302,9 @@ test("public SBP payment endpoint redirects without internal API auth", async (t
         telegram_invoice_message_id: null,
       };
     },
+    async loadActiveSubscriptionOfferId() {
+      return "server-offer";
+    },
   };
   const sbpCheckoutService = new MediaCommerceDecisionService(
     repository as never,
@@ -302,6 +315,7 @@ test("public SBP payment endpoint redirects without internal API auth", async (t
         return {
           external_payment_id: "platega-1",
           checkout_url: "https://platega.example/checkout/existing",
+          provider_expires_at: null,
         };
       },
     },
@@ -336,8 +350,14 @@ test("public SBP payment endpoint maps expected checkout states without 500", as
     { code: "sbp_invoice_kind_invalid", status: 410, error: "payment_unavailable" },
     { code: "sbp_invoice_action_invalid", status: 410, error: "payment_unavailable" },
     { code: "sbp_payment_source_invalid", status: 410, error: "payment_unavailable" },
+    { code: "sbp_provider_status_pending", status: 410, error: "payment_unavailable" },
+    { code: "sbp_provider_status_confirmed", status: 410, error: "payment_unavailable" },
+    { code: "sbp_provider_status_chargebacked", status: 410, error: "payment_unavailable" },
+    { code: "sbp_successor_context_stale", status: 410, error: "payment_unavailable" },
+    { code: "sbp_retry_chain_corrupt", status: 410, error: "payment_unavailable" },
     { code: "sbp_checkout_creation_in_progress", status: 409, error: "payment_creation_in_progress" },
     { code: "sbp_checkout_creation_uncertain", status: 503, error: "payment_reconciliation_required" },
+    { code: "sbp_provider_status_ambiguous", status: 503, error: "payment_reconciliation_required" },
   ] as const;
 
   for (const entry of cases) {

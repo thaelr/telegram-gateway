@@ -233,6 +233,7 @@ type MockRepository = {
     chatId: number,
   ) => Promise<number>;
   markSbpInvoiceCanceled: (externalPaymentId: string) => Promise<number>;
+  markSbpInvoiceExpired: (token: string, chatId: number) => Promise<number>;
   recordSbpStatusConflict: (
     externalPaymentId: string,
     providerStatus: string,
@@ -240,6 +241,7 @@ type MockRepository = {
   loadStoredInvoiceTokens: (
     tokens: string[],
   ) => Promise<StoredInvoiceToken[]>;
+  loadActiveSubscriptionOfferId: (chatId: number) => Promise<string | null>;
   loadAbTestAssignment: (
     chatId: number,
     assignmentKey: string,
@@ -270,7 +272,12 @@ type MockStarsClient = {
 type MockSbpClient = {
   createPayment: (
     input: unknown,
-  ) => Promise<{ external_payment_id: string; checkout_url: string }>;
+  ) => Promise<{
+    external_payment_id: string;
+    checkout_url: string;
+    provider_expires_at: string | null;
+  }>;
+  getTransactionStatus?: (externalPaymentId: string) => Promise<"CANCELED" | "PENDING" | "CONFIRMED" | "CHARGEBACKED" | null>;
 };
 
 function buildOfferStats(
@@ -562,6 +569,19 @@ function buildRequest(
   };
 }
 
+function buildSbpSubscriptionPayload(
+  offerId = "telegram:offer-1",
+  sku = "payment_plan_2",
+  days = 7,
+): Record<string, unknown> {
+  return {
+    action_kind: "subscription_payment",
+    idempotency_key: offerId,
+    subscription_days: days,
+    subscription_sku: sku,
+  };
+}
+
 test("toPaidInvoiceToken preserves valid paid persisted payload", () => {
   const paid = toPaidInvoiceToken(buildLoadedInvoiceToken({
     status: "paid",
@@ -651,6 +671,7 @@ test("subscription payment inputs do not fabricate SBP amount", () => {
 
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.payment_source, "stars");
+    assert.equal(rows[0]?.expires_at, null);
   } finally {
     config.SBP_ENABLED = previousEnabled;
   }
@@ -675,6 +696,7 @@ function createRepository(
     releaseSbpCheckoutCreation: 0,
     markSbpCheckoutCreationUncertain: 0,
     markSbpInvoiceCanceled: 0,
+    markSbpInvoiceExpired: 0,
     recordSbpStatusConflict: 0,
     loadCallbackTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
     loadInvoiceTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
@@ -1029,6 +1051,10 @@ function createRepository(
       calls.markSbpInvoiceCanceled += 1;
       return 1;
     },
+    async markSbpInvoiceExpired() {
+      calls.markSbpInvoiceExpired += 1;
+      return 1;
+    },
     async recordSbpStatusConflict() {
       calls.recordSbpStatusConflict += 1;
       return 1;
@@ -1064,6 +1090,9 @@ function createRepository(
           scene_turn_no: null,
         }),
       );
+    },
+    async loadActiveSubscriptionOfferId() {
+      return "telegram:offer-1";
     },
     async loadAbTestAssignment() {
       calls.loadAbTestAssignment += 1;
@@ -1104,6 +1133,7 @@ function createRepository(
       return {
         external_payment_id: `sbp-payment-${calls.createSbpPayment}`,
         checkout_url: `https://sbp.example/checkout/${calls.createSbpPayment}`,
+        provider_expires_at: null,
       };
     },
     ...sbpOverrides,
@@ -1816,6 +1846,7 @@ test("concurrent feature offer renders do not create SBP transactions", async ()
           return {
             external_payment_id: "sbp-payment-slow-shared",
             checkout_url: "https://sbp.example/checkout/slow-shared",
+            provider_expires_at: null,
           };
         },
       },
@@ -1941,6 +1972,7 @@ test("feature_offer reveal preparation leaves SBP transaction creation to GET", 
           return {
             external_payment_id: "sbp-payment-shared",
             checkout_url: "https://sbp.example/checkout/shared",
+            provider_expires_at: null,
           };
         },
       },
@@ -2056,6 +2088,7 @@ test("feature_offer render never reaches an ambiguous SBP provider failure", asy
           return {
             external_payment_id: "sbp-payment-recovered",
             checkout_url: "https://sbp.example/checkout/recovered",
+            provider_expires_at: null,
           };
         },
       },
@@ -3384,6 +3417,45 @@ test("pre_checkout rejects subscription invoice without valid subscription_days"
   assert.equal(result.reason, "invoice_action_kind_invalid");
 });
 
+test("pre_checkout rejects subscription invoice when offer is no longer active", async () => {
+  const { service } = createRepository({
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        amount_xtr: 200,
+        scene_session_id: null,
+        payload_json: {
+          action_kind: "subscription_payment",
+          idempotency_key: "old-offer",
+          subscription_days: 14,
+          subscription_sku: "payment_plan_2",
+          chat_id: 101,
+        },
+      });
+    },
+    async loadActiveSubscriptionOfferId() {
+      return "new-offer";
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "payment.pre_checkout.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      pre_checkout_query_id: "pcq-subscription-stale-offer",
+      payment_currency: "XTR",
+      payment_total_amount: 200,
+    }),
+  );
+
+  assert.equal(result.operation, "answer_precheckout");
+  assert.equal(result.precheckout_ok, false);
+  assert.equal(result.reason, "subscription_offer_not_active");
+});
+
 test("pre_checkout rejects mismatched row and payload action_kind", async () => {
   const { service } = createRepository({
     async loadInvoiceToken() {
@@ -3964,6 +4036,53 @@ test("payment_success rejects ownership mismatch", async () => {
 
   assert.equal(result.operation, "noop");
   assert.equal(result.reason, "invoice_not_found");
+  assert.equal(calls.markInvoicePaid, 0);
+});
+
+test("payment_success treats sibling-paid Stars invoice as status conflict", async () => {
+  const { service, calls } = createRepository({
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        status: "canceled",
+        failure_reason: "sibling_paid",
+        payment_source: "stars",
+        action_kind: "photo_payment",
+        payload_json: {
+          action_kind: "photo_payment",
+          chat_id: 101,
+          scene_session_id: "scene-1",
+          turn_no: 5,
+          scene_turn_no: 3,
+          media_signature: "hotel_corridor_close",
+          target_message_id: 555,
+          current_uuid: "u1",
+          base_price_xtr: 10,
+          photo_sku: "payment_media_1",
+          requested_action: "photo_request",
+        },
+      });
+    },
+  });
+
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.success.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      telegram_payment_charge_id: "charge-sibling-paid",
+      provider_payment_charge_id: "provider-sibling-paid",
+      payment_currency: "XTR",
+      payment_total_amount: 10,
+    }));
+
+    assert.equal(result.operation, "noop");
+    assert.equal(result.reason, "payment_status_conflict");
+  } finally {
+    console.error = originalConsoleError;
+  }
   assert.equal(calls.markInvoicePaid, 0);
 });
 
@@ -5229,7 +5348,10 @@ test("SBP redirect creates one checkout and reuses it for the same subscription 
   let storedCheckout: {
     checkout_url: string;
     external_payment_id: string;
+    expires_at: string | null;
   } | null = null;
+  const providerExpiresAt = "2030-01-01T00:00:00.000Z";
+  let persistedExpiresAt: string | null | undefined;
   let claimHeld = false;
   const token = "telegram:subscription:payment_plan_7:sbp";
   const sbpRow = () => buildStoredInvoiceToken({
@@ -5243,12 +5365,8 @@ test("SBP redirect creates one checkout and reuses it for the same subscription 
     external_payment_id: storedCheckout?.external_payment_id ?? null,
     amount_xtr: null,
     telegram_invoice_payload: null,
-    expires_at: new Date(Date.now() + 60_000) as unknown as string,
-    payload_json: {
-      action_kind: "subscription_payment",
-      subscription_days: 7,
-      subscription_sku: "payment_plan_7",
-    },
+    expires_at: storedCheckout?.expires_at ?? new Date(Date.now() + 60_000).toISOString(),
+    payload_json: buildSbpSubscriptionPayload("telegram:offer-1", "payment_plan_7"),
   });
 
   const { service, calls } = createRepository({
@@ -5270,12 +5388,15 @@ test("SBP redirect creates one checkout and reuses it for the same subscription 
       const [item] = Array.isArray(items) ? items as Array<{
         checkout_url?: string | null;
         external_payment_id?: string | null;
+        expires_at?: string | null;
       }> : [];
       if (item?.checkout_url && item.external_payment_id) {
         storedCheckout = {
           checkout_url: item.checkout_url,
           external_payment_id: item.external_payment_id,
+          expires_at: item.expires_at ?? null,
         };
+        persistedExpiresAt = item.expires_at ?? null;
       }
       return item ? 1 : 0;
     },
@@ -5289,7 +5410,18 @@ test("SBP redirect creates one checkout and reuses it for the same subscription 
         currency: "RUB",
         checkout_url: storedCheckout?.checkout_url ?? null,
         external_payment_id: storedCheckout?.external_payment_id ?? null,
+        expires_at: storedCheckout?.expires_at ?? null,
       });
+    },
+  }, {}, {
+    async createPayment(input) {
+      calls.createSbpPayment += 1;
+      calls.createSbpPaymentInputs.push(input);
+      return {
+        external_payment_id: `sbp-payment-${calls.createSbpPayment}`,
+        checkout_url: `https://sbp.example/checkout/${calls.createSbpPayment}`,
+        provider_expires_at: providerExpiresAt,
+      };
     },
   });
 
@@ -5303,6 +5435,7 @@ test("SBP redirect creates one checkout and reuses it for the same subscription 
   assert.equal(secondUrl, firstUrl);
   assert.equal(repeatedUrl, firstUrl);
   assert.equal(calls.createSbpPayment, 1);
+  assert.equal(persistedExpiresAt, providerExpiresAt);
 });
 
 test("subscription payment source toggle callback reuses stored offer data", async () => {
@@ -6222,6 +6355,7 @@ test("SBP checkout fails when invoice becomes ineligible during atomic claim", a
         amount_xtr: null,
         telegram_invoice_payload: null,
         action_kind: "subscription_payment",
+        payload_json: buildSbpSubscriptionPayload(),
       })];
     },
     async claimSbpCheckoutCreation() {
@@ -6241,6 +6375,43 @@ test("SBP checkout fails when invoice becomes ineligible during atomic claim", a
   assert.equal(calls.createSbpPayment, 0);
 });
 
+test("SBP checkout does not return a claimed checkout when claim reports ineligible", async () => {
+  const token = "claim-ineligible-with-checkout";
+  const { service, calls } = createRepository({
+    async loadStoredInvoiceTokens() {
+      return [buildStoredInvoiceToken({
+        token,
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        amount_xtr: null,
+        telegram_invoice_payload: null,
+        action_kind: "subscription_payment",
+        payload_json: buildSbpSubscriptionPayload(),
+      })];
+    },
+    async claimSbpCheckoutCreation() {
+      return {
+        token,
+        chat_id: 101,
+        checkout_url: "https://sbp.example/stale-checkout",
+        external_payment_id: "stale-payment",
+        claim_acquired: false,
+        creation_state: "created",
+        eligible: false,
+      };
+    },
+  });
+
+  await assert.rejects(
+    () => service.resolveSbpCheckout(token),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "sbp_invoice_status_invalid",
+  );
+  assert.equal(calls.createSbpPayment, 0);
+});
+
 test("ambiguous SBP provider outcome is durable and never retried automatically", async () => {
   const token = "ambiguous-provider-sbp-token";
   const { service, calls } = createRepository({
@@ -6253,6 +6424,7 @@ test("ambiguous SBP provider outcome is durable and never retried automatically"
         amount_xtr: null,
         telegram_invoice_payload: null,
         action_kind: "subscription_payment",
+        payload_json: buildSbpSubscriptionPayload(),
       })];
     },
   }, {}, {
@@ -6297,6 +6469,7 @@ test("ambiguous SBP outcome fails with a typed internal error when uncertain sta
         amount_xtr: null,
         telegram_invoice_payload: null,
         action_kind: "subscription_payment",
+        payload_json: buildSbpSubscriptionPayload(),
       })];
     },
     async markSbpCheckoutCreationUncertain() {
@@ -6326,6 +6499,67 @@ test("ambiguous SBP outcome fails with a typed internal error when uncertain sta
   assert.equal(calls.releaseSbpCheckoutCreation, 0);
 });
 
+test("uncertain SBP recovery does not return a checkout from non-payable reloaded row", async () => {
+  const token = "uncertain-recovery-canceled";
+  let persistedAttempt = false;
+  const { service, calls } = createRepository({
+    async loadStoredInvoiceTokens() {
+      return [buildStoredInvoiceToken({
+        token,
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        amount_xtr: null,
+        telegram_invoice_payload: null,
+        action_kind: "subscription_payment",
+        payload_json: buildSbpSubscriptionPayload(),
+      })];
+    },
+    async storeInvoiceLinks() {
+      calls.storeInvoiceLinks += 1;
+      persistedAttempt = true;
+      throw new Error("write outcome unknown");
+    },
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        token,
+        requested_token: token,
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        checkout_url: persistedAttempt ? "https://sbp.example/checkout/1" : null,
+        external_payment_id: persistedAttempt ? "sbp-payment-1" : null,
+        status: persistedAttempt ? "canceled" : "invoice_sent",
+        action_kind: "subscription_payment",
+        payload_json: buildSbpSubscriptionPayload(),
+      });
+    },
+  }, {}, {
+    async createPayment() {
+      calls.createSbpPayment += 1;
+      return {
+        external_payment_id: "sbp-payment-1",
+        checkout_url: "https://sbp.example/checkout/1",
+        provider_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      };
+    },
+  });
+
+  await assert.rejects(
+    () => service.resolveSbpCheckout(token),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "sbp_checkout_creation_uncertain",
+  );
+  await assert.rejects(
+    () => service.resolveSbpCheckout(token),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "sbp_checkout_creation_uncertain",
+  );
+  assert.equal(calls.createSbpPayment, 1);
+});
+
 test("definite SBP failure releases the creation claim", async () => {
   const token = "definite-provider-failure";
   const { service, calls } = createRepository({
@@ -6338,6 +6572,7 @@ test("definite SBP failure releases the creation claim", async () => {
         amount_xtr: null,
         telegram_invoice_payload: null,
         action_kind: "subscription_payment",
+        payload_json: buildSbpSubscriptionPayload(),
       })];
     },
   }, {}, {
@@ -6371,7 +6606,7 @@ for (const failure of ["zero rows", "db exception"] as const) {
           amount_xtr: null,
           telegram_invoice_payload: null,
           action_kind: "subscription_payment",
-          payload_json: { action_kind: "subscription_payment" },
+          payload_json: buildSbpSubscriptionPayload(),
         })];
       },
       async loadInvoiceToken() {
@@ -6384,6 +6619,7 @@ for (const failure of ["zero rows", "db exception"] as const) {
           checkout_url: null,
           external_payment_id: null,
           action_kind: "subscription_payment",
+          payload_json: buildSbpSubscriptionPayload(),
         });
       },
       async storeInvoiceLinks() {
@@ -6453,7 +6689,539 @@ test("CANCELED webhook stores terminal state and canceled checkout cannot be reo
   assert.equal(calls.createSbpPayment, 0);
 });
 
-test("canceled subscription attempt rolls over to a new token and Platega transaction", async () => {
+test("SBP successor is created only for provider retryable cancellations and local expiry", async () => {
+  const expiredAt = new Date(Date.now() - 60_000).toISOString();
+  const cases = [
+    {
+      name: "sbp_canceled",
+      overrides: { status: "canceled", failure_reason: "sbp_canceled" },
+      expectRetry: true,
+      expectExpiredMark: false,
+    },
+    {
+      name: "sbp_expired",
+      overrides: {
+        status: "invoice_sent",
+        expires_at: expiredAt,
+        external_payment_id: null,
+        checkout_url: null,
+      },
+      expectRetry: true,
+      expectExpiredMark: true,
+    },
+    {
+      name: "sibling_paid",
+      overrides: { status: "canceled", failure_reason: "sibling_paid" },
+      expectRetry: false,
+      expectExpiredMark: false,
+    },
+    {
+      name: "business_cancel",
+      overrides: { status: "canceled", failure_reason: "scene_access_activated" },
+      expectRetry: false,
+      expectExpiredMark: false,
+    },
+    {
+      name: "paid",
+      overrides: { status: "paid" },
+      expectRetry: false,
+      expectExpiredMark: false,
+    },
+    {
+      name: "fulfilled",
+      overrides: { status: "fulfilled" },
+      expectRetry: false,
+      expectExpiredMark: false,
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    const originalToken = `sbp-${entry.name}`;
+    const stored = new Map<string, StoredInvoiceToken>([[
+      originalToken,
+      buildStoredInvoiceToken({
+        token: originalToken,
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        amount_xtr: null,
+        telegram_invoice_payload: null,
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        scene_session_id: null,
+        turn_no: null,
+        scene_turn_no: null,
+        payload_json: {
+          action_kind: "subscription_payment",
+          idempotency_key: "offer-retry",
+          subscription_days: 7,
+          subscription_sku: "payment_plan_2",
+        },
+        ...entry.overrides,
+      }),
+    ]]);
+    let upsertCount = 0;
+    const { service, calls } = createRepository({
+      async loadStoredInvoiceTokens(tokens) {
+        return tokens.flatMap((token) => {
+          const row = stored.get(token);
+          return row ? [row] : [];
+        });
+      },
+      async markSbpInvoiceExpired(token) {
+        calls.markSbpInvoiceExpired += 1;
+        const row = stored.get(token);
+        if (!row) return 0;
+        stored.set(token, buildStoredInvoiceToken({
+          ...row,
+          status: "canceled",
+          failure_reason: "sbp_expired",
+        }));
+        return 1;
+      },
+      async upsertInvoiceTokens(inputs) {
+        upsertCount += 1;
+        return (inputs as Array<{
+          token: string;
+          payload_json: Record<string, unknown>;
+          action_kind: string;
+          sku: string;
+          payment_source: "stars" | "sbp";
+          amount: number | null;
+          currency: "XTR" | "RUB";
+          amount_xtr: number | null;
+          telegram_invoice_payload: string | null;
+          expires_at: string | null;
+          invoice_title: string;
+          invoice_description: string;
+          invoice_label: string;
+          invoice_button_text: string;
+        }>).map((input) => {
+          const row = buildStoredInvoiceToken({
+            ...input,
+            scene_session_id: null,
+            turn_no: null,
+            scene_turn_no: null,
+            checkout_url: null,
+            external_payment_id: null,
+            invoice_link: null,
+            status: "invoice_sent",
+          });
+          stored.set(row.token, row);
+          return row;
+        });
+      },
+      async claimSbpCheckoutCreation(token, chatId) {
+        const row = token ? stored.get(token) : null;
+        return {
+          token,
+          chat_id: chatId,
+          checkout_url: row?.checkout_url ?? null,
+          external_payment_id: row?.external_payment_id ?? null,
+          claim_acquired: Boolean(row && !row.checkout_url),
+        };
+      },
+      async storeInvoiceLinks(items) {
+        for (const item of items as Array<{
+          token: string;
+          checkout_url?: string | null;
+          external_payment_id?: string | null;
+          expires_at?: string | null;
+        }>) {
+          const row = stored.get(item.token);
+          if (!row) continue;
+          stored.set(item.token, buildStoredInvoiceToken({
+            ...row,
+            checkout_url: item.checkout_url ?? row.checkout_url,
+            external_payment_id: item.external_payment_id ?? row.external_payment_id,
+            expires_at: item.expires_at ?? row.expires_at,
+          }));
+        }
+        return 1;
+      },
+      async loadInvoiceToken(token) {
+        const row = token ? stored.get(token) : null;
+        return row ? buildLoadedInvoiceToken({ ...row, requested_token: token }) : null;
+      },
+      async loadActiveSubscriptionOfferId() {
+        return "offer-retry";
+      },
+    });
+
+    if (entry.expectRetry) {
+      const checkout = await service.resolveSbpCheckout(originalToken);
+      assert.match(checkout, /https:\/\/sbp\.example\/checkout\//u, entry.name);
+      assert.equal(upsertCount, 1, entry.name);
+      assert.equal(calls.createSbpPayment, 1, entry.name);
+      assert.equal(calls.markSbpInvoiceExpired, entry.expectExpiredMark ? 1 : 0, entry.name);
+    } else {
+      await assert.rejects(() => service.resolveSbpCheckout(originalToken));
+      assert.equal(upsertCount, 0, entry.name);
+      assert.equal(calls.createSbpPayment, 0, entry.name);
+      assert.equal(calls.markSbpInvoiceExpired, 0, entry.name);
+    }
+  }
+});
+
+test("expired SBP checkout with provider transaction reconciles status before successor", async () => {
+  const expiredAt = new Date(Date.now() - 60_000).toISOString();
+  const cases = [
+    { name: "canceled", status: "CANCELED", expectRetry: true },
+    { name: "pending", status: "PENDING", expectRetry: false },
+    { name: "confirmed", status: "CONFIRMED", expectRetry: false },
+    { name: "chargebacked", status: "CHARGEBACKED", expectRetry: false },
+    { name: "unknown", status: null, expectRetry: false },
+    { name: "ambiguous", status: "throw", expectRetry: false },
+  ] as const;
+
+  for (const entry of cases) {
+    const originalToken = `sbp-expired-created-${entry.name}`;
+    const externalPaymentId = `external-${entry.name}`;
+    const stored = new Map<string, StoredInvoiceToken>([[
+      originalToken,
+      buildStoredInvoiceToken({
+        token: originalToken,
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        amount_xtr: null,
+        telegram_invoice_payload: null,
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        scene_session_id: null,
+        turn_no: null,
+        scene_turn_no: null,
+        checkout_url: `https://sbp.example/old/${entry.name}`,
+        external_payment_id: externalPaymentId,
+        expires_at: expiredAt,
+        payload_json: {
+          action_kind: "subscription_payment",
+          idempotency_key: "offer-expired-provider",
+          subscription_days: 7,
+          subscription_sku: "payment_plan_2",
+        },
+      }),
+    ]]);
+    const { service, calls } = createRepository({
+      async loadStoredInvoiceTokens(tokens) {
+        return tokens.flatMap((token) => {
+          const row = stored.get(token);
+          return row ? [row] : [];
+        });
+      },
+      async markSbpInvoiceCanceled(requestedExternalPaymentId) {
+        calls.markSbpInvoiceCanceled += 1;
+        const row = [...stored.values()].find(
+          (candidate) => candidate.external_payment_id === requestedExternalPaymentId,
+        );
+        if (!row) return 0;
+        stored.set(row.token, buildStoredInvoiceToken({
+          ...row,
+          status: "canceled",
+          failure_reason: "sbp_canceled",
+        }));
+        return 1;
+      },
+      async upsertInvoiceTokens(inputs) {
+        return (inputs as Array<{
+          token: string;
+          payload_json: Record<string, unknown>;
+          action_kind: string;
+          sku: string;
+          payment_source: "stars" | "sbp";
+          amount: number | null;
+          currency: "XTR" | "RUB";
+          amount_xtr: number | null;
+          telegram_invoice_payload: string | null;
+          expires_at: string | null;
+          invoice_title: string;
+          invoice_description: string;
+          invoice_label: string;
+          invoice_button_text: string;
+        }>).map((input) => {
+          const row = buildStoredInvoiceToken({
+            ...input,
+            scene_session_id: null,
+            turn_no: null,
+            scene_turn_no: null,
+            checkout_url: null,
+            external_payment_id: null,
+            invoice_link: null,
+            status: "invoice_sent",
+          });
+          stored.set(row.token, row);
+          return row;
+        });
+      },
+      async claimSbpCheckoutCreation(token, chatId) {
+        const row = token ? stored.get(token) : null;
+        return {
+          token,
+          chat_id: chatId,
+          checkout_url: row?.checkout_url ?? null,
+          external_payment_id: row?.external_payment_id ?? null,
+          claim_acquired: Boolean(row && !row.checkout_url),
+        };
+      },
+      async storeInvoiceLinks(items) {
+        for (const item of items as Array<{
+          token: string;
+          checkout_url?: string | null;
+          external_payment_id?: string | null;
+          expires_at?: string | null;
+        }>) {
+          const row = stored.get(item.token);
+          if (!row) continue;
+          stored.set(item.token, buildStoredInvoiceToken({
+            ...row,
+            checkout_url: item.checkout_url ?? row.checkout_url,
+            external_payment_id: item.external_payment_id ?? row.external_payment_id,
+            expires_at: item.expires_at ?? row.expires_at,
+          }));
+        }
+        return 1;
+      },
+      async loadInvoiceToken(token) {
+        const row = token ? stored.get(token) : null;
+        return row ? buildLoadedInvoiceToken({ ...row, requested_token: token }) : null;
+      },
+      async loadActiveSubscriptionOfferId() {
+        return "offer-expired-provider";
+      },
+    }, {}, {
+      async getTransactionStatus() {
+        if (entry.status === "throw") {
+          throw new SbpPaymentError("provider unavailable", "request", null, "ambiguous");
+        }
+        return entry.status;
+      },
+    });
+
+    if (entry.expectRetry) {
+      const checkout = await service.resolveSbpCheckout(originalToken);
+      assert.match(checkout, /https:\/\/sbp\.example\/checkout\//u, entry.name);
+      assert.equal(calls.markSbpInvoiceCanceled, 1, entry.name);
+      assert.equal(calls.createSbpPayment, 1, entry.name);
+    } else {
+      await assert.rejects(() => service.resolveSbpCheckout(originalToken));
+      assert.equal(calls.createSbpPayment, 0, entry.name);
+    }
+  }
+});
+
+test("corrupt SBP successor chain fails closed", async () => {
+  const token = "sbp-corrupt-root";
+  const root = buildStoredInvoiceToken({
+    token,
+    payment_source: "sbp",
+    amount: 199,
+    currency: "RUB",
+    amount_xtr: null,
+    telegram_invoice_payload: null,
+    action_kind: "subscription_payment",
+    sku: "payment_plan_2",
+    scene_session_id: null,
+    turn_no: null,
+    scene_turn_no: null,
+    status: "canceled",
+    failure_reason: "sbp_canceled",
+    payload_json: {
+      action_kind: "subscription_payment",
+      idempotency_key: "offer-corrupt",
+      subscription_days: 7,
+      subscription_sku: "payment_plan_2",
+    },
+  });
+  const { service, calls } = createRepository({
+    async loadStoredInvoiceTokens(tokens) {
+      return tokens.map(() => root);
+    },
+    async loadActiveSubscriptionOfferId() {
+      return "offer-corrupt";
+    },
+  });
+
+  await assert.rejects(
+    () => service.resolveSbpCheckout(token),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "sbp_retry_chain_corrupt",
+  );
+  assert.equal(calls.createSbpPayment, 0);
+});
+
+test("SBP state-change zero rows reload predecessor and follows persisted successor", async () => {
+  const token = "sbp-expire-race-root";
+  let predecessorReloaded = false;
+  const successorRow = (requestedToken: string) => buildStoredInvoiceToken({
+    token: requestedToken,
+    payment_source: "sbp",
+    amount: 199,
+    currency: "RUB",
+    amount_xtr: null,
+    telegram_invoice_payload: null,
+    action_kind: "subscription_payment",
+    sku: "payment_plan_2",
+    scene_session_id: null,
+    turn_no: null,
+    scene_turn_no: null,
+    checkout_url: "https://sbp.example/existing-successor",
+    external_payment_id: "existing-successor-payment",
+    payload_json: buildSbpSubscriptionPayload("offer-reload"),
+  });
+  const { service, calls } = createRepository({
+    async loadStoredInvoiceTokens(tokens) {
+      return tokens.flatMap((requestedToken) => {
+        if (requestedToken === token) {
+          return [buildStoredInvoiceToken({
+            token,
+            payment_source: "sbp",
+            amount: 199,
+            currency: "RUB",
+            amount_xtr: null,
+            telegram_invoice_payload: null,
+            action_kind: "subscription_payment",
+            sku: "payment_plan_2",
+            scene_session_id: null,
+            turn_no: null,
+            scene_turn_no: null,
+            expires_at: new Date(Date.now() - 60_000).toISOString(),
+            status: predecessorReloaded ? "canceled" : "invoice_sent",
+            failure_reason: predecessorReloaded ? "sbp_expired" : null,
+            payload_json: buildSbpSubscriptionPayload("offer-reload"),
+          })];
+        }
+        return requestedToken.startsWith("pay_retry_")
+          ? [successorRow(requestedToken)]
+          : [];
+      });
+    },
+    async markSbpInvoiceExpired() {
+      calls.markSbpInvoiceExpired += 1;
+      predecessorReloaded = true;
+      return 0;
+    },
+    async loadActiveSubscriptionOfferId() {
+      return "offer-reload";
+    },
+  });
+
+  const checkoutUrl = await service.resolveSbpCheckout(token);
+
+  assert.equal(checkoutUrl, "https://sbp.example/existing-successor");
+  assert.equal(calls.markSbpInvoiceExpired, 1);
+  assert.equal(calls.createSbpPayment, 0);
+});
+
+test("stale initial SBP context does not create a provider transaction", async () => {
+  const token = "sbp-stale-context";
+  const { service, calls } = createRepository({
+    async loadStoredInvoiceTokens() {
+      return [buildStoredInvoiceToken({
+        token,
+        payment_source: "sbp",
+        amount: 199,
+        currency: "RUB",
+        amount_xtr: null,
+        telegram_invoice_payload: null,
+        action_kind: "subscription_payment",
+        sku: "payment_plan_2",
+        scene_session_id: null,
+        turn_no: null,
+        scene_turn_no: null,
+        payload_json: buildSbpSubscriptionPayload("old-offer"),
+      })];
+    },
+    async claimSbpCheckoutCreation(requestedToken, chatId) {
+      return {
+        token: requestedToken,
+        chat_id: chatId,
+        checkout_url: null,
+        external_payment_id: null,
+        claim_acquired: true,
+      };
+    },
+    async loadActiveSubscriptionOfferId() {
+      return "new-offer";
+    },
+  });
+
+  await assert.rejects(
+    () => service.resolveSbpCheckout(token),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "sbp_successor_context_stale",
+  );
+  assert.equal(calls.createSbpPayment, 0);
+  assert.equal(calls.releaseSbpCheckoutCreation, 1);
+});
+
+test("SBP checkout is not returned when row becomes sibling-paid after provider create", async () => {
+  const token = "sbp-post-create-sibling-paid";
+  let stored = buildStoredInvoiceToken({
+    token,
+    payment_source: "sbp",
+    amount: 199,
+    currency: "RUB",
+    amount_xtr: null,
+    telegram_invoice_payload: null,
+    action_kind: "subscription_payment",
+    sku: "payment_plan_2",
+    scene_session_id: null,
+    turn_no: null,
+    scene_turn_no: null,
+    payload_json: buildSbpSubscriptionPayload(),
+  });
+  const { service, calls } = createRepository({
+    async loadStoredInvoiceTokens() {
+      return [stored];
+    },
+    async claimSbpCheckoutCreation(requestedToken, chatId) {
+      return {
+        token: requestedToken,
+        chat_id: chatId,
+        checkout_url: stored.checkout_url ?? null,
+        external_payment_id: stored.external_payment_id ?? null,
+        claim_acquired: stored.checkout_url == null,
+      };
+    },
+    async storeInvoiceLinks(items) {
+      calls.storeInvoiceLinks += 1;
+      const [item] = items as Array<{
+        checkout_url?: string | null;
+        external_payment_id?: string | null;
+        expires_at?: string | null;
+      }>;
+      stored = buildStoredInvoiceToken({
+        ...stored,
+        checkout_url: item?.checkout_url ?? stored.checkout_url,
+        external_payment_id: item?.external_payment_id ?? stored.external_payment_id,
+        expires_at: item?.expires_at ?? stored.expires_at,
+        status: "canceled",
+        failure_reason: "sibling_paid",
+      });
+      return 1;
+    },
+    async loadInvoiceToken() {
+      return buildLoadedInvoiceToken({
+        ...stored,
+        requested_token: token,
+      });
+    },
+  });
+
+  await assert.rejects(
+    () => service.resolveSbpCheckout(token),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && error.code === "sbp_invoice_status_invalid",
+  );
+  await assert.rejects(() => service.resolveSbpCheckout(token));
+  assert.equal(calls.createSbpPayment, 1);
+  assert.equal(calls.storeInvoiceLinks, 1);
+});
+
+test("canceled subscription attempt rolls over to a new SBP token and transaction", async () => {
   const previousEnabled = config.SBP_ENABLED;
   const previousPlans = config.MEDIA_SUBSCRIPTION_PLANS_JSON;
   config.SBP_ENABLED = true;
@@ -6488,7 +7256,7 @@ test("canceled subscription attempt rolls over to a new token and Platega transa
           currency: "XTR" | "RUB";
           amount_xtr: number | null;
           telegram_invoice_payload: string | null;
-          expires_at: string;
+          expires_at: string | null;
           invoice_title: string;
           invoice_description: string;
           invoice_label: string;
@@ -6565,8 +7333,15 @@ test("canceled subscription attempt rolls over to a new token and Platega transa
           (candidate) => candidate.external_payment_id === externalPaymentId,
         );
         if (!row) return 0;
-        stored.set(row.token, buildStoredInvoiceToken({ ...row, status: "canceled" }));
+        stored.set(row.token, buildStoredInvoiceToken({
+          ...row,
+          status: "canceled",
+          failure_reason: "sbp_canceled",
+        }));
         return 1;
+      },
+      async loadActiveSubscriptionOfferId() {
+        return "same-user-purchase";
       },
     });
 
@@ -6600,7 +7375,9 @@ test("canceled subscription attempt rolls over to a new token and Platega transa
 
     const checkoutB = await service.resolveSbpCheckout(tokenB);
     const repeatedCheckoutB = await service.resolveSbpCheckout(tokenB);
+    const repeatedOldCheckout = await service.resolveSbpCheckout(tokenA);
     assert.equal(checkoutB, repeatedCheckoutB);
+    assert.equal(checkoutB, repeatedOldCheckout);
     assert.notEqual(stored.get(tokenB)?.external_payment_id, externalA);
     assert.equal(calls.createSbpPayment, 2);
   } finally {
@@ -6899,7 +7676,7 @@ for (const flow of ["feature", "scene_unlock"] as const) {
             amount_xtr: number | null;
             currency: "XTR" | "RUB";
             telegram_invoice_payload: string | null;
-            expires_at: string;
+            expires_at: string | null;
             invoice_title: string;
             invoice_description: string;
             invoice_label: string;
@@ -6910,6 +7687,9 @@ for (const flow of ["feature", "scene_unlock"] as const) {
             status: input.payment_source === "sbp" && upsertCount <= canceledRollovers
               ? "canceled"
               : "invoice_sent",
+            failure_reason: input.payment_source === "sbp" && upsertCount <= canceledRollovers
+              ? "sbp_canceled"
+              : null,
             external_payment_id:
               input.payment_source === "sbp" && upsertCount <= canceledRollovers
                 ? `canceled-${flow}-${upsertCount}`
@@ -6932,10 +7712,13 @@ for (const flow of ["feature", "scene_unlock"] as const) {
         }));
       const options = result.payment_options ?? [];
       assert.equal(options.length, 2);
-      assert.ok(options.every((option) => option.token.startsWith("pay_retry_")));
-      assert.match(findPaymentOption(options, "sbp")?.checkout_url ?? "", /\/v1\/pay\/sbp\//u);
+      const starsOption = findPaymentOption(options, "stars");
+      const sbpOption = findPaymentOption(options, "sbp");
+      assert.ok(starsOption);
+      assert.ok(sbpOption?.token.startsWith("pay_retry_"));
+      assert.match(sbpOption?.checkout_url ?? "", /\/v1\/pay\/sbp\//u);
       assert.equal(calls.createSbpPayment, 0);
-      assert.equal(upsertCount, canceledRollovers + 1);
+      assert.equal(upsertCount, 2);
     } finally {
       config.SBP_ENABLED = previousEnabled;
       config.MEDIA_ACTION_PLANS_JSON = previousPlans;

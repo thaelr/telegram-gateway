@@ -78,6 +78,16 @@ export class MediaPaymentRepository {
     return rows[0]?.updated_count ?? 0;
   }
 
+  async markSbpInvoiceExpired(token: string, chatId: number): Promise<number> {
+    const rows = await this.query<Array<{ updated_count: number }>>`
+      SELECT public.media_mark_sbp_invoice_expired(
+        ${token}::text,
+        ${chatId}::bigint
+      ) AS updated_count
+    `;
+    return rows[0]?.updated_count ?? 0;
+  }
+
   async recordSbpStatusConflict(
     externalPaymentId: string,
     providerStatus: string,

@@ -178,6 +178,7 @@ export class MediaInteractionTokenRepository {
             : row.payload_json,
           status: row.status,
           action_kind: row.action_kind,
+          failure_reason: row.failure_reason ?? null,
           sku: row.sku ?? null,
           payment_source: row.payment_source ?? null,
           amount: row.amount ?? null,
@@ -219,6 +220,7 @@ export class MediaInteractionTokenRepository {
             : row.payload_json,
           status: row.status,
           action_kind: row.action_kind,
+          failure_reason: row.failure_reason ?? null,
           sku: row.sku ?? null,
           payment_source: row.payment_source ?? null,
           amount: row.amount ?? null,
@@ -240,6 +242,7 @@ export class MediaInteractionTokenRepository {
       invoice_link?: string | null;
       checkout_url?: string | null;
       external_payment_id?: string | null;
+      expires_at?: string | null;
     }>,
   ): Promise<number> {
     const rows = await this.query<Array<{ updated_count: number }>>`
@@ -249,6 +252,17 @@ export class MediaInteractionTokenRepository {
     `;
 
     return rows[0]?.updated_count ?? 0;
+  }
+
+  async loadActiveSubscriptionOfferId(chatId: number): Promise<string | null> {
+    const rows = await this.query<Array<{ active_subscription_offer_id: string | null }>>`
+      SELECT active_subscription_offer_id
+      FROM public.chat_state
+      WHERE chat_id = ${chatId}::bigint
+      LIMIT 1
+    `;
+
+    return rows[0]?.active_subscription_offer_id ?? null;
   }
 
   async claimSbpCheckoutCreation(

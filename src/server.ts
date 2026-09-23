@@ -212,6 +212,11 @@ export function buildApp(options: BuildAppOptions = {}) {
         "sbp_invoice_status_invalid",
         "sbp_invoice_action_invalid",
         "sbp_invoice_expired",
+        "sbp_provider_status_pending",
+        "sbp_provider_status_confirmed",
+        "sbp_provider_status_chargebacked",
+        "sbp_successor_context_stale",
+        "sbp_retry_chain_corrupt",
       ].includes(error.code ?? "")) {
         return reply.status(410).send({ error: "payment_unavailable" });
       }
@@ -219,6 +224,9 @@ export function buildApp(options: BuildAppOptions = {}) {
         return reply.status(409).send({ error: "payment_creation_in_progress" });
       }
       if (error.code === "sbp_checkout_creation_uncertain") {
+        return reply.status(503).send({ error: "payment_reconciliation_required" });
+      }
+      if (error.code === "sbp_provider_status_ambiguous") {
         return reply.status(503).send({ error: "payment_reconciliation_required" });
       }
       throw error;

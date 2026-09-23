@@ -60,7 +60,7 @@ export type UpsertInvoiceTokenInput = SceneTurnRef & {
   telegram_invoice_payload: string | null;
   checkout_url: string | null;
   external_payment_id?: string | null;
-  expires_at: string;
+  expires_at: string | null;
   invoice_title: string;
   invoice_description: string;
   invoice_label: string;

@@ -174,6 +174,7 @@ export class MediaCommerceRepository {
       invoice_link?: string | null;
       checkout_url?: string | null;
       external_payment_id?: string | null;
+      expires_at?: string | null;
     }>,
   ): Promise<number> {
     return this.tokenRepository.storeInvoiceLinks(items);
@@ -201,6 +202,10 @@ export class MediaCommerceRepository {
     return this.paymentRepository.markSbpInvoiceCanceled(externalPaymentId);
   }
 
+  async markSbpInvoiceExpired(token: string, chatId: number): Promise<number> {
+    return this.paymentRepository.markSbpInvoiceExpired(token, chatId);
+  }
+
   async recordSbpStatusConflict(
     externalPaymentId: string,
     providerStatus: string,
@@ -210,6 +215,10 @@ export class MediaCommerceRepository {
 
   async loadStoredInvoiceTokens(tokens: string[]): Promise<StoredInvoiceToken[]> {
     return this.tokenRepository.loadStoredInvoiceTokens(tokens);
+  }
+
+  async loadActiveSubscriptionOfferId(chatId: number): Promise<string | null> {
+    return this.tokenRepository.loadActiveSubscriptionOfferId(chatId);
   }
 
   async loadAbTestAssignment(

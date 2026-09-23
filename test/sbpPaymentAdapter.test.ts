@@ -90,6 +90,7 @@ test("SbpPaymentAdapter sends Platega transaction/process request and maps respo
     assert.deepEqual(result, {
       external_payment_id: "platega-transaction-1",
       checkout_url: "https://pay.platega.example/redirect/1",
+      provider_expires_at: null,
     });
     assert.equal(requests.length, 1);
     assert.equal(requests[0]?.url, "https://platega.example/api/transaction/process");
@@ -116,6 +117,52 @@ test("SbpPaymentAdapter sends Platega transaction/process request and maps respo
       },
     });
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("SbpPaymentAdapter maps valid expiresIn and keeps invalid or missing expiry nullable", async () => {
+  const adapter = new SbpPaymentAdapter();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  const baseNow = Date.parse("2026-09-22T10:00:00.000Z");
+  const cases = [
+    {
+      name: "valid",
+      expiresIn: "01:02:03",
+      expected: "2026-09-22T11:02:03.000Z",
+    },
+    { name: "zero", expiresIn: "00:00:00", expected: null },
+    { name: "invalid", expiresIn: "1:99:00", expected: null },
+    { name: "missing", expiresIn: undefined, expected: null },
+  ] as const;
+
+  Date.now = () => baseNow;
+  try {
+    for (const entry of cases) {
+      globalThis.fetch = async () => {
+        const body: Record<string, unknown> = {
+          transactionId: `platega-${entry.name}`,
+          redirect: `https://pay.platega.example/${entry.name}`,
+        };
+        if (entry.expiresIn !== undefined) body.expiresIn = entry.expiresIn;
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      };
+
+      const result = await adapter.createPayment({
+        token: `payment-token-${entry.name}`,
+        chat_id: 1318122313,
+        description: "Пропустить вступление",
+        amount_rub: 80,
+      });
+
+      assert.equal(result.provider_expires_at, entry.expected, entry.name);
+    }
+  } finally {
+    Date.now = originalNow;
     globalThis.fetch = originalFetch;
   }
 });
