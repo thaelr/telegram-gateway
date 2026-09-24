@@ -104,6 +104,7 @@ const {
   MediaCommerceOperationError,
   buildPaymentOption,
 } = await import("../src/mediaCommerceDecisionService.js");
+const { buildMediaAction } = await import("../src/mediaCommerce/mediaAction.js");
 const { toPaidInvoiceToken } = await import("../src/mediaCommerce/paymentFlow.js");
 const { buildSubscriptionPaymentInputs } = await import(
   "../src/mediaCommerce/subscriptionFlow.js"
@@ -376,6 +377,57 @@ function buildMediaContext(
     ...overrides,
   };
 }
+
+test("media action caps each panel at five new photos while keeping navigation", () => {
+  const unlockedItems = [1, 2, 3, 4, 5].map((index) => ({
+    uuid: `u${index}`,
+    photo_url: `https://cdn.test/u${index}.jpg`,
+    sort_order: index,
+  }));
+  const fifthPhotoPayment = buildMediaAction(buildMediaContext({
+    delivered_in_scene: 3,
+    panel_unlocked_count: 4,
+    unlocked_items_json: unlockedItems.slice(0, 4),
+    current_uuid: "u4",
+    next_unseen_json: {
+      uuid: "u5",
+      photo_url: "https://cdn.test/u5.jpg",
+      sort_order: 5,
+    },
+  }));
+  const cappedRequest = buildMediaAction(buildMediaContext({
+    delivered_in_scene: 3,
+    panel_unlocked_count: 5,
+    unlocked_items_json: unlockedItems,
+    current_uuid: "u5",
+    next_unseen_json: {
+      uuid: "u6",
+      photo_url: "https://cdn.test/u6.jpg",
+      sort_order: 6,
+    },
+  }));
+  const cappedNavigation = buildMediaAction(buildMediaContext({
+    action_kind: "photo_next",
+    delivered_in_scene: 3,
+    panel_unlocked_count: 5,
+    unlocked_items_json: unlockedItems,
+    current_uuid: "u5",
+    next_unseen_json: {
+      uuid: "u6",
+      photo_url: "https://cdn.test/u6.jpg",
+      sort_order: 6,
+    },
+  }));
+
+  assert.equal(fifthPhotoPayment.operation, "edit_photo");
+  assert.equal(fifthPhotoPayment.invoice_sku, "payment_media_1");
+  assert.equal(cappedRequest.operation, "noop");
+  assert.equal(cappedRequest.invoice_sku, null);
+  assert.equal(cappedRequest.token_rows.length, 0);
+  assert.equal(cappedNavigation.operation, "edit_photo");
+  assert.equal(cappedNavigation.selected_uuid, "u1");
+  assert.equal(cappedNavigation.invoice_sku, null);
+});
 
 function buildStoredInvoiceToken(
   overrides: Partial<StoredInvoiceToken> = {},
@@ -4491,11 +4543,13 @@ test("payment_success treats sibling-paid Stars invoice as status conflict", asy
 });
 
 test("payment_success resumes fulfillment for a paid photo invoice", async () => {
+  const loadMediaContextInputs: Array<Record<string, unknown>> = [];
   const { service, calls } = createRepository({
     async loadInvoiceToken(token, chatId) {
       calls.loadInvoiceTokenArgs.push({ token, chatId });
       return buildLoadedInvoiceToken({
         status: "paid",
+        telegram_invoice_message_id: 901,
         payload_json: {
           action_kind: "photo_payment",
           chat_id: 101,
@@ -4508,6 +4562,16 @@ test("payment_success resumes fulfillment for a paid photo invoice", async () =>
           base_price_xtr: 10,
           requested_action: "photo_request",
         },
+      });
+    },
+    async loadMediaContext(input) {
+      calls.loadMediaContext += 1;
+      loadMediaContextInputs.push(input as Record<string, unknown>);
+      return buildMediaContext({
+        invoice_token:
+          typeof (input as { invoice_token?: unknown })?.invoice_token === "string"
+            ? (input as { invoice_token: string }).invoice_token
+            : null,
       });
     },
   });
@@ -4529,6 +4593,7 @@ test("payment_success resumes fulfillment for a paid photo invoice", async () =>
   assert.equal(result.payment_kind, "photo");
   assert.equal(result.fulfillment_invoice_token, "inv_payload");
   assert.equal(result.reason, "media_ready");
+  assert.equal(loadMediaContextInputs[0]?.target_message_id, 555);
   assert.equal(calls.markInvoicePaid, 0);
 });
 

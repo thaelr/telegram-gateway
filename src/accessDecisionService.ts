@@ -502,6 +502,7 @@ export class AccessDecisionService {
         action: "show_terms_gate",
         allowed: false,
         post_accept_intent: resolvePostAcceptIntent(classification),
+        terms_offer_url: config.PUBLIC_OFFER_URL,
         reason: "terms_not_accepted",
       });
     }

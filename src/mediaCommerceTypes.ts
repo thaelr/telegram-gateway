@@ -318,6 +318,7 @@ export interface MediaContext {
   delivered_in_scene: number;
   total_available: number;
   unseen_available: number;
+  panel_unlocked_count?: number | null;
   unlocked_items_json: unknown;
   next_unseen_json: unknown;
 }

@@ -205,7 +205,10 @@ export function buildPhotoInvoiceInput(input: {
 
 export function buildMediaAction(context: MediaContext): MediaActionDecision {
   const unlockedItems = normalizeUnlockedItems(context.unlocked_items_json);
-  const nextUnseen = normalizeNextUnseen(context.next_unseen_json);
+  const panelUnlockedCount =
+    normalizeNonNegativeInteger(context.panel_unlocked_count) ?? unlockedItems.length;
+  const nextUnseen =
+    panelUnlockedCount >= 5 ? null : normalizeNextUnseen(context.next_unseen_json);
   const actionKind = normalizeString(context.action_kind) ?? "";
   const callbackValid = context.callback_valid !== false;
   const subscriptionActive = context.subscription_active === true;
@@ -332,7 +335,9 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   }
 
   const unlockedAfter = unlockedItems.slice();
-  if (deliverUnlock && !unlockedAfter.some((item) => item.uuid === selected?.uuid)) {
+  const unlockedNewPhoto =
+    deliverUnlock && !unlockedAfter.some((item) => item.uuid === selected?.uuid);
+  if (unlockedNewPhoto) {
     unlockedAfter.push({
       uuid: selected.uuid,
       photo_url: selected.photo_url,
@@ -352,6 +357,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
     delivered_in_scene: deliveredAfter,
     base_price_xtr: basePrice,
   });
+  const panelUnlockedAfter = panelUnlockedCount + (unlockedNewPhoto ? 1 : 0);
   const tokenRows: InteractionTokenRow[] = [];
 
   const addCallbackRow = (
@@ -397,7 +403,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   let invoicePayload: InvoiceTokenPayload | null = null;
   let invoiceButtonText: string | null = null;
 
-  if (unseenAfter > 0) {
+  if (unseenAfter > 0 && panelUnlockedAfter < 5) {
     if (nextPrice > 0) {
       const photoPlan = resolvePhotoPlanBySku(photoSku);
       if (!photoPlan) {

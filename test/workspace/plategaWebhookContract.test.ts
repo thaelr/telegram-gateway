@@ -10,6 +10,7 @@ type WorkflowNode = {
   parameters?: {
     method?: string;
     body?: string;
+    query?: string;
     inlineKeyboard?: unknown;
     conditions?: {
       conditions?: Array<{
@@ -211,6 +212,33 @@ async function loadRouterWorkflow(): Promise<Workflow> {
   return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
 }
 
+async function loadRouterWorkflowNodeCode(nodeName: string): Promise<string> {
+  const workflow = await loadRouterWorkflow();
+  const node = Array.isArray(workflow.nodes)
+    ? workflow.nodes.find((entry) => entry?.name === nodeName)
+    : null;
+  const jsCode = node?.parameters?.jsCode;
+
+  assert.equal(typeof jsCode, "string");
+  if (typeof jsCode !== "string") {
+    throw new TypeError(`${nodeName} node must contain jsCode`);
+  }
+  assert.ok(jsCode.length > 0);
+
+  return jsCode;
+}
+
+async function loadSceneTurnWorkflow(): Promise<Workflow> {
+  const workflowPath = path.resolve(
+    process.cwd(),
+    "..",
+    "..",
+    "Актуальные",
+    "Engine Scene Turn Core prod.v1.json",
+  );
+  return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
+}
+
 async function loadBroadcastWorkflow(): Promise<Workflow> {
   const workflowPath = path.resolve(
     process.cwd(),
@@ -220,6 +248,22 @@ async function loadBroadcastWorkflow(): Promise<Workflow> {
     "n8n_telegram_broadcast_template.json",
   );
   return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
+}
+
+async function loadSceneTurnWorkflowNodeCode(nodeName: string): Promise<string> {
+  const workflow = await loadSceneTurnWorkflow();
+  const node = Array.isArray(workflow.nodes)
+    ? workflow.nodes.find((entry) => entry?.name === nodeName)
+    : null;
+  const jsCode = node?.parameters?.jsCode;
+
+  assert.equal(typeof jsCode, "string");
+  if (typeof jsCode !== "string") {
+    throw new TypeError(`${nodeName} node must contain jsCode`);
+  }
+  assert.ok(jsCode.length > 0);
+
+  return jsCode;
 }
 
 async function loadNormalizeSbpWebhookCode(): Promise<string> {
@@ -254,6 +298,42 @@ async function loadWorkflowNodeCode(nodeName: string): Promise<string> {
   return jsCode;
 }
 
+async function runPrepareAssistantSendContext(input: {
+  currentHint: Record<string, unknown> | null;
+  previousHint: Record<string, unknown> | null;
+}): Promise<Record<string, unknown>> {
+  const jsCode = await loadSceneTurnWorkflowNodeCode("Prepare assistant send context");
+  const evaluator = new Function("$node", jsCode) as (
+    node: Record<string, { json: Record<string, unknown> }>,
+  ) => Array<{ json: Record<string, unknown> }>;
+  const result = evaluator({
+    "Format response": {
+      json: {
+        formatted_text: "Assistant text",
+        _writer_scene_hint: input.currentHint,
+      },
+    },
+    "Create row in chat_turns": {
+      json: {
+        chat_id: 101,
+        n: 14,
+        scene_session_id: "scene-1",
+        scene_turn_no: 9,
+        scene_hint: input.previousHint,
+      },
+    },
+    "Build Dynamic Instructions": { json: { chat_id: 101, n: 14 } },
+    "Scene Turn Input": { json: { chat_id: 101 } },
+  });
+
+  assert.ok(Array.isArray(result));
+  assert.equal(result.length, 1);
+  assert.equal(typeof result[0]?.json, "object");
+  assert.ok(result[0]?.json != null);
+
+  return result[0].json;
+}
+
 async function runWorkflowCodeNode(
   nodeName: string,
   input: Record<string, unknown>,
@@ -267,6 +347,68 @@ async function runWorkflowCodeNode(
     assert.equal(sourceNodeName, "Evaluate media commerce decision");
     return [{ json: input }];
   });
+
+  assert.ok(Array.isArray(result));
+  assert.equal(result.length, 1);
+  assert.equal(typeof result[0]?.json, "object");
+  assert.ok(result[0]?.json != null);
+
+  return result[0].json;
+}
+
+async function runPrepareMediaOfferInput(
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const jsCode = await loadSceneTurnWorkflowNodeCode("Prepare media offer input");
+  const evaluator = new Function("$json", jsCode) as (
+    json: Record<string, unknown>,
+  ) => Array<{ json: Record<string, unknown> }>;
+  const result = evaluator(input);
+
+  assert.ok(Array.isArray(result));
+  assert.equal(result.length, 1);
+  assert.equal(typeof result[0]?.json, "object");
+  assert.ok(result[0]?.json != null);
+
+  return result[0].json;
+}
+
+async function runPrepareFastSceneSkipOfferInput(
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const jsCode = await loadRouterWorkflowNodeCode("Prepare fast scene skip offer input");
+  const evaluator = new Function("$json", jsCode) as (
+    json: Record<string, unknown>,
+  ) => Array<{ json: Record<string, unknown> }>;
+  const result = evaluator(input);
+
+  assert.ok(Array.isArray(result));
+  assert.equal(result.length, 1);
+  assert.equal(typeof result[0]?.json, "object");
+  assert.ok(result[0]?.json != null);
+
+  return result[0].json;
+}
+
+async function runApplyMediaOfferCooldown(
+  input: {
+    hasThreeCompletedTurns: boolean;
+    recentMediaActivity: boolean;
+  },
+  base: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const jsCode = await loadSceneTurnWorkflowNodeCode("Apply media offer cooldown");
+  const evaluator = new Function("$json", "$node", jsCode) as (
+    json: Record<string, unknown>,
+    node: Record<string, { json: Record<string, unknown> }>,
+  ) => Array<{ json: Record<string, unknown> }>;
+  const result = evaluator(
+    {
+      has_three_completed_turns: input.hasThreeCompletedTurns,
+      recent_media_activity: input.recentMediaActivity,
+    },
+    { "Prepare assistant send context": { json: base } },
+  );
 
   assert.ok(Array.isArray(result));
   assert.equal(result.length, 1);
@@ -446,6 +588,216 @@ test("router workflow sends raw_update to gateway router decision", async () => 
   const body = String(node?.parameters?.body ?? "");
 
   assert.match(body, /raw_update:\s*\$json\.raw_update\s*\?\?\s*null/u);
+});
+
+test("router terms gate renders Gateway-provided offer URL", async () => {
+  const workflow = await loadRouterWorkflow();
+  const node = Array.isArray(workflow.nodes)
+    ? workflow.nodes.find((entry) => entry?.name === "Build terms gate payload")
+    : null;
+  const code = String(node?.parameters?.jsCode ?? "");
+
+  assert.match(code, /item\.terms_offer_url/u);
+  assert.doesNotMatch(code, /\$env\.PUBLIC_OFFER_URL/u);
+  assert.match(code, /terms_offer_url is required/u);
+  assert.match(code, /inline_keyboard:\s*\[/u);
+  assert.match(code, /url:\s*offerUrl/u);
+  assert.match(code, /callback_data:\s*'terms_accept:' \+ requestedIntent/u);
+});
+
+test("router fast scene skip offer passes explicit feature discriminator", async () => {
+  const result = await runPrepareFastSceneSkipOfferInput({
+    chat_id: 101,
+    active_scene_session_id: "scene-fast",
+    current_turn_no: 12,
+    scene_turn_no: 0,
+    selected_character_i: 2,
+    scene_mode: "fast",
+    start_media_signature: "hotel_room_close_standing_towel",
+  });
+  const workflow = await loadRouterWorkflow();
+
+  assert.equal(result.interaction_mode, "feature_offer");
+  assert.equal(result.feature_key, "fast_scene_skip");
+  assert.equal(result.chat_id, 101);
+  assert.equal(result.scene_session_id, "scene-fast");
+  assert.equal(result.turn_no, 12);
+  assert.equal(result.scene_turn_no, 0);
+  assert.equal(result.character_i, 2);
+  assert.equal(result.scene_mode, "fast");
+  assert.equal(result.target_message_id, null);
+  assert.equal(result.media_signature, "hotel_room_close_standing_towel");
+  assert.deepEqual(
+    workflow.connections?.["Need fast scene skip offer?"]?.main?.[0]?.map((entry) => entry.node),
+    ["Prepare fast scene skip offer input"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Prepare fast scene skip offer input"]?.main?.[0]?.map((entry) => entry.node),
+    ["Run fast scene skip offer"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Run fast scene skip offer"]?.main?.[0]?.map((entry) => entry.node),
+    ["Restore scene start context after fast scene skip offer"],
+  );
+});
+
+test("scene turn core media signature keeps out_of_reach distinct and sex requires sex_position", async () => {
+  const baseHint = {
+    location: "hotel_room",
+    pose: "standing",
+    clothes: "towel",
+  };
+  const outOfReach = await runPrepareAssistantSendContext({
+    currentHint: { ...baseHint, distance: "out_of_reach" },
+    previousHint: null,
+  });
+  const close = await runPrepareAssistantSendContext({
+    currentHint: { ...baseHint, distance: "close" },
+    previousHint: null,
+  });
+  const touching = await runPrepareAssistantSendContext({
+    currentHint: { ...baseHint, distance: "touching" },
+    previousHint: null,
+  });
+  const sex = await runPrepareAssistantSendContext({
+    currentHint: { ...baseHint, clothes: "naked", distance: "sex", sex_position: "cowgirl" },
+    previousHint: null,
+  });
+  const sexMissingPosition = await runPrepareAssistantSendContext({
+    currentHint: { ...baseHint, clothes: "naked", distance: "sex", sex_position: null },
+    previousHint: null,
+  });
+
+  assert.equal(outOfReach.media_signature_preview, "hotel_room_out_of_reach_standing_towel");
+  assert.equal(close.media_signature_preview, "hotel_room_close_standing_towel");
+  assert.equal(touching.media_signature_preview, "hotel_room_close_standing_towel");
+  assert.notEqual(outOfReach.media_signature_preview, close.media_signature_preview);
+  assert.equal(sex.media_signature_preview, "hotel_room_sex_standing_naked_cowgirl");
+  assert.equal(sexMissingPosition.media_signature_preview, null);
+});
+
+test("scene turn core passes photo_sku through prepare_offer for normal and premium media", async () => {
+  const normal = await runPrepareAssistantSendContext({
+    currentHint: {
+      location: "hotel_room",
+      pose: "standing",
+      clothes: "towel",
+      distance: "close",
+    },
+    previousHint: null,
+  });
+  const premium = await runPrepareAssistantSendContext({
+    currentHint: {
+      location: "hotel_room",
+      pose: "standing",
+      clothes: "naked",
+      distance: "close",
+    },
+    previousHint: null,
+  });
+
+  assert.equal(normal.photo_sku, "payment_media_1");
+  assert.equal(normal.base_price_xtr, 10);
+  assert.equal(premium.photo_sku, "payment_media_2");
+  assert.equal(premium.base_price_xtr, 25);
+  assert.equal((await runPrepareMediaOfferInput(normal)).photo_sku, "payment_media_1");
+  assert.equal((await runPrepareMediaOfferInput(premium)).photo_sku, "payment_media_2");
+});
+
+test("scene turn core routes media offer cooldown only for same valid signature", async () => {
+  const changed = await runPrepareAssistantSendContext({
+    currentHint: {
+      location: "hotel_room",
+      pose: "standing",
+      clothes: "towel",
+      distance: "close",
+    },
+    previousHint: {
+      location: "hotel_room",
+      pose: "standing",
+      clothes: "towel",
+      distance: "out_of_reach",
+    },
+  });
+  const same = await runPrepareAssistantSendContext({
+    currentHint: {
+      location: "hotel_room",
+      pose: "standing",
+      clothes: "towel",
+      distance: "close",
+    },
+    previousHint: {
+      location: "hotel_room",
+      pose: "standing",
+      clothes: "towel",
+      distance: "touching",
+    },
+  });
+  const invalid = await runPrepareAssistantSendContext({
+    currentHint: {
+      location: "hotel_room",
+      pose: "standing",
+      clothes: "towel",
+      distance: "banana",
+    },
+    previousHint: null,
+  });
+
+  assert.equal(changed.should_prepare_media_offer, true);
+  assert.equal(changed.should_check_media_offer_cooldown, false);
+  assert.equal(invalid.media_signature_preview, null);
+  assert.equal(invalid.should_prepare_media_offer, false);
+  assert.equal(invalid.should_check_media_offer_cooldown, false);
+  assert.equal(same.should_prepare_media_offer, false);
+  assert.equal(same.should_check_media_offer_cooldown, true);
+  assert.equal((await runApplyMediaOfferCooldown(
+    { hasThreeCompletedTurns: false, recentMediaActivity: false },
+    same,
+  )).should_prepare_media_offer, false);
+  assert.equal((await runApplyMediaOfferCooldown(
+    { hasThreeCompletedTurns: true, recentMediaActivity: true },
+    same,
+  )).should_prepare_media_offer, false);
+  assert.equal((await runApplyMediaOfferCooldown(
+    { hasThreeCompletedTurns: true, recentMediaActivity: false },
+    same,
+  )).should_prepare_media_offer, true);
+
+  const workflow = await loadSceneTurnWorkflow();
+  assert.deepEqual(
+    workflow.connections?.["Need media offer prepare?"]?.main?.map((output) =>
+      output.map((entry) => entry.node)
+    ),
+    [
+      ["Prepare media offer input"],
+      ["Need media offer cooldown check?"],
+    ],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Need media offer cooldown check?"]?.main?.map((output) =>
+      output.map((entry) => entry.node)
+    ),
+    [
+      ["Check recent media activity"],
+      ["Assistant send payload ready"],
+    ],
+  );
+  const gateNode = workflow.nodes?.find((entry) => entry.name === "Need media offer cooldown check?");
+  assert.match(
+    String(gateNode?.parameters?.conditions?.conditions?.[0]?.leftValue ?? ""),
+    /should_check_media_offer_cooldown === true/u,
+  );
+  const cooldownNode = workflow.nodes?.find((entry) => entry.name === "Check recent media activity");
+  const query = String(cooldownNode?.parameters?.query ?? "");
+  assert.match(query, /FROM public\.chat_turns ct/u);
+  assert.match(query, /ct\.n < i\.turn_no/u);
+  assert.match(query, /ct\.sent_at IS NOT NULL/u);
+  assert.match(query, /ORDER BY ct\.n DESC/u);
+  assert.match(query, /LIMIT 3/u);
+  assert.match(query, /has_three_completed_turns/u);
+  assert.match(query, /cm\.turn_no IN \(SELECT n FROM completed_turns\)/u);
+  assert.match(query, /media\.panel\.sent/u);
+  assert.doesNotMatch(query, /created_at|interval/u);
 });
 
 test("router workflow preserves Telegram payment ingress and excludes SBP provider webhook fields", async () => {

@@ -4441,8 +4441,8 @@ export class MediaCommerceDecisionService {
         typeof payload.current_uuid === "string" ? payload.current_uuid : null,
       ),
       target_message_id:
-        normalizePositiveInteger(paidRow.telegram_invoice_message_id)
-        ?? normalizePositiveInteger(payload.target_message_id),
+        normalizePositiveInteger(payload.target_message_id)
+        ?? normalizePositiveInteger(paidRow.telegram_invoice_message_id),
       base_price_xtr:
         normalizePositiveInteger(payload.base_price_xtr)
         ?? normalizePositiveInteger(paidRow.amount_xtr)

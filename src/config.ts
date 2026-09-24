@@ -263,6 +263,7 @@ const rawEnvSchema = z.object({
   DATABASE_URL: z.string().url(),
   INTERNAL_API_KEY: z.string().min(1),
   INTERNAL_API_KEY_HEADER: z.string().min(1).default("x-internal-api-key"),
+  PUBLIC_OFFER_URL: z.string().trim().url(),
   GATEWAY_PUBLIC_URL: z.string().trim().optional(),
   RAILWAY_PUBLIC_DOMAIN: z.string().trim().optional(),
   TG_BOT_TOKEN: z.string().min(1),

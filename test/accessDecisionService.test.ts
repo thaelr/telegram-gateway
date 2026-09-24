@@ -185,6 +185,7 @@ test("returns show_terms_gate when terms are not accepted", async () => {
   assert.equal(result.decision, "show_terms_gate");
   assert.equal(result.allowed, false);
   assert.equal(result.post_accept_intent, "start");
+  assert.equal(result.terms_offer_url, "https://offer.example/terms");
   assert.equal(result.reason, "terms_not_accepted");
   assert.equal(calls.length, 1);
 });

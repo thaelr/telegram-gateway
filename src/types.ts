@@ -125,6 +125,7 @@ export interface AccessDecisionResponse {
   turn_limit_reset_text?: string | null;
   subscription_offer_reason?: "subscription_command" | "daily_turn_limit" | null;
   post_accept_intent?: "start" | "menu" | "subscription" | "paysupport" | null;
+  terms_offer_url?: string | null;
   newscene_action?: "yes" | "no" | null;
   reason?: string | null;
   text?: string | null;
