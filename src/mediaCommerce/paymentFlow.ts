@@ -84,10 +84,17 @@ export function hasExpectedPaymentDetails(
   currency: string | null | undefined,
   totalAmount: number | null | undefined,
 ): boolean {
+  const expectedAmount = normalizePositiveInteger(amount);
+  const actualAmount = normalizePositiveInteger(totalAmount);
+  const normalizedExpectedCurrency = normalizeString(expectedCurrency);
+  const normalizedCurrency = normalizeString(currency);
   return (
-    normalizeString(currency) === normalizeString(expectedCurrency)
-    && normalizePositiveInteger(totalAmount) != null
-    && normalizePositiveInteger(totalAmount) === normalizePositiveInteger(amount)
+    normalizedExpectedCurrency != null
+    && normalizedCurrency != null
+    && normalizedCurrency === normalizedExpectedCurrency
+    && expectedAmount != null
+    && actualAmount != null
+    && actualAmount === expectedAmount
   );
 }
 
@@ -310,8 +317,8 @@ export function validatePrecheckout(
 
   if (
     !hasExpectedPaymentDetails(
-      tokenRow.amount ?? tokenRow.amount_xtr,
-      tokenRow.currency ?? config.MEDIA_PAYMENT_CURRENCY,
+      tokenRow.amount,
+      tokenRow.currency,
       normalizeString(paymentCurrency),
       normalizeNonNegativeInteger(paymentTotalAmount),
     )

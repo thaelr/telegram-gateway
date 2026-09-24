@@ -152,6 +152,16 @@ function normalizePaymentCurrency(
   return value === "RUB" ? "RUB" : value === "XTR" ? "XTR" : null;
 }
 
+function normalizePaymentKindFromActionKind(
+  value: string | null | undefined,
+): "subscription" | "photo" | "feature" | null {
+  const actionKind = normalizePaymentActionKind(value);
+  if (actionKind === "subscription_payment") return "subscription";
+  if (actionKind === "photo_payment") return "photo";
+  if (actionKind === "feature_payment") return "feature";
+  return null;
+}
+
 function getSourceSortOrder(source: PaymentSource | null | undefined): number {
   return source === "sbp" ? 0 : source === "stars" ? 1 : 2;
 }
@@ -3451,8 +3461,8 @@ export class MediaCommerceDecisionService {
     const existingStatus = normalizeString(loaded.status);
     if (
       !hasExpectedPaymentDetails(
-        loaded.amount ?? loaded.amount_xtr,
-        loaded.currency ?? config.MEDIA_PAYMENT_CURRENCY,
+        loaded.amount,
+        loaded.currency,
         normalizeString(input.payment_currency),
         normalizeNonNegativeInteger(input.payment_total_amount),
       )
@@ -3740,6 +3750,43 @@ export class MediaCommerceDecisionService {
         payment_source: "sbp",
         payment_token: loaded.token,
         reason: "payment_already_canceled",
+      };
+    }
+    if (status === "paid" || status === "fulfilled") {
+      const conflictRecorded = await this.runRepositoryOperation(
+        "payment.externalCanceled.recordStatusConflict",
+        {
+          chat_id: normalizePositiveInteger(loaded.chat_id),
+          payment_kind: normalizePaymentKindFromActionKind(loaded.action_kind),
+          sku: normalizeString(loaded.sku),
+          invoice_status: status,
+        },
+        () => this.repository.recordSbpStatusConflict(externalPaymentId, "CANCELED"),
+      );
+      if (conflictRecorded !== 1) {
+        throw new MediaCommerceOperationError(
+          "SBP payment status conflict was not persisted",
+          "payment.externalCanceled.recordStatusConflict",
+          "sbp_status_conflict_persistence_failed",
+        );
+      }
+      console.error("[media_commerce] sbp_status_conflict", {
+        external_payment_id: externalPaymentId,
+        token: loaded.token,
+        chat_id: loaded.chat_id,
+        local_status: status,
+        provider_status: "CANCELED",
+      });
+      return {
+        ...base,
+        operation: "noop",
+        chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
+        scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
+        turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
+        payment_source: "sbp",
+        payment_kind: normalizePaymentKindFromActionKind(loaded.action_kind),
+        payment_token: loaded.token,
+        reason: "payment_status_conflict",
       };
     }
     if (status !== "invoice_sent") {

@@ -99,9 +99,11 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
   },
 ]);
 
-const { MediaCommerceDecisionService, buildPaymentOption } = await import(
-  "../src/mediaCommerceDecisionService.js"
-);
+const {
+  MediaCommerceDecisionService,
+  MediaCommerceOperationError,
+  buildPaymentOption,
+} = await import("../src/mediaCommerceDecisionService.js");
 const { toPaidInvoiceToken } = await import("../src/mediaCommerce/paymentFlow.js");
 const { buildSubscriptionPaymentInputs } = await import(
   "../src/mediaCommerce/subscriptionFlow.js"
@@ -701,6 +703,10 @@ function createRepository(
     markSbpInvoiceCanceled: 0,
     markSbpInvoiceExpired: 0,
     recordSbpStatusConflict: 0,
+    recordSbpStatusConflictArgs: [] as Array<{
+      externalPaymentId: string;
+      providerStatus: string;
+    }>,
     recordSbpProviderEvent: 0,
     recordSbpProviderEventArgs: [] as unknown[],
     loadCallbackTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
@@ -1083,8 +1089,9 @@ function createRepository(
       calls.markSbpInvoiceExpired += 1;
       return 1;
     },
-    async recordSbpStatusConflict() {
+    async recordSbpStatusConflict(externalPaymentId, providerStatus) {
       calls.recordSbpStatusConflict += 1;
+      calls.recordSbpStatusConflictArgs.push({ externalPaymentId, providerStatus });
       return 1;
     },
     async recordSbpProviderEvent(input) {
@@ -3892,6 +3899,41 @@ test("pre_checkout rejects mismatched payment details", async () => {
   assert.equal(calls.storePrecheckoutResult, 1);
 });
 
+for (const persisted of [
+  { name: "missing amount", field: "amount", incomingCurrency: "XTR" },
+  { name: "missing currency", field: "currency", incomingCurrency: null },
+] as const) {
+  test(`pre_checkout rejects Stars invoice with ${persisted.name} despite legacy fallbacks`, async () => {
+    const { service, calls } = createRepository({
+      async loadInvoiceToken() {
+        const row = buildLoadedInvoiceToken({
+          amount: 10,
+          amount_xtr: 10,
+          currency: "XTR",
+        });
+        return persisted.field === "amount"
+          ? { ...row, amount: null }
+          : { ...row, currency: null };
+      },
+    });
+
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.pre_checkout.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      pre_checkout_query_id: `pcq-${persisted.name}`,
+      payment_currency: persisted.incomingCurrency,
+      payment_total_amount: 10,
+    }));
+
+    assert.equal(result.operation, "answer_precheckout");
+    assert.equal(result.precheckout_ok, false);
+    assert.equal(result.reason, "payment_details_mismatch");
+    assert.equal(calls.storePrecheckoutResult, 1);
+  });
+}
+
 test("pre_checkout rejects non-invoice payload kind", async () => {
   const { service } = createRepository({
     async loadInvoiceToken() {
@@ -4671,6 +4713,42 @@ test("Stars payment_success rejects a mismatched amount", async () => {
   assert.equal(result.reason, "payment_details_mismatch");
   assert.equal(calls.markInvoicePaid, 0);
 });
+
+for (const persisted of [
+  { name: "missing amount", field: "amount", incomingCurrency: "XTR" },
+  { name: "missing currency", field: "currency", incomingCurrency: null },
+] as const) {
+  test(`Stars payment_success rejects invoice with ${persisted.name} despite legacy fallbacks`, async () => {
+    const { service, calls } = createRepository({
+      async loadInvoiceToken(token, chatId) {
+        calls.loadInvoiceTokenArgs.push({ token, chatId });
+        const row = buildLoadedInvoiceToken({
+          amount: 10,
+          amount_xtr: 10,
+          currency: "XTR",
+        });
+        return persisted.field === "amount"
+          ? { ...row, amount: null }
+          : { ...row, currency: null };
+      },
+    });
+
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.success.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      telegram_payment_charge_id: `charge-${persisted.name}`,
+      provider_payment_charge_id: `provider-${persisted.name}`,
+      payment_currency: persisted.incomingCurrency,
+      payment_total_amount: 10,
+    }));
+
+    assert.equal(result.operation, "noop");
+    assert.equal(result.reason, "payment_details_mismatch");
+    assert.equal(calls.markInvoicePaid, 0);
+  });
+}
 
 test("payment_success rejects non-invoice payload kind", async () => {
   const { service, calls } = createRepository({
@@ -7349,6 +7427,153 @@ test("CANCELED webhook stores terminal state and canceled checkout cannot be reo
   });
   await assert.rejects(() => service.resolveSbpCheckout(token));
   assert.equal(calls.createSbpPayment, 0);
+});
+
+test("duplicate CANCELED webhook records provider fact and stays already-canceled", async () => {
+  const externalPaymentId = "sbp-canceled-duplicate";
+  const token = "sbp-canceled-duplicate-token";
+  const { service, calls } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId() {
+      return buildLoadedInvoiceToken({
+        token,
+        requested_token: externalPaymentId,
+        payment_source: "sbp",
+        amount: 199,
+        amount_xtr: null,
+        currency: "RUB",
+        external_payment_id: externalPaymentId,
+        status: "canceled",
+        action_kind: "subscription_payment",
+      });
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "payment.canceled.received",
+    payment_source: "sbp",
+    external_payment_id: externalPaymentId,
+    payment_currency: "RUB",
+    provider_payment_amount: 199,
+  }));
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.reason, "payment_already_canceled");
+  assert.equal(result.payment_token, token);
+  assert.equal(calls.recordSbpProviderEvent, 1);
+  assert.equal(calls.markSbpInvoiceCanceled, 0);
+  assert.equal(calls.createSbpPayment, 0);
+});
+
+for (const status of ["paid", "fulfilled"] as const) {
+  test(`CANCELED webhook after local ${status} records conflict without changing local payment state`, async () => {
+    const externalPaymentId = `sbp-canceled-after-${status}`;
+    const { service, calls } = createRepository({
+      async loadInvoiceTokenByExternalPaymentId() {
+        return buildLoadedInvoiceToken({
+          token: `sbp-${status}-token`,
+          requested_token: externalPaymentId,
+          payment_source: "sbp",
+          amount: 199,
+          amount_xtr: null,
+          currency: "RUB",
+          external_payment_id: externalPaymentId,
+          status,
+          action_kind: "subscription_payment",
+          payload_json: {
+            action_kind: "subscription_payment",
+            idempotency_key: `offer-${status}`,
+            subscription_days: 7,
+            subscription_sku: "payment_plan_7",
+          },
+        });
+      },
+    });
+    const originalConsoleError = console.error;
+    console.error = () => {};
+    try {
+      const result = await service.evaluate(buildRequest({
+        interaction_mode: null,
+        event_type: "payment.canceled.received",
+        payment_source: "sbp",
+        external_payment_id: externalPaymentId,
+        payment_currency: "RUB",
+        provider_payment_amount: 199,
+      }));
+
+      assert.equal(result.operation, "noop");
+      assert.equal(result.reason, "payment_status_conflict");
+      assert.equal(result.payment_token, `sbp-${status}-token`);
+      assert.equal(result.payment_kind, "subscription");
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    assert.equal(calls.recordSbpProviderEvent, 1);
+    assert.deepEqual(calls.recordSbpProviderEventArgs[0], {
+      external_payment_id: externalPaymentId,
+      provider_status: "CANCELED",
+      provider_amount: 199,
+      provider_currency: "RUB",
+      provider_payment_method: null,
+    });
+    assert.equal(calls.markSbpInvoiceCanceled, 0);
+    assert.equal(calls.recordSbpStatusConflict, 1);
+    assert.deepEqual(calls.recordSbpStatusConflictArgs, [
+      { externalPaymentId, providerStatus: "CANCELED" },
+    ]);
+    assert.equal(calls.markInvoicePaid, 0);
+    assert.equal(calls.activateSubscription, 0);
+    assert.equal(calls.createSbpPayment, 0);
+  });
+}
+
+test("CANCELED webhook after paid fails closed when status conflict is not persisted", async () => {
+  const externalPaymentId = "sbp-canceled-after-paid-conflict-zero";
+  const { service, calls } = createRepository({
+    async loadInvoiceTokenByExternalPaymentId() {
+      return buildLoadedInvoiceToken({
+        token: "sbp-paid-conflict-zero-token",
+        requested_token: externalPaymentId,
+        payment_source: "sbp",
+        amount: 199,
+        amount_xtr: null,
+        currency: "RUB",
+        external_payment_id: externalPaymentId,
+        status: "paid",
+        action_kind: "subscription_payment",
+        payload_json: {
+          action_kind: "subscription_payment",
+          idempotency_key: "offer-paid-conflict-zero",
+          subscription_days: 7,
+          subscription_sku: "payment_plan_7",
+        },
+      });
+    },
+    async recordSbpStatusConflict() {
+      calls.recordSbpStatusConflict += 1;
+      return 0;
+    },
+  });
+
+  await assert.rejects(
+    () => service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.canceled.received",
+      payment_source: "sbp",
+      external_payment_id: externalPaymentId,
+      payment_currency: "RUB",
+      provider_payment_amount: 199,
+    })),
+    (error: unknown) => error instanceof MediaCommerceOperationError
+      && error.code === "sbp_status_conflict_persistence_failed",
+  );
+
+  assert.equal(calls.recordSbpProviderEvent, 1);
+  assert.equal(calls.recordSbpStatusConflict, 1);
+  assert.equal(calls.markSbpInvoiceCanceled, 0);
+  assert.equal(calls.markInvoicePaid, 0);
+  assert.equal(calls.activateSubscription, 0);
 });
 
 test("SBP successor is created only for provider retryable cancellations and local expiry", async () => {

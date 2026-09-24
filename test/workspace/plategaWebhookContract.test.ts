@@ -448,6 +448,41 @@ test("router workflow sends raw_update to gateway router decision", async () => 
   assert.match(body, /raw_update:\s*\$json\.raw_update\s*\?\?\s*null/u);
 });
 
+test("router workflow preserves Telegram payment ingress and excludes SBP provider webhook fields", async () => {
+  const workflow = await loadRouterWorkflow();
+  const normalizeNode = Array.isArray(workflow.nodes)
+    ? workflow.nodes.find((entry) => entry?.name === "Normalize tg update")
+    : null;
+  const evaluateNode = Array.isArray(workflow.nodes)
+    ? workflow.nodes.find((entry) => entry?.name === "Evaluate router decision")
+    : null;
+  const normalizeCode = String(normalizeNode?.parameters?.jsCode ?? "");
+  const routerBody = String(evaluateNode?.parameters?.body ?? "");
+
+  assert.match(normalizeCode, /event_type = 'payment\.success\.received'/u);
+  assert.match(normalizeCode, /invoice_payload = msg\.successful_payment\.invoice_payload/u);
+  assert.match(normalizeCode, /telegram_payment_charge_id = msg\.successful_payment\.telegram_payment_charge_id/u);
+  assert.match(normalizeCode, /provider_payment_charge_id = msg\.successful_payment\.provider_payment_charge_id/u);
+  assert.match(normalizeCode, /payment_currency = msg\.successful_payment\.currency/u);
+  assert.match(normalizeCode, /payment_total_amount = msg\.successful_payment\.total_amount/u);
+  assert.match(normalizeCode, /event_type = 'payment\.pre_checkout\.received'/u);
+  assert.match(normalizeCode, /pre_checkout_query_id = query\.id/u);
+  assert.match(normalizeCode, /invoice_payload = query\.invoice_payload/u);
+  assert.match(normalizeCode, /payment_currency = query\.currency/u);
+  assert.match(normalizeCode, /payment_total_amount = query\.total_amount/u);
+
+  assert.match(routerBody, /pre_checkout_query_id:\s*\$json\.pre_checkout_query_id/u);
+  assert.match(routerBody, /invoice_payload:\s*\$json\.invoice_payload/u);
+  assert.match(routerBody, /telegram_payment_charge_id:\s*\$json\.telegram_payment_charge_id/u);
+  assert.match(routerBody, /provider_payment_charge_id:\s*\$json\.provider_payment_charge_id/u);
+  assert.match(routerBody, /payment_currency:\s*\$json\.payment_currency/u);
+  assert.match(routerBody, /payment_total_amount:\s*\$json\.payment_total_amount != null/u);
+  assert.doesNotMatch(routerBody, /provider_payment_amount/u);
+  assert.doesNotMatch(routerBody, /external_payment_id/u);
+  assert.doesNotMatch(routerBody, /payment\.(confirmed|canceled|chargebacked)\.received/u);
+  assert.doesNotMatch(routerBody, /CONFIRMED|CANCELED|CHARGEBACKED/u);
+});
+
 test("current Router metadata names every Media Commerce workflow reference as v4", async () => {
   const workflow = await loadRouterWorkflow();
   const references = (workflow.nodes ?? []).filter(
@@ -602,7 +637,7 @@ test("SBP webhook topology responds once after confirmed fulfillment and bypasse
   );
   assert.match(
     String(cancellationValidation?.parameters?.jsCode ?? ""),
-    /payment_canceled.*payment_already_canceled/u,
+    /payment_canceled.*payment_already_canceled.*payment_status_conflict/u,
   );
   assert.match(
     String(chargebackValidation?.parameters?.jsCode ?? ""),
