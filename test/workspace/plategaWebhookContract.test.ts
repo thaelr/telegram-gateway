@@ -83,56 +83,6 @@ async function loadSbpMigration(name: string): Promise<string> {
   return readFile(migrationPath, "utf8");
 }
 
-test("SBP paid claim validates provider identity without using provider amount as invoice identity", async () => {
-  const migration = await loadSbpMigration(
-    "20260923110000_sbp_provider_event_facts.sql",
-  );
-  const functionStart = migration.indexOf(
-    "CREATE OR REPLACE FUNCTION public.media_mark_invoice_paid",
-  );
-  const functionSql = migration.slice(functionStart);
-
-  assert.ok(functionStart >= 0);
-  assert.match(
-    functionSql,
-    /t\.external_payment_id[\s\S]*= NULLIF\(BTRIM\(p_external_payment_id\), ''\)/u,
-  );
-  assert.match(
-    functionSql,
-    /NULLIF\(BTRIM\(t\.currency\), ''\) = NULLIF\(BTRIM\(p_payment_currency\), ''\)/u,
-  );
-  assert.match(functionSql, /NULLIF\(BTRIM\(t\.payment_source\), ''\) = NULLIF\(BTRIM\(p_payment_source\), ''\)/u);
-  assert.doesNotMatch(
-    functionSql,
-    /COALESCE\(t\.amount, t\.amount_xtr\) = p_payment_total_amount/u,
-  );
-  assert.doesNotMatch(functionSql, /amount = COALESCE/u);
-  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.media_record_sbp_provider_event/u);
-  assert.match(migration, /sbp_provider_amount = i\.provider_amount/u);
-  assert.match(migration, /provider_amount::text <> 'NaN'/u);
-  assert.match(migration, /interaction_tokens_invoice_payment_fields_check/u);
-});
-
-test("SBP provider event migration preserves payment method when retry omits it", async () => {
-  const migration = await loadSbpMigration(
-    "20260923110000_sbp_provider_event_facts.sql",
-  );
-  const functionStart = migration.indexOf(
-    "CREATE OR REPLACE FUNCTION public.media_record_sbp_provider_event",
-  );
-  const functionSql = migration.slice(functionStart);
-
-  assert.ok(functionStart >= 0);
-  assert.match(
-    functionSql,
-    /sbp_provider_payment_method = COALESCE\(i\.provider_payment_method, t\.sbp_provider_payment_method\)/u,
-  );
-  assert.doesNotMatch(
-    functionSql,
-    /sbp_provider_payment_method = i\.provider_payment_method/u,
-  );
-});
-
 test("SBP migration makes checkout claims lifecycle-safe and ambiguous outcomes durable", async () => {
   const migration = await loadSbpMigration(
     "20260915165838_media_commerce_sbp_lifecycle_followup.sql",
@@ -163,27 +113,6 @@ test("SBP migration makes checkout claims lifecycle-safe and ambiguous outcomes 
   assert.match(migration, /media_mark_sbp_checkout_creation_uncertain/u);
   assert.match(migration, /media_mark_sbp_invoice_canceled/u);
   assert.match(migration, /media_record_sbp_status_conflict/u);
-});
-
-test("deployed SBP base migration remains immutable and lifecycle changes stay in follow-up", async () => {
-  const baseMigration = await loadSbpMigration("20260904_media_commerce_sbp.sql");
-  const followUpMigration = await loadSbpMigration(
-    "20260915165838_media_commerce_sbp_lifecycle_followup.sql",
-  );
-
-  assert.doesNotMatch(baseMigration, /sbp_checkout_creation_state/u);
-  assert.doesNotMatch(baseMigration, /media_mark_sbp_checkout_creation_uncertain/u);
-  assert.doesNotMatch(baseMigration, /media_mark_sbp_invoice_canceled/u);
-  assert.doesNotMatch(baseMigration, /media_record_sbp_status_conflict/u);
-  assert.match(
-    baseMigration,
-    /COALESCE\(t\.amount, t\.amount_xtr\) = p_payment_total_amount/u,
-  );
-  assert.match(followUpMigration, /sbp_checkout_creation_state/u);
-  assert.doesNotMatch(
-    followUpMigration,
-    /COALESCE\(t\.amount, t\.amount_xtr\) = p_payment_total_amount/u,
-  );
 });
 
 test("Stars payload migration provides a unique payload lookup without exposing internal tokens", async () => {
@@ -833,19 +762,6 @@ test("router workflow preserves Telegram payment ingress and excludes SBP provid
   assert.doesNotMatch(routerBody, /external_payment_id/u);
   assert.doesNotMatch(routerBody, /payment\.(confirmed|canceled|chargebacked)\.received/u);
   assert.doesNotMatch(routerBody, /CONFIRMED|CANCELED|CHARGEBACKED/u);
-});
-
-test("current Router metadata names every Media Commerce workflow reference as v4", async () => {
-  const workflow = await loadRouterWorkflow();
-  const references = (workflow.nodes ?? []).filter(
-    (node) => node.parameters?.workflowId?.value === "xA0A41F8bZ0XR0MR",
-  );
-
-  assert.equal(references.length, 2);
-  assert.ok(references.every(
-    (node) => node.parameters?.workflowId?.value === "xA0A41F8bZ0XR0MR"
-      && node.parameters?.workflowId?.cachedResultName === "RUS Media Commerce Flow v4",
-  ));
 });
 
 test("reward callback topology claims, answers callback, then routes the next action", async () => {

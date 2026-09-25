@@ -3016,6 +3016,7 @@ test("free scene unlock callback creates current paid options when no free credi
     feature_key: "scene_unlock",
     feature_payment_hint_text: "unlock hint",
   };
+  const storedRows = new Map<string, StoredInvoiceToken>();
   const { service, calls } = createRepository({
     async loadCallbackToken() {
       return buildLoadedCallbackToken({
@@ -3041,6 +3042,87 @@ test("free scene unlock callback creates current paid options when no free credi
         reason: "free_credit_unavailable",
       };
     },
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input) => {
+        const row = input as {
+          token: string;
+          kind: string;
+          chat_id: number;
+          scene_session_id: string | null;
+          turn_no: number | null;
+          scene_turn_no: number | null;
+          payload_json: Record<string, unknown>;
+          action_kind: string;
+          sku: string;
+          payment_source: "stars" | "sbp";
+          amount: number;
+          currency: "XTR" | "RUB";
+          amount_xtr: number;
+          telegram_invoice_payload: string;
+          checkout_url: string | null;
+          external_payment_id: string | null;
+          expires_at: string | null;
+          invoice_title: string;
+          invoice_description: string;
+          invoice_label: string;
+          invoice_button_text: string;
+        };
+        const stored = buildStoredInvoiceToken({
+          token: row.token,
+          kind: row.kind,
+          chat_id: row.chat_id,
+          scene_session_id: row.scene_session_id,
+          turn_no: row.turn_no,
+          scene_turn_no: row.scene_turn_no,
+          payload_json: row.payload_json,
+          action_kind: row.action_kind,
+          sku: row.sku,
+          payment_source: row.payment_source,
+          amount: row.amount,
+          currency: row.currency,
+          amount_xtr: row.amount_xtr,
+          telegram_invoice_payload: row.telegram_invoice_payload,
+          checkout_url: row.checkout_url,
+          external_payment_id: row.external_payment_id,
+          expires_at: row.expires_at,
+          invoice_title: row.invoice_title,
+          invoice_description: row.invoice_description,
+          invoice_label: row.invoice_label,
+          invoice_button_text: row.invoice_button_text,
+          invoice_link: null,
+        });
+        storedRows.set(stored.token, stored);
+        return stored;
+      });
+    },
+    async loadStoredInvoiceTokens(tokens) {
+      return tokens.flatMap((token) => {
+        const row = storedRows.get(token);
+        return row ? [row] : [];
+      });
+    },
+    async storeInvoiceLinks(items) {
+      calls.storeInvoiceLinks += 1;
+      for (const item of Array.isArray(items) ? items : []) {
+        const update = item as {
+          token?: string | null;
+          invoice_link?: string | null;
+          checkout_url?: string | null;
+          external_payment_id?: string | null;
+        };
+        if (!update.token) continue;
+        const existing = storedRows.get(update.token);
+        if (!existing) continue;
+        storedRows.set(update.token, {
+          ...existing,
+          invoice_link: update.invoice_link ?? existing.invoice_link,
+          checkout_url: update.checkout_url ?? existing.checkout_url,
+          external_payment_id:
+            update.external_payment_id ?? existing.external_payment_id,
+        });
+      }
+      return 1;
+    },
   });
 
   const result = await service.evaluate(
@@ -3058,15 +3140,75 @@ test("free scene unlock callback creates current paid options when no free credi
   assert.equal(result.target_message_id, 777);
   assert.equal(result.feature_payment_hint_text, "*unlock hint");
   assert.equal(result.payment_options?.length, 1);
-  assert.equal(result.payment_options?.[0]?.feature_key, "scene_unlock");
-  assert.equal(result.payment_options?.[0]?.amount, 80);
-  assert.equal(result.payment_options?.[0]?.checkout_url, "https://t.me/generated-invoice-1");
+  assert.equal(result.reason, "feature_payment_options_revealed");
+  const [paymentOption] = result.payment_options ?? [];
+  assert.ok(paymentOption);
+  assert.equal(paymentOption?.payment_kind, "feature");
+  assert.equal(paymentOption?.action_kind, "feature_payment");
+  assert.equal(paymentOption?.feature_key, "scene_unlock");
+  assert.equal(paymentOption?.scene_session_id, "scene-1");
+  assert.equal(paymentOption?.amount, 80);
+  assert.equal(paymentOption?.checkout_url, "https://t.me/generated-invoice-1");
+  assert.notEqual(paymentOption?.token, "scene-unlock-entry");
+  assert.notEqual(result.reason, "callback_invalid");
+  assert.notEqual(result.reason, "scene_unlock_plan_missing");
   assert.equal(calls.createStarsInvoice, 1);
   const sceneInvoiceInput = calls.createStarsInvoiceInputs[0] as { payload: string };
   assert.match(sceneInvoiceInput.payload, /^stars_[0-9a-f]{64}$/u);
   assert.ok(Buffer.byteLength(sceneInvoiceInput.payload, "utf8") <= 128);
   assert.notEqual(sceneInvoiceInput.payload, "scene-unlock-entry");
   assert.equal(calls.redeemFreeSceneUnlock, 1);
+  assert.equal(calls.loadMediaContext, 0);
+});
+
+test("expired free scene unlock entry callback is rejected before redeem or payment creation", async () => {
+  const tokenPayload = {
+    action_kind: "free_scene_unlock",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    target_message_id: 777,
+    feature_key: "scene_unlock",
+  };
+  const { service, calls } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "expired-scene-unlock-entry",
+        action_kind: "free_scene_unlock",
+        status: "active",
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        payload_json: tokenPayload,
+      });
+    },
+    async redeemFreeSceneUnlock() {
+      assert.fail("expired scene unlock callback must not redeem credits");
+    },
+  }, {
+    async createStarsInvoice() {
+      assert.fail("expired scene unlock callback must not create Stars invoices");
+    },
+  }, {
+    async createPayment() {
+      assert.fail("expired scene unlock callback must not create SBP payments");
+    },
+  });
+
+  const result = await service.evaluate(
+    buildRequest({
+      interaction_mode: null,
+      event_type: "callback_query.received",
+      callback_data: "expired-scene-unlock-entry",
+      inbound_message_id: 777,
+    }),
+  );
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.callback_valid, false);
+  assert.equal(result.reason, "callback_invalid");
+  assert.equal(calls.redeemFreeSceneUnlock, 0);
+  assert.equal(calls.createStarsInvoice, 0);
+  assert.equal(calls.createSbpPayment, 0);
   assert.equal(calls.loadMediaContext, 0);
 });
 
@@ -5273,6 +5415,30 @@ test("subscription_offer creates missing invoice links internally", async () => 
   assert.equal(calls.storeInvoiceLinks, 6);
   assert.equal(calls.loadStoredInvoiceTokens, 0);
   assert.equal(calls.createStarsInvoice, 6);
+});
+
+test("subscription_offer does not silently succeed when configured invoice attempts are missing", async () => {
+  const { service, calls } = createRepository({
+    async upsertInvoiceTokens() {
+      return [];
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: "subscription_offer",
+    idempotency_key: "telegram:missing-attempts",
+    subscription_offer_reason: "subscription_command",
+    turns_today: 0,
+    turn_limit: 20,
+    turn_limit_reset_text: "00:00 МСК",
+  }));
+
+  assert.notEqual(
+    result.operation,
+    "subscription_offer_ready",
+    "missing invoice attempts must be surfaced instead of producing an empty successful offer",
+  );
+  assert.equal(calls.createStarsInvoice, 0);
 });
 
 test("subscription_offer assigns sticky ab group and stores compact context in payment tokens", async () => {
