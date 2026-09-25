@@ -5441,6 +5441,47 @@ test("subscription_offer does not silently succeed when configured invoice attem
   assert.equal(calls.createStarsInvoice, 0);
 });
 
+test("subscription_offer does not silently succeed without usable payment options", async () => {
+  const { service } = createRepository({
+    async upsertInvoiceTokens(inputs) {
+      return (Array.isArray(inputs) ? inputs : []).map((input) => {
+        const row = input as {
+          token: string;
+          sku: string;
+          amount_xtr: number;
+          payload_json: Record<string, unknown>;
+        };
+        return buildStoredInvoiceToken({
+          token: row.token,
+          sku: row.sku,
+          amount_xtr: row.amount_xtr,
+          payload_json: row.payload_json,
+          status: "paid",
+          scene_session_id: null,
+          turn_no: null,
+          scene_turn_no: null,
+        });
+      });
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: "subscription_offer",
+    idempotency_key: "telegram:no-usable-options",
+    subscription_offer_reason: "subscription_command",
+    turns_today: 0,
+    turn_limit: 20,
+    turn_limit_reset_text: "00:00 МСК",
+  }));
+
+  assert.notEqual(
+    result.operation,
+    "subscription_offer_ready",
+    "non-renderable payment rows must not produce an empty successful offer",
+  );
+  assert.equal(result.reason, "subscription_payment_options_missing");
+});
+
 test("subscription_offer assigns sticky ab group and stores compact context in payment tokens", async () => {
   const [experiment] = loadExperimentConfigsFromEnv({
     EXP_SUBSCRIPTION_OFFER_SEP_JSON: JSON.stringify({

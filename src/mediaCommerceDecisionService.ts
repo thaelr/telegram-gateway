@@ -2336,10 +2336,18 @@ export class MediaCommerceDecisionService {
     const panelEntities =
       rawPanel.panel_entities_json ?? parseJsonArray(input.panel_entities_json);
 
+    const callbackStatus = normalizeString(callbackRow?.status);
+    const isFreeActionReplay =
+      callbackStatus === "fulfilled"
+      && (
+        actionKind === "free_fast_scene_skip"
+        || actionKind === "free_scene_unlock"
+        || actionKind === "free_photo_unlock"
+      );
     const valid =
       Boolean(callbackRow?.found && callbackRow?.token)
       && !isExpired(callbackRow?.expires_at)
-      && normalizeString(callbackRow?.status) === "active";
+      && (callbackStatus === "active" || isFreeActionReplay);
     const answerText = !valid
       ? config.TELEGRAM_UX_COPY_JSON.payment_errors.stale
       : (actionKind === "photo_request" || actionKind === "photo_regen")
@@ -2394,6 +2402,14 @@ export class MediaCommerceDecisionService {
       message_kind: rawPanel.message_kind,
       current_reply_markup: rawPanel.reply_markup,
     } satisfies MediaCommerceDecisionResponse;
+
+    if (!valid || !callbackBase.chat_id) {
+      return {
+        ...callbackBase,
+        operation: "noop",
+        reason: valid ? "chat_id_required" : "callback_invalid",
+      };
+    }
 
     if (
       actionKind === "free_fast_scene_skip"
@@ -2456,14 +2472,6 @@ export class MediaCommerceDecisionService {
         callbackBase,
         payload,
       );
-    }
-
-    if (!valid || !callbackBase.chat_id) {
-      return {
-        ...callbackBase,
-        operation: "noop",
-        reason: valid ? "chat_id_required" : "callback_invalid",
-      };
     }
 
     const loadedContext = await this.repository.loadMediaContext({
@@ -4645,6 +4653,14 @@ export class MediaCommerceDecisionService {
       invoiceInputs,
       "subscription",
     );
+    if (invoiceInputs.length > 0 && upsertedRows.length === 0) {
+      return {
+        ...base,
+        chat_id: chatId,
+        scene_session_id: activeSceneSessionId,
+        reason: "subscription_payment_attempts_missing",
+      };
+    }
     const tokenList = upsertedRows.map((row) => row.token);
     const rows = await this.prepareRenderablePaymentRows(
       upsertedRows,
@@ -4663,6 +4679,17 @@ export class MediaCommerceDecisionService {
           - getSourceSortOrder(normalizePaymentSource(right.payment_source)),
       );
     const subscriptionOfferItems = groupOfferItems(sortedRows);
+    const hasUsableSubscriptionOption = subscriptionOfferItems.some(
+      (item) => item.payment_options.length > 0,
+    );
+    if (invoiceInputs.length > 0 && !hasUsableSubscriptionOption) {
+      return {
+        ...base,
+        chat_id: chatId,
+        scene_session_id: activeSceneSessionId,
+        reason: "subscription_payment_options_missing",
+      };
+    }
     const sceneUnlockEntryTokenRows =
       canOfferSceneUnlock && activeSceneSessionId
         ? await this.buildSceneUnlockEntryTokenRows({
