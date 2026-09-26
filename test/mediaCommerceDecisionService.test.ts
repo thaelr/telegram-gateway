@@ -2514,9 +2514,11 @@ test("invalid callback returns noop without media context query", async () => {
 });
 
 test("feature payment reveal callback returns payment options without creating checkout", async () => {
+  const chatId = 101;
   const invoiceRows = [
     buildStoredInvoiceToken({
       token: "stars-token",
+      chat_id: String(chatId) as unknown as number,
       action_kind: "feature_payment",
       sku: "payment_action_1",
       payment_source: "stars",
@@ -2534,6 +2536,7 @@ test("feature payment reveal callback returns payment options without creating c
     }),
     buildStoredInvoiceToken({
       token: "sbp-token",
+      chat_id: String(chatId) as unknown as number,
       action_kind: "feature_payment",
       sku: "payment_action_1",
       payment_source: "sbp",
@@ -2559,7 +2562,7 @@ test("feature payment reveal callback returns payment options without creating c
         action_kind: "reveal_feature_payment_options",
         payload_json: {
           action_kind: "reveal_feature_payment_options",
-          chat_id: 101,
+          chat_id: chatId,
           scene_session_id: "scene-1",
           target_message_id: null,
           feature_key: "fast_scene_skip",
@@ -2590,6 +2593,7 @@ test("feature payment reveal callback returns payment options without creating c
       event_type: "callback_query.received",
       callback_data: "btn_reveal",
       callback_query_id: "cbq-1",
+      chat_id: chatId,
       inbound_message_id: 777,
       panel_text: "stale fallback text",
       panel_entities_json: [{ type: "code", offset: 0, length: 5 }],
@@ -2623,6 +2627,56 @@ test("feature payment reveal callback returns payment options without creating c
   assert.equal(calls.loadMediaContext, 0);
   assert.equal(calls.createStarsInvoice, 0);
   assert.equal(calls.createSbpPayment, 0);
+});
+
+test("feature payment reveal callback rejects stored invoice owned by another chat", async () => {
+  const chatId = 101;
+  const otherChatId = chatId + 1;
+  const invoiceRows = [
+    buildStoredInvoiceToken({
+      token: "stars-token",
+      chat_id: String(otherChatId) as unknown as number,
+      action_kind: "feature_payment",
+      sku: "payment_action_1",
+      payment_source: "stars",
+      invoice_link: "https://t.me/invoice",
+      scene_session_id: "scene-1",
+      payload_json: {
+        action_kind: "feature_payment",
+        feature_key: "fast_scene_skip",
+        idempotency_key: "feature:202:scene-1:5:3:fast_scene_skip",
+      },
+    }),
+  ];
+  const { service } = createRepository({
+    async loadCallbackToken() {
+      return buildLoadedCallbackToken({
+        token: "btn_reveal",
+        action_kind: "reveal_feature_payment_options",
+        payload_json: {
+          action_kind: "reveal_feature_payment_options",
+          chat_id: chatId,
+          scene_session_id: "scene-1",
+          feature_key: "fast_scene_skip",
+          invoice_tokens: ["stars-token"],
+        },
+      });
+    },
+    async loadStoredInvoiceTokens(tokens) {
+      return invoiceRows.filter((row) => tokens.includes(row.token));
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: "btn_reveal",
+    chat_id: chatId,
+  }));
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.reason, "callback_invalid");
+  assert.equal(result.callback_valid, false);
 });
 
 test("feature payment reveal callback rejects stale scene context", async () => {
@@ -6164,9 +6218,11 @@ test("SBP redirect creates one checkout and reuses it for the same subscription 
 });
 
 test("subscription payment source toggle callback reuses stored offer data", async () => {
+  const chatId = 101;
   const invoiceRows = [
     buildStoredInvoiceToken({
       token: "stars-token",
+      chat_id: String(chatId) as unknown as number,
       action_kind: "subscription_payment",
       sku: "payment_plan_7",
       payment_source: "stars",
@@ -6186,6 +6242,7 @@ test("subscription payment source toggle callback reuses stored offer data", asy
     }),
     buildStoredInvoiceToken({
       token: "sbp-token",
+      chat_id: String(chatId) as unknown as number,
       action_kind: "subscription_payment",
       sku: "payment_plan_7",
       payment_source: "sbp",
@@ -6213,7 +6270,7 @@ test("subscription payment source toggle callback reuses stored offer data", asy
         action_kind: "subscription_payment_source_toggle",
         payload_json: {
           action_kind: "subscription_payment_source_toggle",
-          chat_id: 101,
+          chat_id: chatId,
           selected_payment_source: "stars",
           offer_id: "telegram:offer-7",
           invoice_tokens: ["stars-token", "sbp-token"],
@@ -6240,6 +6297,7 @@ test("subscription payment source toggle callback reuses stored offer data", asy
       callback_data: "btn_toggle_stars",
       callback_query_id: "cbq-1",
       inbound_message_id: 777,
+      chat_id: chatId,
     }),
   );
 

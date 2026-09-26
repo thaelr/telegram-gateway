@@ -2551,7 +2551,7 @@ export class MediaCommerceDecisionService {
       const isPhotoUnlockRow =
         featureKey === "photo_unlock" && actionKind === "photo_payment";
       if (
-        row.chat_id !== base.chat_id
+        normalizePositiveInteger(row.chat_id) !== base.chat_id
         || (!isPhotoUnlockRow && actionKind !== "feature_payment")
         || (!isPhotoUnlockRow && getInvoiceFeatureKey(row) !== featureKey)
         || !purchaseGroup
@@ -2677,7 +2677,7 @@ export class MediaCommerceDecisionService {
     for (const row of orderedRows) {
       const offerId = getInvoicePurchaseId(row);
       if (
-        row.chat_id !== base.chat_id
+        normalizePositiveInteger(row.chat_id) !== base.chat_id
         || normalizeString(row.action_kind) !== "subscription_payment"
         || !offerId
         || !normalizeString(row.sku)
