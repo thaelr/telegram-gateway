@@ -94,7 +94,7 @@ export class MediaCatalogRepository {
         mc.uuid::text AS uuid,
         mc.bucket_name,
         mc.storage_path,
-        mc.sort_order
+        NULL::integer AS sort_order
       FROM public.media_catalog mc
       WHERE LOWER(mc.uuid::text) = LOWER(${uuid}::text)
       LIMIT 1
