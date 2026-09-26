@@ -2276,40 +2276,39 @@ export class MediaCommerceDecisionService {
       ? await this.repository.upsertCallbackTokens(revealTokenRows)
       : 0;
 
-    return {
-      ...base,
-      operation: "feature_offer_required",
-      chat_id: chatId,
-      feature_key: featureKey,
-      invoice_kind: "feature",
-      invoice_sku: featureInvoice?.sku ?? actionPlan.sku,
-      invoice_amount: featureInvoice?.amount_xtr ?? actionPlan.amount_xtr,
-      original_invoice_amount:
-        normalizePositiveInteger(featureInvoice?.payload_json.original_amount_xtr)
-        ?? actionPlan.original_amount_xtr
-        ?? null,
-      promo_key:
-        normalizeString(
-          typeof featureInvoice?.payload_json.promo_key === "string"
-            ? featureInvoice.payload_json.promo_key
-            : null,
-        )
-        ?? actionPlan.promo_key
-        ?? null,
-      invoice_title: featureInvoice?.invoice_title ?? actionPlan.title,
-      invoice_description:
-        featureInvoice?.invoice_description ?? actionPlan.description,
-      invoice_label: featureInvoice?.invoice_label ?? actionPlan.label,
-      invoice_button_text:
-        featureInvoice?.invoice_button_text ?? actionPlan.button_text,
-      invoice_payload_json: featureInvoice?.payload_json ?? null,
-      token_rows: revealTokenRows,
-      token_rows_prepared: revealTokenRows.length,
-      token_rows_inserted: revealTokenRowsInserted,
-      ...buildTopLevelPaymentFields(featureInvoices),
-      reason: "feature_offer_required",
-    };
-  }
+ return {
+  ...base,
+  operation: "feature_offer_required",
+  chat_id: chatId,
+  feature_key: featureKey,
+  invoice_kind: "feature",
+  invoice_sku: featureInvoice?.sku ?? actionPlan.sku,
+  invoice_amount: featureInvoice?.amount_xtr ?? actionPlan.amount_xtr,
+  original_invoice_amount:
+    normalizePositiveInteger(featureInvoice?.payload_json.original_amount_xtr)
+    ?? actionPlan.original_amount_xtr
+    ?? null,
+  promo_key:
+    normalizeString(
+      typeof featureInvoice?.payload_json.promo_key === "string"
+        ? featureInvoice.payload_json.promo_key
+        : null,
+    )
+    ?? actionPlan.promo_key
+    ?? null,
+  invoice_title: featureInvoice?.invoice_title ?? actionPlan.title,
+  invoice_description:
+    featureInvoice?.invoice_description ?? actionPlan.description,
+  invoice_label: featureInvoice?.invoice_label ?? actionPlan.label,
+  invoice_button_text: actionPlan.button_text,
+  invoice_payload_json: featureInvoice?.payload_json ?? null,
+  token_rows: revealTokenRows,
+  token_rows_prepared: revealTokenRows.length,
+  token_rows_inserted: revealTokenRowsInserted,
+  ...buildTopLevelPaymentFields(featureInvoices),
+  reason: "feature_offer_required",
+};
+}
 
   private async evaluateCallback(
     input: MediaCommerceDecisionRequest,
