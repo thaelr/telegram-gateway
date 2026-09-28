@@ -196,7 +196,6 @@ The second workflow handles media and commerce flows. It calls `/v1/media-commer
 
 Business decisions and transactional state remain in the gateway and PostgreSQL, while n8n is used as the orchestration layer and performs external Telegram actions.
 
-[image](https://github.com/user-attachments/assets/2a963e36-decd-482e-a77f-16a9d1836523)
-
+![n8n production workflows](https://github.com/user-attachments/assets/2a963e36-decd-482e-a77f-16a9d1836523)
 
 
