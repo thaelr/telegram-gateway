@@ -36,9 +36,11 @@ const {
 } = await import("../src/mediaCommerce/utils.js");
 const { buildPhotoInvoiceInput } = await import("../src/mediaCommerce/mediaAction.js");
 const {
+  buildFeaturePaymentInputs,
   buildSceneUnlockPaymentInputs,
   buildSubscriptionPaymentInputs,
 } = await import("../src/mediaCommerce/subscriptionFlow.js");
+const { config } = await import("../src/config.js");
 
 const plan = {
   sku: "payment_action_2",
@@ -49,6 +51,18 @@ const plan = {
   label: "label",
   button_text: "button",
 };
+
+function assertShortPaymentTokens(rows: Array<{ payment_source: string; token: string }>): void {
+  const stars = rows.find((row) => row.payment_source === "stars");
+  const sbp = rows.find((row) => row.payment_source === "sbp");
+
+  assert.ok(stars);
+  assert.ok(sbp);
+  assert.match(stars.token, /^pay_[0-9a-f]{32}$/u);
+  assert.match(sbp.token, /^pay_[0-9a-f]{32}:sbp$/u);
+  assert.ok(Buffer.byteLength(stars.token, "utf8") < 64);
+  assert.ok(Buffer.byteLength(sbp.token, "utf8") < 64);
+}
 
 function assertValidTelegramPayload(payload: string | null, internalToken: string): void {
   assert.ok(payload);
@@ -96,6 +110,66 @@ test("scene unlock and subscription Stars rows use bounded hashed payloads", () 
   assert.ok(subscriptionStars);
   assertValidTelegramPayload(sceneStars.telegram_invoice_payload, sceneStars.token);
   assertValidTelegramPayload(subscriptionStars.telegram_invoice_payload, subscriptionStars.token);
+});
+
+test("feature Stars and SBP payment tokens are short, stable, and sku-sensitive", () => {
+  const previousEnabled = config.SBP_ENABLED;
+  config.SBP_ENABLED = true;
+
+  try {
+    const input = {
+      chat_id: 101,
+      scene_session_id: "scene-" + "s".repeat(300),
+      turn_no: 5,
+      scene_turn_no: 3,
+      idempotency_key: "feature-" + "i".repeat(500),
+      requested_action: "fast_scene_skip_purchase",
+      plan: {
+        ...plan,
+        sku: "payment_action_feature",
+        feature_key: "fast_scene_skip",
+        amount_rub: 120,
+      },
+    };
+    const first = buildFeaturePaymentInputs(input);
+    const second = buildFeaturePaymentInputs(input);
+    const otherSku = buildFeaturePaymentInputs({
+      ...input,
+      plan: { ...input.plan, sku: "payment_action_feature_other" },
+    });
+
+    assertShortPaymentTokens(first);
+    assert.deepEqual(second.map((row) => row.token), first.map((row) => row.token));
+    assert.notDeepEqual(otherSku.map((row) => row.token), first.map((row) => row.token));
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+  }
+});
+
+test("scene unlock Stars and SBP payment tokens are short, stable, and scene-sensitive", () => {
+  const previousEnabled = config.SBP_ENABLED;
+  config.SBP_ENABLED = true;
+
+  try {
+    const input = {
+      chat_id: 101,
+      scene_session_id: "scene-" + "s".repeat(300),
+      idempotency_key: "scene-unlock-" + "i".repeat(500),
+      plan: { ...plan, amount_rub: 120 },
+    };
+    const first = buildSceneUnlockPaymentInputs(input);
+    const second = buildSceneUnlockPaymentInputs(input);
+    const otherScene = buildSceneUnlockPaymentInputs({
+      ...input,
+      scene_session_id: "scene-other-" + "s".repeat(300),
+    });
+
+    assertShortPaymentTokens(first);
+    assert.deepEqual(second.map((row) => row.token), first.map((row) => row.token));
+    assert.notDeepEqual(otherScene.map((row) => row.token), first.map((row) => row.token));
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+  }
 });
 
 test("photo Stars rows use the same bounded hashed payload", () => {

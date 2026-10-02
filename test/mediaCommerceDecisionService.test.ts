@@ -1814,9 +1814,12 @@ test("feature_offer returns Stars and lazy SBP options without creating a transa
     assert.equal(result.operation, "feature_offer_required");
     assert.equal(result.payment_options?.length, 2);
     assert.equal(findPaymentOption(result.payment_options, "stars")?.checkout_url, "https://t.me/generated-invoice-1");
-    assert.match(
-      findPaymentOption(result.payment_options, "sbp")?.checkout_url ?? "",
-      /^https:\/\/gateway\.example\/v1\/pay\/sbp\//u,
+    const sbpOption = findPaymentOption(result.payment_options, "sbp");
+    assert.match(sbpOption?.token ?? "", /^pay_[0-9a-f]{32}:sbp$/u);
+    assert.ok(Buffer.byteLength(sbpOption?.token ?? "", "utf8") < 64);
+    assert.equal(
+      sbpOption?.checkout_url,
+      `https://gateway.example/v1/pay/sbp/${encodeURIComponent(sbpOption?.token ?? "")}`,
     );
     assert.equal(findPaymentOption(result.payment_options, "sbp")?.amount, 80);
     assert.equal(findPaymentOption(result.payment_options, "sbp")?.currency, "RUB");
@@ -8957,7 +8960,13 @@ test("scene unlock reveal returns a lazy SBP URL without creating a provider tra
       callback_data: "scene-lazy-token",
     }));
     assert.equal(result.payment_options?.length, 2);
-    assert.match(findPaymentOption(result.payment_options, "sbp")?.checkout_url ?? "", /\/v1\/pay\/sbp\//u);
+    const sbpOption = findPaymentOption(result.payment_options, "sbp");
+    assert.match(sbpOption?.token ?? "", /^pay_[0-9a-f]{32}:sbp$/u);
+    assert.ok(Buffer.byteLength(sbpOption?.token ?? "", "utf8") < 64);
+    assert.equal(
+      sbpOption?.checkout_url,
+      `https://gateway.example/v1/pay/sbp/${encodeURIComponent(sbpOption?.token ?? "")}`,
+    );
     assert.equal(calls.createSbpPayment, 0);
   } finally {
     config.SBP_ENABLED = previousEnabled;

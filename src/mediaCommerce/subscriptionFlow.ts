@@ -196,7 +196,11 @@ export function buildSceneUnlockPaymentInputs(input: {
     sort_order: 0,
     ab_test: input.ab_test ?? null,
   };
-  const baseToken = `${input.idempotency_key}:${input.scene_session_id}:${input.plan.sku}`;
+  const baseToken = buildHashedPaymentToken([
+    input.idempotency_key,
+    input.scene_session_id,
+    input.plan.sku,
+  ]);
 
   return buildPaymentInputs({
     base_token: baseToken,
@@ -251,7 +255,10 @@ export function buildFeaturePaymentInputs(input: {
     promo_key: input.plan.promo_key ?? null,
     ab_test: input.ab_test ?? null,
   };
-  const baseToken = `${input.idempotency_key}:${input.plan.sku}`;
+  const baseToken = buildHashedPaymentToken([
+    input.idempotency_key,
+    input.plan.sku,
+  ]);
 
   return buildPaymentInputs({
     base_token: baseToken,
