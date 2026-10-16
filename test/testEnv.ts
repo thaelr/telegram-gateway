@@ -52,6 +52,12 @@ export const testTelegramUxCopy = {
   character_gallery: {
     heading: "text",
     empty: "text",
+    order: [1],
+    next_first_button: "more characters",
+    next_button: "more",
+    back_button: "back",
+    vote_button: "vote",
+    vote_url: "https://example.com/vote",
     characters: {
       "1": {
         gallery_title: "text",
@@ -101,5 +107,7 @@ export function installTestEnv(): void {
   process.env.PUBLIC_OFFER_URL ??= "https://offer.example/terms";
   process.env.GATEWAY_PUBLIC_URL ??= "https://gateway.example";
   process.env.TG_BOT_TOKEN ??= "test-telegram-bot-token";
+  process.env.MAINTENANCE_MODE ??= "false";
+  process.env.MAINTENANCE_ALLOWED_USER_IDS_JSON ??= "[]";
   process.env.TELEGRAM_UX_COPY_JSON ??= JSON.stringify(testTelegramUxCopy);
 }

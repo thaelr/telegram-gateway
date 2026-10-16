@@ -120,6 +120,23 @@ const {
   loadExperimentConfigsFromEnv,
 } = await import("../src/abTesting.js");
 
+async function withMaintenanceConfig<T>(
+  enabled: boolean,
+  allowedUserIds: number[],
+  execute: () => Promise<T>,
+): Promise<T> {
+  const previousMode = config.MAINTENANCE_MODE;
+  const previousAllowed = config.MAINTENANCE_ALLOWED_USER_IDS_JSON;
+  config.MAINTENANCE_MODE = enabled;
+  config.MAINTENANCE_ALLOWED_USER_IDS_JSON = allowedUserIds;
+  try {
+    return await execute();
+  } finally {
+    config.MAINTENANCE_MODE = previousMode;
+    config.MAINTENANCE_ALLOWED_USER_IDS_JSON = previousAllowed;
+  }
+}
+
 type MockRepository = {
   loadOfferStats: (
     input: unknown,
@@ -3914,6 +3931,46 @@ test("pre_checkout validates token and stores decision", async () => {
   });
 });
 
+test("maintenance rejects Stars pre_checkout before invoice lookup", async () => {
+  await withMaintenanceConfig(true, [], async () => {
+    const { service, calls } = createRepository();
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.pre_checkout.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      pre_checkout_query_id: "pcq-maintenance",
+      payment_currency: "XTR",
+      payment_total_amount: 10,
+    }));
+
+    assert.equal(result.operation, "answer_precheckout");
+    assert.equal(result.precheckout_ok, false);
+    assert.equal(result.precheckout_error, config.MAINTENANCE_TEXT);
+    assert.equal(result.reason, "maintenance_mode");
+    assert.equal(calls.loadInvoiceTokenArgs.length, 0);
+    assert.equal(calls.storePrecheckoutResult, 0);
+  });
+});
+
+test("maintenance whitelist allows Stars pre_checkout", async () => {
+  await withMaintenanceConfig(true, [101], async () => {
+    const { service, calls } = createRepository();
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.pre_checkout.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      pre_checkout_query_id: "pcq-maintenance-allowed",
+      payment_currency: "XTR",
+      payment_total_amount: 10,
+    }));
+
+    assert.equal(result.precheckout_ok, true);
+    assert.equal(calls.loadInvoiceTokenArgs.length, 1);
+  });
+});
+
 test("pre_checkout allows missing expires_at as no expiry", async () => {
   const { service } = createRepository({
     async loadInvoiceToken() {
@@ -4341,7 +4398,8 @@ test("payment_success activates subscription for subscription invoices", async (
   ]);
 });
 
-test("payment.confirmed.received resolves SBP payment by external id without internal token", async () => {
+test("maintenance still processes confirmed SBP payment by external id", async () => {
+  await withMaintenanceConfig(true, [], async () => {
   const { service, calls } = createRepository({
     async loadInvoiceToken() {
       assert.fail("SBP webhook must not load invoice by internal token");
@@ -4409,6 +4467,7 @@ test("payment.confirmed.received resolves SBP payment by external id without int
   assert.deepEqual(calls.loadInvoiceTokenByExternalPaymentIdArgs, ["platega-transaction-1"]);
   assert.equal(calls.markInvoicePaid, 1);
   assert.equal(calls.activateSubscription, 1);
+  });
 });
 
 test("payment.confirmed.received rejects persisted SBP invoice without chat_id", async () => {
@@ -4927,6 +4986,31 @@ test("payment_success returns idempotent noop for fulfilled token", async () => 
   assert.equal(result.operation, "noop");
   assert.equal(result.reason, "payment_already_fulfilled");
   assert.equal(calls.markInvoicePaid, 0);
+});
+
+test("maintenance does not block completed Stars payment processing", async () => {
+  await withMaintenanceConfig(true, [], async () => {
+    const { service, calls } = createRepository({
+      async loadInvoiceToken(token, chatId) {
+        calls.loadInvoiceTokenArgs.push({ token, chatId });
+        return buildLoadedInvoiceToken({ status: "fulfilled" });
+      },
+    });
+
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: null,
+      event_type: "payment.success.received",
+      chat_id: 101,
+      invoice_payload: "inv_payload",
+      telegram_payment_charge_id: "charge-maintenance",
+      provider_payment_charge_id: "provider-maintenance",
+      payment_currency: "XTR",
+      payment_total_amount: 10,
+    }));
+
+    assert.equal(result.reason, "payment_already_fulfilled");
+    assert.equal(calls.loadInvoiceTokenArgs.length, 1);
+  });
 });
 
 test("payment_success rejects invalid active status", async () => {
@@ -6218,6 +6302,34 @@ test("SBP redirect creates one checkout and reuses it for the same subscription 
   assert.equal(repeatedUrl, firstUrl);
   assert.equal(calls.createSbpPayment, 1);
   assert.equal(persistedExpiresAt, providerExpiresAt);
+});
+
+test("maintenance blocks SBP redirect before checkout creation", async () => {
+  await withMaintenanceConfig(true, [], async () => {
+    const token = "maintenance-sbp-token";
+    const { service, calls } = createRepository({
+      async loadStoredInvoiceTokens() {
+        calls.loadStoredInvoiceTokens += 1;
+        return [buildStoredInvoiceToken({
+          token,
+          chat_id: "101" as unknown as number,
+          payment_source: "sbp",
+          amount: 99,
+          currency: "RUB",
+          action_kind: "feature_payment",
+        })];
+      },
+    });
+
+    await assert.rejects(
+      () => service.resolveSbpCheckout(token),
+      (error: unknown) => error instanceof MediaCommerceOperationError
+        && error.code === "maintenance_mode",
+    );
+    assert.equal(calls.loadStoredInvoiceTokens, 1);
+    assert.equal(calls.claimSbpCheckoutCreation, 0);
+    assert.equal(calls.createSbpPayment, 0);
+  });
 });
 
 test("subscription payment source toggle callback reuses stored offer data", async () => {

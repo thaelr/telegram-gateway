@@ -345,6 +345,7 @@ test("public SBP payment endpoint redirects without internal API auth", async (t
 test("public SBP payment endpoint maps expected checkout states without 500", async (t) => {
   const cases = [
     { code: "sbp_invoice_not_found", status: 404, error: "payment_not_found" },
+    { code: "maintenance_mode", status: 503, error: "maintenance" },
     { code: "sbp_invoice_expired", status: 410, error: "payment_unavailable" },
     { code: "sbp_invoice_status_invalid", status: 410, error: "payment_unavailable" },
     { code: "sbp_invoice_kind_invalid", status: 410, error: "payment_unavailable" },

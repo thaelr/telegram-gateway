@@ -59,6 +59,7 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
 ]);
 
 const { AccessDecisionService } = await import("../src/accessDecisionService.js");
+const { config } = await import("../src/config.js");
 
 type RepositoryCall = {
   chatId: number;
@@ -173,6 +174,88 @@ function createService(
     dismissCalls,
   };
 }
+
+async function withMaintenanceConfig<T>(
+  enabled: boolean,
+  allowedUserIds: number[],
+  execute: () => Promise<T>,
+): Promise<T> {
+  const previousMode = config.MAINTENANCE_MODE;
+  const previousAllowed = config.MAINTENANCE_ALLOWED_USER_IDS_JSON;
+  config.MAINTENANCE_MODE = enabled;
+  config.MAINTENANCE_ALLOWED_USER_IDS_JSON = allowedUserIds;
+  try {
+    return await execute();
+  } finally {
+    config.MAINTENANCE_MODE = previousMode;
+    config.MAINTENANCE_ALLOWED_USER_IDS_JSON = previousAllowed;
+  }
+}
+
+test("maintenance blocks messages and callbacks before repository access", async () => {
+  await withMaintenanceConfig(true, [], async () => {
+    for (const request of [
+      buildRequest(),
+      buildRequest({
+        event_type: "callback_query.received",
+        callback_data: "btn_old_payment",
+        callback_query_id: "callback-1",
+        user_message: null,
+      }),
+      buildRequest({ source_user_id: null }),
+    ]) {
+      const { service, calls, dismissCalls } = createService(buildAccessContext(), {
+        throwOnCall: true,
+      });
+      const result = await service.evaluate(request);
+      assert.equal(result.action, "show_maintenance");
+      assert.equal(result.allowed, false);
+      assert.equal(result.text, config.MAINTENANCE_TEXT);
+      assert.equal(result.reason, "maintenance_mode");
+      assert.equal(calls.length, 0);
+      assert.equal(dismissCalls.length, 0);
+    }
+  });
+});
+
+test("maintenance whitelist preserves full user access", async () => {
+  await withMaintenanceConfig(true, [202], async () => {
+    const { service, calls } = createService(buildAccessContext({ turns_today: 1 }));
+    const result = await service.evaluate(buildRequest({ source_user_id: 202 }));
+    assert.equal(result.action, "run_scene_core");
+    assert.equal(result.allowed, true);
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("disabled maintenance preserves ordinary behavior", async () => {
+  await withMaintenanceConfig(false, [], async () => {
+    const { service, calls } = createService(buildAccessContext({ turns_today: 1 }));
+    const result = await service.evaluate(buildRequest({ source_user_id: null }));
+    assert.equal(result.action, "run_scene_core");
+    assert.equal(result.allowed, true);
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("maintenance does not block payment events or chat status updates", async () => {
+  await withMaintenanceConfig(true, [], async () => {
+    for (const eventType of [
+      "payment.pre_checkout.received",
+      "payment.success.received",
+      "my_chat_member.updated",
+    ]) {
+      const { service, calls } = createService(buildAccessContext(), { throwOnCall: true });
+      const result = await service.evaluate(buildRequest({
+        event_type: eventType,
+        source_user_id: null,
+        user_message: null,
+      }));
+      assert.notEqual(result.action, "show_maintenance");
+      assert.equal(calls.length, 0);
+    }
+  });
+});
 
 test("returns show_terms_gate when terms are not accepted", async () => {
   const { service, calls } = createService(
@@ -564,6 +647,7 @@ test("returns character mode screen for character_select callback without reposi
   assert.equal(result.intent, "character_select");
   assert.equal(result.action, "show_character_mode_screen");
   assert.equal(result.character_i, 2);
+  assert.equal(result.gallery_page, 1);
   assert.equal(result.allowed, true);
   assert.equal(typeof result.ux_copy, "object");
   assert.notEqual(result.ux_copy, null);
@@ -583,11 +667,32 @@ test("routes valid structured callbacks by exact contract", async () => {
       intent: "character_select",
       action: "show_character_mode_screen",
       character_i: 3,
+      gallery_page: 1,
+    },
+    {
+      callback_data: "character_select:3:2",
+      intent: "character_select",
+      action: "show_character_mode_screen",
+      character_i: 3,
+      gallery_page: 2,
+    },
+    {
+      callback_data: "character_page:2",
+      intent: "character_page",
+      action: "show_character_gallery",
+      gallery_page: 2,
     },
     {
       callback_data: "character_menu:back",
       intent: "character_back",
       action: "handle_character_back",
+      gallery_page: 1,
+    },
+    {
+      callback_data: "character_menu:back:2",
+      intent: "character_back",
+      action: "handle_character_back",
+      gallery_page: 2,
     },
     {
       callback_data: "newscene_confirm:yes",
@@ -639,6 +744,7 @@ test("routes valid structured callbacks by exact contract", async () => {
     assert.equal(result.allowed, true);
     if ("reward_slot" in entry) assert.equal(result.reward_slot, entry.reward_slot);
     if ("character_i" in entry) assert.equal(result.character_i, entry.character_i);
+    if ("gallery_page" in entry) assert.equal(result.gallery_page, entry.gallery_page);
     assert.equal(calls.length, 0);
   }
 });
@@ -699,6 +805,7 @@ test("returns handle_character_back without repository call", async () => {
 
   assert.equal(result.intent, "character_back");
   assert.equal(result.action, "handle_character_back");
+  assert.equal(result.gallery_page, 1);
   assert.equal(result.allowed, true);
   assert.equal(calls.length, 0);
 });
@@ -863,6 +970,11 @@ test("malformed known structured callbacks are ignored before commerce fallback"
     "scene_mode:fast:2:extra",
     "character_select:abc",
     "character_select:2:extra",
+    "character_select:2:3:extra",
+    "character_page:0",
+    "character_page:abc",
+    "character_menu:back:0",
+    "character_menu:back:2:extra",
     "newscene_confirm:maybe",
     "terms_accept:whatever",
     "reward_claim:1:extra",

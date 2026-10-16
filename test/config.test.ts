@@ -37,12 +37,16 @@ const baselineActionPlans = [{
 const envKeys = [
   "DATABASE_URL",
   "INTERNAL_API_KEY",
+  "PUBLIC_OFFER_URL",
   "TG_BOT_TOKEN",
   "TELEGRAM_UX_COPY_JSON",
   "MEDIA_SUBSCRIPTION_PLANS_JSON",
   "MEDIA_PHOTO_PLANS_JSON",
   "MEDIA_ACTION_PLANS_JSON",
   "MEDIA_PROMOTIONS_JSON",
+  "MAINTENANCE_MODE",
+  "MAINTENANCE_TEXT",
+  "MAINTENANCE_ALLOWED_USER_IDS_JSON",
 ] as const;
 
 let importId = 0;
@@ -55,6 +59,7 @@ async function importConfigWith(overrides: Record<string, string>): Promise<void
 
   process.env.DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/postgres";
   process.env.INTERNAL_API_KEY = "test-internal-key";
+  process.env.PUBLIC_OFFER_URL = "https://offer.example/terms";
   process.env.TG_BOT_TOKEN = "test-telegram-bot-token";
   process.env.TELEGRAM_UX_COPY_JSON = JSON.stringify(testTelegramUxCopy);
   process.env.MEDIA_SUBSCRIPTION_PLANS_JSON = JSON.stringify(baselineSubscriptionPlans);
@@ -148,4 +153,44 @@ test("money JSON config rejects duplicate ids and overlapping promotions", async
   for (const configCase of cases) {
     await assert.rejects(importConfigWith(configCase), /Invalid JSON config/u);
   }
+});
+
+test("character gallery config validates order ids and vote URL", async () => {
+  const invalidGalleries = [
+    { ...testTelegramUxCopy.character_gallery, order: [1, 1] },
+    { ...testTelegramUxCopy.character_gallery, order: [0] },
+    { ...testTelegramUxCopy.character_gallery, order: [1.5] },
+    { ...testTelegramUxCopy.character_gallery, vote_url: "not-a-url" },
+  ];
+
+  for (const characterGallery of invalidGalleries) {
+    await assert.rejects(
+      importConfigWith({
+        TELEGRAM_UX_COPY_JSON: JSON.stringify({
+          ...testTelegramUxCopy,
+          character_gallery: characterGallery,
+        }),
+      }),
+      /Invalid JSON config/u,
+    );
+  }
+});
+
+test("maintenance whitelist accepts only positive numeric Telegram user ids", async () => {
+  await importConfigWith({
+    MAINTENANCE_MODE: "true",
+    MAINTENANCE_ALLOWED_USER_IDS_JSON: "[123,456]",
+  });
+
+  for (const invalid of ["{}", "[0]", "[-1]", "[1.5]", "[9007199254740992]", '["123"]']) {
+    await assert.rejects(
+      importConfigWith({ MAINTENANCE_ALLOWED_USER_IDS_JSON: invalid }),
+      /Invalid JSON config/u,
+    );
+  }
+
+  await assert.rejects(
+    importConfigWith({ MAINTENANCE_MODE: "enabled" }),
+    /Invalid enum value/u,
+  );
 });

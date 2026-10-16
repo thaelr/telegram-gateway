@@ -206,6 +206,9 @@ export function buildApp(options: BuildAppOptions = {}) {
       if (error.code === "sbp_invoice_not_found") {
         return reply.status(404).send({ error: "payment_not_found" });
       }
+      if (error.code === "maintenance_mode") {
+        return reply.status(503).send({ error: "maintenance" });
+      }
       if ([
         "sbp_invoice_kind_invalid",
         "sbp_payment_source_invalid",

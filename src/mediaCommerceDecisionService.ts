@@ -10,6 +10,7 @@ import {
   type SubscriptionOfferExperimentParams,
 } from "./abTesting.js";
 import { config } from "./config.js";
+import { isMaintenanceBlocked } from "./maintenance.js";
 import {
   buildCallbackTokenRow,
   buildMediaAction,
@@ -1681,6 +1682,13 @@ export class MediaCommerceDecisionService {
         "sbp_invoice_not_found",
       );
     }
+    if (isMaintenanceBlocked(row.chat_id)) {
+      throw new MediaCommerceOperationError(
+        "SBP checkout is unavailable during maintenance",
+        "sbpRedirect.validateMaintenanceAccess",
+        "maintenance_mode",
+      );
+    }
     const resolvedRow = await this.resolveSbpSuccessorChain(row, "sbpRedirect");
     const eligibilityError = getSbpCheckoutEligibilityError(resolvedRow);
     if (eligibilityError) {
@@ -3272,6 +3280,15 @@ export class MediaCommerceDecisionService {
         precheckout_ok: false,
         precheckout_error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
         reason: !chatId ? "chat_id_required" : "invoice_payload_required",
+      };
+    }
+    if (isMaintenanceBlocked(chatId)) {
+      return {
+        ...base,
+        operation: "answer_precheckout",
+        precheckout_ok: false,
+        precheckout_error: config.MAINTENANCE_TEXT,
+        reason: "maintenance_mode",
       };
     }
 

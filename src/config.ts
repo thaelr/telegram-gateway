@@ -2,6 +2,8 @@ import { z } from "zod";
 import { loadExperimentConfigsFromEnv } from "./abTesting.js";
 
 const positiveIntegerSchema = z.number().int().positive();
+const telegramUserIdSchema = z.number().int().positive().safe();
+const maintenanceTextDefault = "У нас технические работы, они займут 10-15 минут. Извини за неудобства";
 
 const invoicePlanSchema = z.object({
   sku: z.string().min(1),
@@ -181,6 +183,19 @@ const telegramUxCopySchema = z.object({
   character_gallery: z.object({
     heading: textSchema,
     empty: textSchema,
+    order: z.array(positiveIntegerSchema).superRefine((value, ctx) => {
+      if (new Set(value).size !== value.length) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Character gallery order ids must be unique",
+        });
+      }
+    }),
+    next_first_button: textSchema,
+    next_button: textSchema,
+    back_button: textSchema,
+    vote_button: textSchema,
+    vote_url: z.string().url(),
     characters: z.record(z.string().min(1), z.object({
       gallery_title: textSchema,
       gallery_body: textSchema,
@@ -276,6 +291,17 @@ const rawEnvSchema = z.object({
   SBP_API_SECRET: z.string().trim().optional(),
   SBP_RETURN_URL: z.string().trim().optional(),
   SBP_FAILED_URL: z.string().trim().optional(),
+  MAINTENANCE_MODE: z
+    .string()
+    .default("false")
+    .transform((value) => value.trim().toLowerCase())
+    .pipe(z.enum(["true", "false"]))
+    .transform((value) => value === "true"),
+  MAINTENANCE_TEXT: z.string().min(1).default(maintenanceTextDefault),
+  MAINTENANCE_ALLOWED_USER_IDS_JSON: z
+    .string()
+    .default("[]")
+    .transform((raw) => parseJsonEnv(raw, z.array(telegramUserIdSchema))),
   TURN_LIMIT: z.coerce.number().int().positive().default(20),
   BUSINESS_TIME_ZONE: z.string().min(1).default("Europe/Moscow"),
   TURN_LIMIT_RESET_TEXT: z.string().min(1).default("00:00 МСК"),

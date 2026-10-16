@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { ChatAccessRepository } from "./chatAccessRepository.js";
 import { prependFreeBalances } from "./freeBalanceFormatter.js";
+import { isMaintenanceBlocked } from "./maintenance.js";
 import { normalizeNonNegativeInteger, normalizePositiveInteger } from "./numeric.js";
 import type {
   AccessContext,
@@ -30,6 +31,7 @@ type RouterClassification = {
   intent: RouterIntent;
   action: RouterAction;
   character_i?: number | null;
+  gallery_page?: number | null;
   scene_mode?: string | null;
   reward_slot?: number | null;
   post_accept_intent?: "start" | "menu" | "subscription" | "paysupport" | null;
@@ -50,6 +52,7 @@ function isAllowedClassification(classification: RouterClassification): boolean 
     case "terms_accept":
     case "reward_claim":
     case "newscene_confirm":
+    case "character_page":
     case "character_select":
     case "character_back":
     case "scene_mode":
@@ -109,6 +112,27 @@ function requiresTermsGate(classification: RouterClassification): boolean {
 
 function requiresSceneAccessCheck(classification: RouterClassification): boolean {
   return classification.intent === "scene_message";
+}
+
+function isMaintenanceUserAction(
+  input: AccessDecisionRequest,
+  classification: RouterClassification,
+): boolean {
+  const eventType = String(input.event_type ?? "").trim();
+  if (
+    eventType === "my_chat_member.updated"
+    || eventType === "payment.pre_checkout.received"
+    || eventType === "payment.success.received"
+    || eventType === "payment.confirmed.received"
+    || eventType === "payment.canceled.received"
+    || eventType === "payment.chargebacked.received"
+  ) {
+    return false;
+  }
+
+  return classification.domain === "command"
+    || classification.domain === "scene"
+    || classification.domain === "interaction";
 }
 
 function shouldDismissSubscriptionOffer(classification: RouterClassification): boolean {
@@ -179,22 +203,44 @@ function parseStructuredCallback(
       };
     }
     case "character_select": {
-      if (parts.length !== 2) return ignoreStructuredCallback();
+      if (parts.length !== 2 && parts.length !== 3) return ignoreStructuredCallback();
       const characterId = normalizePositiveInteger(parts[1]);
-      if (characterId == null) return ignoreStructuredCallback();
+      const galleryPage = parts.length === 3
+        ? normalizePositiveInteger(parts[2])
+        : 1;
+      if (characterId == null || galleryPage == null) return ignoreStructuredCallback();
       return {
         domain: "interaction",
         intent: "character_select",
         action: "show_character_mode_screen",
         character_i: characterId,
+        gallery_page: galleryPage,
+      };
+    }
+    case "character_page": {
+      if (parts.length !== 2) return ignoreStructuredCallback();
+      const galleryPage = normalizePositiveInteger(parts[1]);
+      if (galleryPage == null) return ignoreStructuredCallback();
+      return {
+        domain: "interaction",
+        intent: "character_page",
+        action: "show_character_gallery",
+        gallery_page: galleryPage,
       };
     }
     case "character_menu": {
-      if (parts.length !== 2 || parts[1] !== "back") return ignoreStructuredCallback();
+      if ((parts.length !== 2 && parts.length !== 3) || parts[1] !== "back") {
+        return ignoreStructuredCallback();
+      }
+      const galleryPage = parts.length === 3
+        ? normalizePositiveInteger(parts[2])
+        : 1;
+      if (galleryPage == null) return ignoreStructuredCallback();
       return {
         domain: "interaction",
         intent: "character_back",
         action: "handle_character_back",
+        gallery_page: galleryPage,
       };
     }
     case "scene_mode": {
@@ -443,12 +489,27 @@ export class AccessDecisionService {
       reachability_status: input.reachability_status ?? null,
       telegram_chat_status: input.telegram_chat_status ?? null,
       character_i: effectiveCharacterId,
+      gallery_page: classification.gallery_page ?? null,
       scene_mode: effectiveSceneMode,
       reward_slot: classification.reward_slot ?? null,
       post_accept_intent: classification.post_accept_intent ?? null,
       newscene_action: classification.newscene_action ?? null,
       ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
+
+    if (
+      isMaintenanceUserAction(input, classification)
+      && isMaintenanceBlocked(input.source_user_id)
+    ) {
+      return {
+        ...passthrough,
+        decision: "noop",
+        action: "show_maintenance",
+        allowed: false,
+        text: config.MAINTENANCE_TEXT,
+        reason: "maintenance_mode",
+      };
+    }
 
     if (!requiresAccessContext(classification)) {
       return attachDismissedSubscriptionOffer({

@@ -21,6 +21,7 @@ export type RouterIntent =
   | "terms_accept"
   | "reward_claim"
   | "newscene_confirm"
+  | "character_page"
   | "character_select"
   | "character_back"
   | "scene_mode"
@@ -40,6 +41,7 @@ export type RouterAction =
   | "show_subscription_offer"
   | "show_terms_gate"
   | "send_paysupport_message"
+  | "show_maintenance"
   | "handle_terms_accept"
   | "handle_reward_claim"
   | "handle_newscene_confirm"
@@ -62,6 +64,7 @@ export interface AccessDecisionRequest {
   raw_update?: unknown | null;
   inbound_message_id?: number | null;
   character_i?: number | null;
+  gallery_page?: number | null;
   scene_mode?: string | null;
   callback_data?: string | null;
   callback_query_id?: string | null;
@@ -132,6 +135,7 @@ export interface AccessDecisionResponse {
   parse_mode?: "HTML" | null;
   disable_web_page_preview?: boolean;
   character_i?: number | null;
+  gallery_page?: number | null;
   scene_mode?: string | null;
   selected_character_i?: number | null;
   active_menu_screen?: string | null;
