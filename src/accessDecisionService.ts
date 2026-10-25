@@ -22,6 +22,8 @@ const ACCESS_CONTEXT_INTENTS = new Set<RouterIntent>([
   "menu",
   "subscription",
   "paysupport",
+  "newscene_confirm",
+  "character_select",
   "scene_mode",
   "scene_message",
 ]);
@@ -36,6 +38,8 @@ type RouterClassification = {
   reward_slot?: number | null;
   post_accept_intent?: "start" | "menu" | "subscription" | "paysupport" | null;
   newscene_action?: "yes" | "no" | null;
+  expected_scene_session_id?: string | null;
+  newscene_callback_bound?: boolean;
 };
 
 type AccessRepository = Pick<
@@ -192,14 +196,38 @@ function parseStructuredCallback(
       };
     }
     case "newscene_confirm": {
-      if (parts.length !== 2 || !["yes", "no"].includes(parts[1] ?? "")) {
+      if (
+        (parts.length !== 2 && parts.length !== 4)
+        || !["yes", "no"].includes(parts[1] ?? "")
+      ) {
         return ignoreStructuredCallback();
       }
+
+      const characterId = parts.length === 4
+        ? normalizePositiveInteger(parts[2])
+        : null;
+      const expectedSceneSessionId = parts.length === 4
+        ? String(parts[3] ?? "").trim()
+        : null;
+      if (
+        parts.length === 4
+        && (
+          characterId == null
+          || !expectedSceneSessionId
+          || expectedSceneSessionId.includes(":")
+        )
+      ) {
+        return ignoreStructuredCallback();
+      }
+
       return {
         domain: "interaction",
         intent: "newscene_confirm",
         action: "handle_newscene_confirm",
         newscene_action: parts[1] as "yes" | "no",
+        character_i: characterId,
+        expected_scene_session_id: expectedSceneSessionId,
+        newscene_callback_bound: parts.length === 4,
       };
     }
     case "character_select": {
@@ -448,7 +476,7 @@ export class AccessDecisionService {
         ? idempotencyKey
         : null;
       const dismissedMessageId = await this.repository.popActiveSubscriptionOffer(
-        input.chat_id,
+        response.chat_id,
         currentOfferId,
       );
 
@@ -465,6 +493,7 @@ export class AccessDecisionService {
       intent: classification.intent,
       action: classification.action,
       chat_id: input.chat_id,
+      telegram_chat_id: input.chat_id,
       source,
       update_id: input.update_id ?? null,
       idempotency_key: idempotencyKey,
@@ -494,6 +523,8 @@ export class AccessDecisionService {
       reward_slot: classification.reward_slot ?? null,
       post_accept_intent: classification.post_accept_intent ?? null,
       newscene_action: classification.newscene_action ?? null,
+      expected_scene_session_id:
+        classification.expected_scene_session_id ?? null,
       ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
 
@@ -525,10 +556,20 @@ export class AccessDecisionService {
       source,
       input.source_user_id ?? null,
       config.BUSINESS_TIME_ZONE,
+      effectiveCharacterId,
+      classification.intent === "character_select"
+        || classification.intent === "scene_mode",
     );
 
+    const resolvedPassthrough = {
+      ...passthrough,
+      chat_id: accessContext.chat_id,
+      telegram_chat_id: accessContext.telegram_chat_id,
+      character_i: effectiveCharacterId ?? accessContext.character_i,
+    } as const;
+
     const hasSceneSession = Boolean(accessContext.active_scene_session_id);
-    const hasStartedScene = accessContext.scene_turn_no >= 0;
+    const hasStartedScene = accessContext.active_scene_exists;
     const contextFields = {
       terms_accepted_at: accessContext.terms_accepted_at,
       subscription_active: accessContext.subscription_active,
@@ -536,8 +577,9 @@ export class AccessDecisionService {
       subscription_until: accessContext.subscription_until,
       scene_session_id: hasSceneSession ? accessContext.active_scene_session_id : null,
       active_scene_session_id: accessContext.active_scene_session_id,
+      has_started_scene: hasStartedScene,
       scene_turn_no:
-        hasSceneSession && hasStartedScene
+        hasSceneSession && accessContext.scene_turn_no >= 0
           ? accessContext.scene_turn_no
           : null,
       scene_access_active: accessContext.scene_access_active,
@@ -550,6 +592,16 @@ export class AccessDecisionService {
       selected_character_i: accessContext.selected_character_i,
       active_menu_screen: accessContext.active_menu_screen,
       active_menu_message_id: accessContext.active_menu_message_id,
+      newscene_callback_valid: classification.intent === "newscene_confirm"
+        ? classification.newscene_callback_bound === true
+          && effectiveCharacterId != null
+          && effectiveCharacterId === accessContext.character_i
+          && effectiveCharacterId === accessContext.selected_character_i
+          && accessContext.active_scene_exists
+          && classification.expected_scene_session_id != null
+          && classification.expected_scene_session_id
+            === accessContext.active_scene_session_id
+        : null,
     } as const;
 
     if (
@@ -557,7 +609,7 @@ export class AccessDecisionService {
       accessContext.terms_accepted_at == null
     ) {
       return attachDismissedSubscriptionOffer({
-        ...passthrough,
+        ...resolvedPassthrough,
         ...contextFields,
         decision: "show_terms_gate",
         action: "show_terms_gate",
@@ -570,7 +622,7 @@ export class AccessDecisionService {
 
     if (classification.intent === "scene_start") {
       return attachDismissedSubscriptionOffer({
-        ...passthrough,
+        ...resolvedPassthrough,
         ...contextFields,
         decision: "noop",
         action: hasStartedScene ? "show_newscene_confirm" : "show_character_gallery",
@@ -581,19 +633,19 @@ export class AccessDecisionService {
 
     if (classification.intent === "menu") {
       return attachDismissedSubscriptionOffer({
-        ...passthrough,
+        ...resolvedPassthrough,
         ...contextFields,
         decision: "noop",
-        action: hasStartedScene ? "show_newscene_confirm" : "show_character_gallery",
+        action: "show_character_gallery",
         allowed: true,
-        reason: hasStartedScene ? "menu_requires_scene_reset" : "menu",
+        reason: "menu",
       });
     }
 
     if (classification.intent === "subscription") {
       if (accessContext.subscription_active) {
         return attachDismissedSubscriptionOffer({
-          ...passthrough,
+          ...resolvedPassthrough,
           ...contextFields,
           decision: "show_subscription_status",
           action: "show_subscription_status",
@@ -606,7 +658,7 @@ export class AccessDecisionService {
       }
 
       return attachDismissedSubscriptionOffer({
-        ...passthrough,
+        ...resolvedPassthrough,
         ...contextFields,
         decision: "show_subscription_offer",
         action: "show_subscription_offer",
@@ -618,7 +670,7 @@ export class AccessDecisionService {
 
     if (classification.intent === "paysupport") {
       return attachDismissedSubscriptionOffer({
-        ...passthrough,
+        ...resolvedPassthrough,
         ...contextFields,
         decision: "noop",
         action: "send_paysupport_message",
@@ -637,7 +689,7 @@ export class AccessDecisionService {
         accessContext.turns_today < config.TURN_LIMIT
       ) {
         return attachDismissedSubscriptionOffer({
-          ...passthrough,
+          ...resolvedPassthrough,
           ...contextFields,
           decision: "allow_scene",
           action: "run_scene_core",
@@ -651,7 +703,7 @@ export class AccessDecisionService {
       }
 
       return attachDismissedSubscriptionOffer({
-        ...passthrough,
+        ...resolvedPassthrough,
         ...contextFields,
         decision: "show_subscription_offer",
         action: "show_subscription_offer",
@@ -662,7 +714,7 @@ export class AccessDecisionService {
     }
 
     return attachDismissedSubscriptionOffer({
-      ...passthrough,
+      ...resolvedPassthrough,
       ...contextFields,
       decision: "noop",
       allowed: true,

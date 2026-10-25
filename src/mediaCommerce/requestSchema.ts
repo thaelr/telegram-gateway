@@ -8,6 +8,8 @@ export const mediaCommerceRequestSchema = z.object({
   interaction_mode: z.string().trim().nullable().optional(),
   event_type: z.string().trim().nullable().optional(),
   chat_id: positiveIntegerInputSchema.nullable().optional(),
+  telegram_chat_id: positiveIntegerInputSchema.nullable().optional(),
+  source_user_id: positiveIntegerInputSchema.nullable().optional(),
   scene_session_id: z.string().trim().nullable().optional(),
   active_scene_session_id: z.string().trim().nullable().optional(),
   turn_no: nonNegativeIntegerInputSchema.nullable().optional(),

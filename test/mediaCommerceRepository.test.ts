@@ -600,7 +600,7 @@ test("releaseSbpCheckoutCreation delegates to media_release_sbp_checkout_creatio
   assert.match(calls[0]?.sql ?? "", /public\.media_release_sbp_checkout_creation/u);
 });
 
-test("loadFreeCredits reads balances from chat_state", async () => {
+test("loadFreeCredits reads account balances through chat_state ownership", async () => {
   const { query, calls } = createTaggedQueryStub([[
     {
       chat_id: 101,
@@ -618,6 +618,8 @@ test("loadFreeCredits reads balances from chat_state", async () => {
   assert.equal(result?.free_fast_scene_skips, 2);
   assert.equal(result?.free_scene_unlocks, 1);
   assert.match(calls[0]?.sql ?? "", /FROM public\.chat_state cs/u);
+  assert.match(calls[0]?.sql ?? "", /JOIN public\.users account/u);
+  assert.match(calls[0]?.sql ?? "", /account\.entitlements_jsonb/u);
 });
 
 test("redeemFreeFastSceneSkip delegates to media_redeem_free_fast_scene_skip", async () => {
@@ -880,7 +882,7 @@ test("active subscription offer pointer delegates compare-and-pop and clear RPCs
   assert.deepEqual(calls[1]?.values, [101, "telegram:1"]);
 });
 
-test("loadAbTestAssignment reads one assignment from chat_state json", async () => {
+test("loadAbTestAssignment reads one account-level assignment", async () => {
   const assignment = {
     variant: "B",
     assigned_at: "2026-09-10T10:00:00.000Z",
@@ -894,7 +896,8 @@ test("loadAbTestAssignment reads one assignment from chat_state json", async () 
   );
 
   assert.deepEqual(result, assignment);
-  assert.match(calls[0]?.sql ?? "", /cs\.ab_tests_json ->/u);
+  assert.match(calls[0]?.sql ?? "", /account\.ab_tests_json ->/u);
+  assert.match(calls[0]?.sql ?? "", /JOIN public\.users account/u);
   assert.match(calls[0]?.sql ?? "", /WHERE cs\.chat_id =/u);
 });
 
@@ -916,7 +919,8 @@ test("storeAbTestAssignment stores assignment only when the run key is absent", 
   assert.match(calls[0]?.sql ?? "", /jsonb_set/u);
   assert.match(calls[0]?.sql ?? "", /NOT \(/u);
   assert.match(calls[0]?.sql ?? "", /\? \$\d+::text/u);
-  assertJsonbParameter(calls[0]?.values[1], assignment);
+  assert.match(calls[0]?.sql ?? "", /UPDATE public\.users account/u);
+  assertJsonbParameter(calls[0]?.values[2], assignment);
 });
 
 test("recordAbTestDelivered writes minimal internal event into chat_messages", async () => {
@@ -1651,6 +1655,8 @@ test("loadSceneAccessStatus reads active scene and pass state", async () => {
   assert.equal(result?.scene_access_active, true);
   assert.equal(result?.scene_is_active, true);
   assert.match(calls[0]?.sql ?? "", /FROM public\.chat_state cs/u);
+  assert.match(calls[0]?.sql ?? "", /JOIN public\.users account/u);
+  assert.match(calls[0]?.sql ?? "", /account\.subscription_until/u);
 });
 
 test("required media RPCs reject zero-row contract violations", async () => {

@@ -22,6 +22,7 @@ export function buildBaseResponse(
     interaction_mode: normalizeString(input.interaction_mode),
     event_type: normalizeString(input.event_type),
     chat_id: normalizePositiveInteger(input.chat_id),
+    telegram_chat_id: normalizePositiveInteger(input.telegram_chat_id),
     scene_session_id: normalizeString(input.scene_session_id),
     active_scene_session_id: normalizeString(input.active_scene_session_id),
     turn_no: normalizeNonNegativeInteger(input.turn_no),

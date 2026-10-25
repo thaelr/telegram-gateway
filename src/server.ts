@@ -50,6 +50,8 @@ const routerRequestSchema = z.object({
 });
 
 type RouterDecisionEvaluator = Pick<AccessDecisionService, "evaluate">;
+type TelegramAccountLinker = Pick<ChatAccessRepository, "ensureTelegramAccountLink">;
+type TelegramDeliveryResolver = Pick<ChatAccessRepository, "resolveTelegramChatId">;
 type MediaCommerceDecisionEvaluator = Pick<MediaCommerceDecisionService, "evaluate">;
 type SbpCheckoutResolver = Pick<MediaCommerceDecisionService, "resolveSbpCheckout">;
 type RewardClaimer = Pick<
@@ -59,6 +61,8 @@ type RewardClaimer = Pick<
 
 type BuildAppOptions = {
   accessDecisionService?: RouterDecisionEvaluator;
+  telegramAccountLinker?: TelegramAccountLinker;
+  telegramDeliveryResolver?: TelegramDeliveryResolver;
   mediaCommerceDecisionService?: MediaCommerceDecisionEvaluator;
   sbpCheckoutService?: SbpCheckoutResolver;
   rewardService?: RewardClaimer;
@@ -84,8 +88,13 @@ export function buildApp(options: BuildAppOptions = {}) {
     logger: options.logger ?? true,
   });
 
+  const defaultChatAccessRepository = new ChatAccessRepository();
   const accessDecisionService = options.accessDecisionService
-    ?? new AccessDecisionService(new ChatAccessRepository());
+    ?? new AccessDecisionService(defaultChatAccessRepository);
+  const telegramAccountLinker = options.telegramAccountLinker
+    ?? defaultChatAccessRepository;
+  const telegramDeliveryResolver = options.telegramDeliveryResolver
+    ?? defaultChatAccessRepository;
   const defaultMediaCommerceService =
     options.mediaCommerceDecisionService == null || options.sbpCheckoutService == null
       ? new MediaCommerceDecisionService(new MediaCommerceRepository())
@@ -150,11 +159,28 @@ export function buildApp(options: BuildAppOptions = {}) {
     }
 
     try {
+      const telegramChatId = parsed.data.telegram_chat_id ?? parsed.data.chat_id;
+      if (telegramChatId != null && parsed.data.source_user_id != null) {
+        await telegramAccountLinker.ensureTelegramAccountLink(
+          telegramChatId,
+          parsed.data.source_user_id,
+        );
+      }
+
       const result = await runWithRequestContext(
         { requestId: request.id },
         () => mediaCommerceDecisionService.evaluate(parsed.data),
       );
-      return reply.send(result);
+      const resolvedTelegramChatId = result.telegram_chat_id
+        ?? parsed.data.telegram_chat_id
+        ?? (result.chat_id == null
+          || parsed.data.event_type !== "payment.confirmed.received"
+          ? null
+          : await telegramDeliveryResolver.resolveTelegramChatId(result.chat_id));
+      return reply.send({
+        ...result,
+        telegram_chat_id: resolvedTelegramChatId,
+      });
     } catch (error) {
       const operation = error instanceof MediaCommerceOperationError
         ? error.operation
@@ -252,6 +278,13 @@ export function buildApp(options: BuildAppOptions = {}) {
     }
 
     try {
+      if (parsed.data.source_user_id != null) {
+        await telegramAccountLinker.ensureTelegramAccountLink(
+          parsed.data.chat_id,
+          parsed.data.source_user_id,
+        );
+      }
+
       const result = await rewardService.claimConfiguredSlot({
         chatId: parsed.data.chat_id,
         slot: parsed.data.reward_slot,

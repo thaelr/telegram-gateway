@@ -136,6 +136,7 @@ export interface MediaCommerceDecisionResponse {
   interaction_mode: string | null;
   event_type: string | null;
   chat_id: number | null;
+  telegram_chat_id?: number | null;
   scene_session_id?: string | null;
   turn_no?: number | null;
   scene_turn_no?: number | null;

@@ -59,3 +59,18 @@ test("media commerce request schema preserves nullable and optional numeric fiel
     assert.equal(parsed.data.scene_turn_no, null);
   }
 });
+
+test("media commerce request schema keeps internal and Telegram chat ids separate", () => {
+  const parsed = mediaCommerceRequestSchema.safeParse({
+    chat_id: "8000000000000123",
+    telegram_chat_id: "123",
+    source_user_id: "456",
+  });
+
+  assert.equal(parsed.success, true);
+  if (parsed.success) {
+    assert.equal(parsed.data.chat_id, 8000000000000123);
+    assert.equal(parsed.data.telegram_chat_id, 123);
+    assert.equal(parsed.data.source_user_id, 456);
+  }
+});

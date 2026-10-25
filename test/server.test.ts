@@ -127,6 +127,89 @@ test("media-commerce endpoint accepts valid internal api key and coerces request
   assert.equal(response.json().chat_id, 123);
 });
 
+test("media-commerce endpoint links a known Telegram identity before processing", async (t) => {
+  const calls: string[] = [];
+  const app = buildApp({
+    logger: false,
+    telegramAccountLinker: {
+      async ensureTelegramAccountLink(chatId, sourceUserId) {
+        calls.push(`link:${chatId}:${sourceUserId}`);
+        return "u00000ab";
+      },
+    },
+    mediaCommerceDecisionService: {
+      async evaluate(input) {
+        calls.push("evaluate");
+        return {
+          route: "noop",
+          operation: "noop",
+          interaction_mode: input.interaction_mode ?? null,
+          event_type: input.event_type ?? null,
+          chat_id: input.chat_id ?? null,
+        };
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/media-commerce-decision",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: {
+      chat_id: "8000000000000123",
+      telegram_chat_id: "123",
+      source_user_id: "456",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(calls, ["link:123:456", "evaluate"]);
+  assert.equal(response.json().chat_id, 8000000000000123);
+});
+
+test("media-commerce endpoint restores Telegram delivery for an async payment", async (t) => {
+  const internalChatId = 8_000_000_000_000_123;
+  const calls: string[] = [];
+  const app = buildApp({
+    logger: false,
+    telegramDeliveryResolver: {
+      async resolveTelegramChatId(chatId) {
+        calls.push(`resolve:${chatId}`);
+        return 123;
+      },
+    },
+    mediaCommerceDecisionService: {
+      async evaluate(input) {
+        calls.push("evaluate");
+        return {
+          route: "noop",
+          operation: "edit_photo",
+          interaction_mode: input.interaction_mode ?? null,
+          event_type: input.event_type ?? null,
+          chat_id: internalChatId,
+        };
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/media-commerce-decision",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: {
+      event_type: "payment.confirmed.received",
+      external_payment_id: "sbp-1",
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(calls, ["evaluate", `resolve:${internalChatId}`]);
+  assert.equal(response.json().chat_id, internalChatId);
+  assert.equal(response.json().telegram_chat_id, 123);
+});
+
 test("media-commerce endpoint returns 400 invalid_request for invalid body", async (t) => {
   let called = false;
   const app = buildApp({
@@ -582,8 +665,15 @@ test("reward endpoints reject unsafe numeric request values", async (t) => {
 });
 
 test("reward slot endpoint returns claim UI result", async (t) => {
+  const links: Array<[number, number]> = [];
   const app = buildApp({
     logger: false,
+    telegramAccountLinker: {
+      async ensureTelegramAccountLink(chatId, sourceUserId) {
+        links.push([chatId, sourceUserId]);
+        return "u00000ab";
+      },
+    },
     rewardService: {
       async claimConfiguredSlot(input) {
         return {
@@ -620,10 +710,16 @@ test("reward slot endpoint returns claim UI result", async (t) => {
     method: "POST",
     url: "/v1/rewards/claim-slot",
     headers: { "x-internal-api-key": "test-internal-key" },
-    payload: { chat_id: "42", reward_slot: "1", inbound_message_id: "100" },
+    payload: {
+      chat_id: "42",
+      source_user_id: "84",
+      reward_slot: "1",
+      inbound_message_id: "100",
+    },
   });
 
   assert.equal(response.statusCode, 200);
+  assert.deepEqual(links, [[42, 84]]);
   assert.equal(response.json().status, "claimed");
   assert.equal(response.json().next_action, "show_character_gallery");
 });

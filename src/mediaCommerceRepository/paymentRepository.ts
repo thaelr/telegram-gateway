@@ -153,13 +153,18 @@ export class MediaPaymentRepository {
         cs.chat_id,
         COALESCE(${input.scene_session_id}::text, cs.active_scene_session_id) AS scene_session_id,
         cs.active_scene_session_id,
-        (cs.subscription_until IS NOT NULL AND cs.subscription_until > now()) AS subscription_active,
+        (
+          account.subscription_until IS NOT NULL
+          AND account.subscription_until > now()
+        ) AS subscription_active,
         COALESCE(css.scene_access_unlocked_at IS NOT NULL, FALSE) AS scene_access_active,
         (
           css.scene_session_id IS NOT NULL
           AND css.scene_session_id = cs.active_scene_session_id
         ) AS scene_is_active
       FROM public.chat_state cs
+      JOIN public.users account
+        ON account.user_id = cs.user_id
       LEFT JOIN public.chat_scene_sessions css
         ON css.chat_id = cs.chat_id
        AND css.scene_session_id = COALESCE(${input.scene_session_id}::text, cs.active_scene_session_id)
@@ -175,10 +180,21 @@ export class MediaPaymentRepository {
       SELECT
         cs.chat_id,
         cs.active_scene_session_id,
-        COALESCE(cs.free_fast_scene_skips, 0)::integer AS free_fast_scene_skips,
-        COALESCE(cs.free_scene_unlocks, 0)::integer AS free_scene_unlocks,
-        COALESCE(cs.free_photo_unlocks, 0)::integer AS free_photo_unlocks
+        COALESCE(
+          (account.entitlements_jsonb ->> 'free_fast_scene_skips')::integer,
+          0
+        ) AS free_fast_scene_skips,
+        COALESCE(
+          (account.entitlements_jsonb ->> 'free_scene_unlocks')::integer,
+          0
+        ) AS free_scene_unlocks,
+        COALESCE(
+          (account.entitlements_jsonb ->> 'free_photo_unlocks')::integer,
+          0
+        ) AS free_photo_unlocks
       FROM public.chat_state cs
+      JOIN public.users account
+        ON account.user_id = cs.user_id
       WHERE cs.chat_id = ${chatId}::bigint
       LIMIT 1
     `;

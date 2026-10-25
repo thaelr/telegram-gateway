@@ -88,6 +88,7 @@ export interface AccessDecisionResponse {
   action: RouterAction;
   allowed?: boolean;
   chat_id: number;
+  telegram_chat_id?: number | null;
   source: string;
   update_id?: number | null;
   idempotency_key?: string | null;
@@ -118,6 +119,7 @@ export interface AccessDecisionResponse {
   subscription_until?: string | null;
   scene_session_id?: string | null;
   active_scene_session_id?: string | null;
+  has_started_scene?: boolean | null;
   scene_turn_no?: number | null;
   scene_access_active?: boolean;
   free_fast_scene_skips?: number | null;
@@ -130,6 +132,8 @@ export interface AccessDecisionResponse {
   post_accept_intent?: "start" | "menu" | "subscription" | "paysupport" | null;
   terms_offer_url?: string | null;
   newscene_action?: "yes" | "no" | null;
+  expected_scene_session_id?: string | null;
+  newscene_callback_valid?: boolean | null;
   reason?: string | null;
   text?: string | null;
   parse_mode?: "HTML" | null;
@@ -146,6 +150,9 @@ export interface AccessDecisionResponse {
 
 export interface AccessContext {
   chat_id: number;
+  telegram_chat_id: number;
+  user_id: string | null;
+  character_i: number | null;
   source: string | null;
   source_user_id: number | null;
   terms_accepted_at: string | null;
@@ -153,6 +160,7 @@ export interface AccessContext {
   subscription_until: string | null;
   subscription_active: boolean;
   active_scene_session_id: string | null;
+  active_scene_exists: boolean;
   scene_access_active: boolean;
   free_fast_scene_skips: number;
   free_scene_unlocks: number;

@@ -3931,6 +3931,41 @@ test("pre_checkout validates token and stores decision", async () => {
   });
 });
 
+test("pre_checkout resolves the internal dialogue from the invoice token", async () => {
+  const internalChatId = 8_000_000_000_000_123;
+  const telegramChatId = 123;
+  const { service, calls } = createRepository({
+    async loadInvoiceToken(token, chatId) {
+      calls.loadInvoiceTokenArgs.push({ token, chatId });
+      return buildLoadedInvoiceToken({
+        chat_id: internalChatId,
+        expires_at: new Date(Date.now() + 60_000) as unknown as string,
+      });
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "payment.pre_checkout.received",
+    chat_id: null,
+    telegram_chat_id: telegramChatId,
+    source_user_id: 456,
+    invoice_payload: "inv_payload",
+    pre_checkout_query_id: "pcq-shared-dialogue",
+    payment_currency: "XTR",
+    payment_total_amount: 10,
+  }));
+
+  assert.equal(result.operation, "answer_precheckout");
+  assert.equal(result.precheckout_ok, true);
+  assert.equal(result.chat_id, internalChatId);
+  assert.equal(result.telegram_chat_id, telegramChatId);
+  assert.deepEqual(calls.loadInvoiceTokenArgs[0], {
+    token: "inv_payload",
+    chatId: null,
+  });
+});
+
 test("maintenance rejects Stars pre_checkout before invoice lookup", async () => {
   await withMaintenanceConfig(true, [], async () => {
     const { service, calls } = createRepository();
@@ -4396,6 +4431,42 @@ test("payment_success activates subscription for subscription invoices", async (
   assert.deepEqual(calls.clearActiveSubscriptionOfferArgs, [
     { chatId: 101, offerId: "telegram:offer-1" },
   ]);
+});
+
+test("payment_success resolves the internal dialogue from the invoice token", async () => {
+  const internalChatId = 8_000_000_000_000_123;
+  const telegramChatId = 123;
+  const { service, calls } = createRepository({
+    async loadInvoiceToken(token, chatId) {
+      calls.loadInvoiceTokenArgs.push({ token, chatId });
+      return buildLoadedInvoiceToken({
+        chat_id: internalChatId,
+        status: "fulfilled",
+      });
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "payment.success.received",
+    chat_id: null,
+    telegram_chat_id: telegramChatId,
+    source_user_id: 456,
+    invoice_payload: "inv_payload",
+    telegram_payment_charge_id: "charge-shared-dialogue",
+    provider_payment_charge_id: "provider-shared-dialogue",
+    payment_currency: "XTR",
+    payment_total_amount: 10,
+  }));
+
+  assert.equal(result.operation, "noop");
+  assert.equal(result.reason, "payment_already_fulfilled");
+  assert.equal(result.chat_id, internalChatId);
+  assert.equal(result.telegram_chat_id, telegramChatId);
+  assert.deepEqual(calls.loadInvoiceTokenArgs[0], {
+    token: "inv_payload",
+    chatId: null,
+  });
 });
 
 test("maintenance still processes confirmed SBP payment by external id", async () => {

@@ -66,6 +66,8 @@ type RepositoryCall = {
   source: string | null;
   sourceUserId: number | null;
   timeZone: string;
+  requestedCharacterId: number | null;
+  updateSelectedCharacter: boolean;
 };
 
 type DismissCall = {
@@ -81,6 +83,8 @@ type MockRepository = {
     source: string | null,
     sourceUserId: number | null,
     timeZone: string,
+    requestedCharacterId?: number | null,
+    updateSelectedCharacter?: boolean,
   ) => Promise<AccessContext>;
   popActiveSubscriptionOffer: (
     chatId: number,
@@ -93,6 +97,9 @@ function buildAccessContext(
 ): AccessContext {
   return {
     chat_id: 101,
+    telegram_chat_id: 101,
+    user_id: "u0000001",
+    character_i: 1,
     source: "telegram",
     source_user_id: 202,
     terms_accepted_at: "2026-08-01T10:00:00.000Z",
@@ -100,6 +107,7 @@ function buildAccessContext(
     subscription_until: null,
     subscription_active: false,
     active_scene_session_id: null,
+    active_scene_exists: false,
     scene_access_active: false,
     free_fast_scene_skips: 0,
     free_scene_unlocks: 0,
@@ -155,8 +163,22 @@ function createService(
   const repository: MockRepository = {
     calls,
     dismissCalls,
-    async ensureAndLoadAccessContext(chatId, source, sourceUserId, timeZone) {
-      calls.push({ chatId, source, sourceUserId, timeZone });
+    async ensureAndLoadAccessContext(
+      chatId,
+      source,
+      sourceUserId,
+      timeZone,
+      requestedCharacterId = null,
+      updateSelectedCharacter = true,
+    ) {
+      calls.push({
+        chatId,
+        source,
+        sourceUserId,
+        timeZone,
+        requestedCharacterId,
+        updateSelectedCharacter,
+      });
       if (options.throwOnCall) {
         throw new Error("Repository should not be called");
       }
@@ -324,6 +346,8 @@ test("returns show_character_gallery for /start after terms are accepted", async
 test("returns show_newscene_confirm for /start when a scene is active", async () => {
   const { service, calls } = createService(
     buildAccessContext({
+      active_scene_session_id: "scene-1",
+      active_scene_exists: true,
       scene_turn_no: 3,
       active_menu_screen: null,
     }),
@@ -364,7 +388,7 @@ test("returns show_character_gallery for /menu after terms are accepted", async 
   assert.equal(calls.length, 1);
 });
 
-test("returns show_newscene_confirm for /menu when a scene is active", async () => {
+test("opens /menu without resetting the active character scene", async () => {
   const { service, calls } = createService(
     buildAccessContext({
       scene_turn_no: 3,
@@ -382,9 +406,9 @@ test("returns show_newscene_confirm for /menu when a scene is active", async () 
   );
 
   assert.equal(result.intent, "menu");
-  assert.equal(result.action, "show_newscene_confirm");
+  assert.equal(result.action, "show_character_gallery");
   assert.equal(result.allowed, true);
-  assert.equal(result.reason, "menu_requires_scene_reset");
+  assert.equal(result.reason, "menu");
   assert.equal(calls.length, 1);
 });
 
@@ -443,6 +467,7 @@ test("returns subscription offer when daily limit is exhausted on message 21", a
   const { service } = createService(
     buildAccessContext({
       active_scene_session_id: "scene-1",
+      active_scene_exists: true,
       scene_turn_no: 3,
       turns_today: 20,
     }),
@@ -564,6 +589,7 @@ test("returns subscription offer for /subscription without active subscription",
   const { service } = createService(
     buildAccessContext({
       active_scene_session_id: "scene-1",
+      active_scene_exists: true,
       scene_turn_no: 3,
     }),
   );
@@ -631,10 +657,13 @@ test("preserves reserved scene session on /start without treating it as started"
   assert.equal(calls.length, 1);
 });
 
-test("returns character mode screen for character_select callback without repository call", async () => {
-  const { service, calls } = createService(buildAccessContext(), {
-    throwOnCall: true,
-  });
+test("resolves the selected character dialogue for character_select callback", async () => {
+  const { service, calls } = createService(buildAccessContext({
+    chat_id: 202,
+    telegram_chat_id: 101,
+    character_i: 2,
+    selected_character_i: 2,
+  }));
 
   const result = await service.evaluate(
     buildRequest({
@@ -651,7 +680,99 @@ test("returns character mode screen for character_select callback without reposi
   assert.equal(result.allowed, true);
   assert.equal(typeof result.ux_copy, "object");
   assert.notEqual(result.ux_copy, null);
-  assert.equal(calls.length, 0);
+  assert.equal(result.chat_id, 202);
+  assert.equal(result.telegram_chat_id, 101);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.requestedCharacterId, 2);
+  assert.equal(calls[0]?.updateSelectedCharacter, true);
+});
+
+test("returns the started scene when selecting an existing character dialogue", async () => {
+  const { service } = createService(buildAccessContext({
+    chat_id: 202,
+    telegram_chat_id: 101,
+    character_i: 2,
+    selected_character_i: 2,
+    active_scene_session_id: "scene-character-2",
+    active_scene_exists: true,
+    scene_turn_no: 7,
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "character_select:2:1",
+    character_i: null,
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "show_character_mode_screen");
+  assert.equal(result.chat_id, 202);
+  assert.equal(result.active_scene_session_id, "scene-character-2");
+  assert.equal(result.scene_turn_no, 7);
+});
+
+test("validates a bound reset callback without changing Telegram selection", async () => {
+  const { service, calls } = createService(buildAccessContext({
+    chat_id: 202,
+    telegram_chat_id: 101,
+    character_i: 2,
+    selected_character_i: 2,
+    active_scene_session_id: "scene-character-2",
+    active_scene_exists: true,
+    scene_turn_no: 7,
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "newscene_confirm:yes:2:scene-character-2",
+    character_i: null,
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "handle_newscene_confirm");
+  assert.equal(result.character_i, 2);
+  assert.equal(result.expected_scene_session_id, "scene-character-2");
+  assert.equal(result.newscene_callback_valid, true);
+  assert.equal(calls[0]?.requestedCharacterId, 2);
+  assert.equal(calls[0]?.updateSelectedCharacter, false);
+});
+
+test("rejects reset callbacks after Telegram switched to another character", async () => {
+  const { service, calls } = createService(buildAccessContext({
+    chat_id: 202,
+    telegram_chat_id: 101,
+    character_i: 2,
+    selected_character_i: 3,
+    active_scene_session_id: "scene-character-2",
+    active_scene_exists: true,
+    scene_turn_no: 7,
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "newscene_confirm:yes:2:scene-character-2",
+    character_i: null,
+    user_message: null,
+  }));
+
+  assert.equal(result.newscene_callback_valid, false);
+  assert.equal(calls[0]?.updateSelectedCharacter, false);
+});
+
+test("rejects legacy unbound reset callbacks", async () => {
+  const { service } = createService(buildAccessContext({
+    active_scene_session_id: "scene-character-1",
+    scene_turn_no: 1,
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "newscene_confirm:yes",
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "handle_newscene_confirm");
+  assert.equal(result.newscene_callback_valid, false);
 });
 
 test("routes valid structured callbacks by exact contract", async () => {
@@ -668,6 +789,7 @@ test("routes valid structured callbacks by exact contract", async () => {
       action: "show_character_mode_screen",
       character_i: 3,
       gallery_page: 1,
+      uses_access: true,
     },
     {
       callback_data: "character_select:3:2",
@@ -675,6 +797,7 @@ test("routes valid structured callbacks by exact contract", async () => {
       action: "show_character_mode_screen",
       character_i: 3,
       gallery_page: 2,
+      uses_access: true,
     },
     {
       callback_data: "character_page:2",
@@ -698,11 +821,13 @@ test("routes valid structured callbacks by exact contract", async () => {
       callback_data: "newscene_confirm:yes",
       intent: "newscene_confirm",
       action: "handle_newscene_confirm",
+      uses_access: true,
     },
     {
       callback_data: "newscene_confirm:no",
       intent: "newscene_confirm",
       action: "handle_newscene_confirm",
+      uses_access: true,
     },
     {
       callback_data: "terms_accept:start",
@@ -727,9 +852,13 @@ test("routes valid structured callbacks by exact contract", async () => {
   ] as const;
 
   for (const entry of cases) {
-    const { service, calls } = createService(buildAccessContext(), {
-      throwOnCall: true,
-    });
+    const usesAccess = "uses_access" in entry && entry.uses_access === true;
+    const { service, calls } = createService(
+      buildAccessContext({
+        character_i: "character_i" in entry ? entry.character_i : 1,
+      }),
+      { throwOnCall: !usesAccess },
+    );
     const result = await service.evaluate(
       buildRequest({
         event_type: "callback_query.received",
@@ -745,7 +874,7 @@ test("routes valid structured callbacks by exact contract", async () => {
     if ("reward_slot" in entry) assert.equal(result.reward_slot, entry.reward_slot);
     if ("character_i" in entry) assert.equal(result.character_i, entry.character_i);
     if ("gallery_page" in entry) assert.equal(result.gallery_page, entry.gallery_page);
-    assert.equal(calls.length, 0);
+    assert.equal(calls.length, usesAccess ? 1 : 0);
   }
 });
 
@@ -774,8 +903,9 @@ test("structured callback payload fields are returned for n8n contracts", async 
   ] as const;
 
   for (const entry of cases) {
+    const usesAccess = entry.callback_data.startsWith("newscene_confirm:");
     const { service, calls } = createService(buildAccessContext(), {
-      throwOnCall: true,
+      throwOnCall: !usesAccess,
     });
     const result = await service.evaluate(
       buildRequest({
@@ -786,7 +916,7 @@ test("structured callback payload fields are returned for n8n contracts", async 
     );
 
     assert.equal(result[entry.field], entry.value);
-    assert.equal(calls.length, 0);
+    assert.equal(calls.length, usesAccess ? 1 : 0);
   }
 });
 
@@ -963,6 +1093,25 @@ test("scene mode callback keeps two-part compatibility", async () => {
   assert.equal(calls.length, 1);
 });
 
+test("marks an existing scene started before its first user turn", async () => {
+  const { service } = createService(buildAccessContext({
+    active_scene_session_id: "freshly-started-scene",
+    active_scene_exists: true,
+    scene_turn_no: -1,
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "scene_mode:roleplay:1",
+    scene_mode: null,
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "handle_scene_mode");
+  assert.equal(result.has_started_scene, true);
+  assert.equal(result.scene_turn_no, null);
+});
+
 test("malformed known structured callbacks are ignored before commerce fallback", async () => {
   const callbacks = [
     "scene_mode:banana",
@@ -1123,16 +1272,6 @@ test("bypass events do not call repository", async () => {
       user_message: null,
     }),
     buildRequest({
-      callback_data: "newscene_confirm:yes",
-      event_type: "callback_query.received",
-      user_message: null,
-    }),
-    buildRequest({
-      callback_data: "character_select:3",
-      event_type: "callback_query.received",
-      user_message: null,
-    }),
-    buildRequest({
       callback_data: "character_menu:back",
       event_type: "callback_query.received",
       user_message: null,
@@ -1195,6 +1334,16 @@ test("access-controlled intents call repository exactly once", async () => {
     }),
     buildRequest({
       callback_data: "scene_mode:roleplay",
+      event_type: "callback_query.received",
+      user_message: null,
+    }),
+    buildRequest({
+      callback_data: "newscene_confirm:yes",
+      event_type: "callback_query.received",
+      user_message: null,
+    }),
+    buildRequest({
+      callback_data: "character_select:3",
       event_type: "callback_query.received",
       user_message: null,
     }),

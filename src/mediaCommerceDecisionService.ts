@@ -3271,18 +3271,20 @@ export class MediaCommerceDecisionService {
     input: MediaCommerceDecisionRequest,
   ): Promise<MediaCommerceDecisionResponse> {
     const base = buildBaseResponse(input, "pre_checkout");
-    const chatId = normalizePositiveInteger(input.chat_id);
+    const requestedChatId = normalizePositiveInteger(input.chat_id);
     const invoicePayload = normalizeString(input.invoice_payload);
-    if (!chatId || !invoicePayload) {
+    if (!invoicePayload) {
       return {
         ...base,
         operation: "answer_precheckout",
         precheckout_ok: false,
         precheckout_error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
-        reason: !chatId ? "chat_id_required" : "invoice_payload_required",
+        reason: "invoice_payload_required",
       };
     }
-    if (isMaintenanceBlocked(chatId)) {
+    if (isMaintenanceBlocked(
+      input.source_user_id ?? input.telegram_chat_id ?? requestedChatId,
+    )) {
       return {
         ...base,
         operation: "answer_precheckout",
@@ -3295,13 +3297,23 @@ export class MediaCommerceDecisionService {
     const tokenRow = await this.runRepositoryOperation(
       "payment.precheckout.loadInvoiceToken",
       {
-        chat_id: chatId,
+        chat_id: requestedChatId,
         payment_kind: null,
         sku: null,
         invoice_status: null,
       },
-      () => this.repository.loadInvoiceToken(invoicePayload, chatId),
+      () => this.repository.loadInvoiceToken(invoicePayload, requestedChatId),
     );
+    const chatId = normalizePositiveInteger(tokenRow?.chat_id) ?? requestedChatId;
+    if (!chatId) {
+      return {
+        ...base,
+        operation: "answer_precheckout",
+        precheckout_ok: false,
+        precheckout_error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        reason: "chat_id_required",
+      };
+    }
     let validation = validatePrecheckout(
       tokenRow,
       normalizeString(input.payment_currency),
@@ -3407,7 +3419,7 @@ export class MediaCommerceDecisionService {
     return {
       ...base,
       operation: "answer_precheckout",
-      chat_id: normalizePositiveInteger(tokenRow?.chat_id) ?? base.chat_id,
+      chat_id: chatId,
       scene_session_id: tokenRow?.scene_session_id ?? base.scene_session_id,
       turn_no: normalizeNonNegativeInteger(tokenRow?.turn_no) ?? base.turn_no,
       payment_kind: validation.action?.payment_kind ?? null,
@@ -3436,27 +3448,31 @@ export class MediaCommerceDecisionService {
       return this.evaluateExternalPaymentSuccess(base, input);
     }
 
-    const chatId = normalizePositiveInteger(input.chat_id);
+    const requestedChatId = normalizePositiveInteger(input.chat_id);
     const invoicePayload = normalizeString(input.invoice_payload);
-    if (!chatId || !invoicePayload) {
+    if (!invoicePayload) {
       return {
         ...base,
-        reason: !chatId ? "chat_id_required" : "invoice_payload_required",
+        reason: "invoice_payload_required",
       };
     }
 
     const loaded = await this.runRepositoryOperation(
       "payment.success.loadInvoiceToken",
       {
-        chat_id: chatId,
+        chat_id: requestedChatId,
         payment_kind: null,
         sku: null,
         invoice_status: null,
       },
-      () => this.repository.loadInvoiceToken(invoicePayload, chatId),
+      () => this.repository.loadInvoiceToken(invoicePayload, requestedChatId),
     );
     if (!loaded?.found || !loaded.token) {
       return { ...base, reason: "invoice_not_found" };
+    }
+    const chatId = normalizePositiveInteger(loaded.chat_id) ?? requestedChatId;
+    if (!chatId) {
+      return { ...base, reason: "chat_id_required" };
     }
 
     if (normalizeString(loaded.kind) !== INVOICE_PAYLOAD_KIND) {
