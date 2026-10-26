@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import type { TelegramLanguage } from "../src/telegramLanguage.js";
 import type { AccessContext, AccessDecisionRequest } from "../src/types.js";
 import { installTestEnv } from "./testEnv.js";
 
@@ -68,6 +69,14 @@ type RepositoryCall = {
   timeZone: string;
   requestedCharacterId: number | null;
   updateSelectedCharacter: boolean;
+  language: TelegramLanguage | null;
+};
+
+type LanguageCall = {
+  chatId: number;
+  source: string | null;
+  sourceUserId: number;
+  language: TelegramLanguage;
 };
 
 type DismissCall = {
@@ -77,6 +86,7 @@ type DismissCall = {
 
 type MockRepository = {
   calls: RepositoryCall[];
+  languageCalls: LanguageCall[];
   dismissCalls: DismissCall[];
   ensureAndLoadAccessContext: (
     chatId: number,
@@ -85,7 +95,14 @@ type MockRepository = {
     timeZone: string,
     requestedCharacterId?: number | null,
     updateSelectedCharacter?: boolean,
+    language?: TelegramLanguage | null,
   ) => Promise<AccessContext>;
+  ensureTelegramAccountLanguage: (
+    chatId: number,
+    source: string | null,
+    sourceUserId: number,
+    language: TelegramLanguage,
+  ) => Promise<string>;
   popActiveSubscriptionOffer: (
     chatId: number,
     currentOfferId: string | null,
@@ -159,9 +176,11 @@ function createService(
   } = {},
 ) {
   const calls: RepositoryCall[] = [];
+  const languageCalls: LanguageCall[] = [];
   const dismissCalls: DismissCall[] = [];
   const repository: MockRepository = {
     calls,
+    languageCalls,
     dismissCalls,
     async ensureAndLoadAccessContext(
       chatId,
@@ -170,6 +189,7 @@ function createService(
       timeZone,
       requestedCharacterId = null,
       updateSelectedCharacter = true,
+      language = null,
     ) {
       calls.push({
         chatId,
@@ -178,11 +198,19 @@ function createService(
         timeZone,
         requestedCharacterId,
         updateSelectedCharacter,
+        language,
       });
       if (options.throwOnCall) {
         throw new Error("Repository should not be called");
       }
       return context;
+    },
+    async ensureTelegramAccountLanguage(chatId, source, sourceUserId, language) {
+      languageCalls.push({ chatId, source, sourceUserId, language });
+      if (options.throwOnCall) {
+        throw new Error("Repository should not be called");
+      }
+      return context.user_id ?? "u0000001";
     },
     async popActiveSubscriptionOffer(chatId, currentOfferId) {
       dismissCalls.push({ chatId, currentOfferId });
@@ -193,6 +221,7 @@ function createService(
   return {
     service: new AccessDecisionService(repository),
     calls,
+    languageCalls,
     dismissCalls,
   };
 }
@@ -213,6 +242,62 @@ async function withMaintenanceConfig<T>(
     config.MAINTENANCE_ALLOWED_USER_IDS_JSON = previousAllowed;
   }
 }
+
+test("passes a detected Telegram language through access account resolution", async () => {
+  const { service, calls, languageCalls } = createService();
+
+  await service.evaluate(buildRequest({
+    raw_update: {
+      message: {
+        from: { id: 202, language_code: "ru" },
+      },
+    },
+  }));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.language, "ru");
+  assert.equal(languageCalls.length, 0);
+});
+
+test("initializes Telegram language for updates that do not load access context", async () => {
+  const { service, calls, languageCalls } = createService();
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "message.image.received",
+    route_target: "noop",
+    message_type: "image",
+    user_message: null,
+    raw_update: {
+      message: {
+        from: { id: 202, language_code: "de" },
+      },
+    },
+  }));
+
+  assert.equal(result.decision, "noop");
+  assert.equal(calls.length, 0);
+  assert.deepEqual(languageCalls, [{
+    chatId: 101,
+    source: "telegram",
+    sourceUserId: 202,
+    language: "en",
+  }]);
+});
+
+test("does not initialize Telegram language when language_code is absent", async () => {
+  const { service, calls, languageCalls } = createService();
+
+  await service.evaluate(buildRequest({
+    event_type: "message.image.received",
+    route_target: "noop",
+    message_type: "image",
+    user_message: null,
+    raw_update: { message: { from: { id: 202 } } },
+  }));
+
+  assert.equal(calls.length, 0);
+  assert.equal(languageCalls.length, 0);
+});
 
 test("maintenance blocks messages and callbacks before repository access", async () => {
   await withMaintenanceConfig(true, [], async () => {

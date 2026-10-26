@@ -260,6 +260,36 @@ test("ensureTelegramAccountLink delegates atomic identity resolution to the data
   );
 });
 
+test("initializes Telegram language only while the account language is null", async () => {
+  const calls: QueryCall[] = [];
+  const query = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    calls.push({ strings: Array.from(strings), values });
+    return Promise.resolve([{
+      user_id: "u00000ab",
+      selected_character_i: null,
+      active_menu_screen: null,
+      active_menu_message_id: null,
+      requested_character_i: null,
+    }]);
+  }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
+
+  const userId = await new ChatAccessRepository(query).ensureTelegramAccountLanguage(
+    999001,
+    "telegram",
+    777001,
+    "ru",
+  );
+
+  assert.equal(userId, "u00000ab");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.values.includes("ru"), true);
+  const statement = calls[0]?.strings.join(" ") ?? "";
+  assert.match(statement, /UPDATE public\.users AS account/u);
+  assert.match(statement, /SET language = i\.language/u);
+  assert.match(statement, /account\.language IS NULL/u);
+  assert.match(statement, /i\.language IS NOT NULL/u);
+});
+
 test("resolveTelegramChatId follows account identity from an internal dialogue", async () => {
   const calls: QueryCall[] = [];
   const query = ((strings: TemplateStringsArray, ...values: unknown[]) => {

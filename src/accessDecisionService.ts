@@ -3,6 +3,7 @@ import { ChatAccessRepository } from "./chatAccessRepository.js";
 import { prependFreeBalances } from "./freeBalanceFormatter.js";
 import { isMaintenanceBlocked } from "./maintenance.js";
 import { normalizeNonNegativeInteger, normalizePositiveInteger } from "./numeric.js";
+import { extractTelegramLanguage } from "./telegramLanguage.js";
 import type {
   AccessContext,
   AccessDecisionRequest,
@@ -44,7 +45,9 @@ type RouterClassification = {
 
 type AccessRepository = Pick<
   ChatAccessRepository,
-  "ensureAndLoadAccessContext" | "popActiveSubscriptionOffer"
+  | "ensureAndLoadAccessContext"
+  | "ensureTelegramAccountLanguage"
+  | "popActiveSubscriptionOffer"
 >;
 
 function isAllowedClassification(classification: RouterClassification): boolean {
@@ -461,6 +464,10 @@ export class AccessDecisionService {
   ): Promise<AccessDecisionResponse> {
     const classification = classifyRouterInput(input);
     const source = normalizeSource(input.source);
+    const sourceUserId = normalizePositiveInteger(input.source_user_id);
+    const telegramLanguage = source === "telegram"
+      ? extractTelegramLanguage(input.raw_update, sourceUserId)
+      : null;
     const idempotencyKey = buildIdempotencyKey(source, input.update_id);
     const effectiveCharacterId =
       classification.character_i ?? input.character_i ?? null;
@@ -528,10 +535,21 @@ export class AccessDecisionService {
       ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
 
+    const initializeTelegramLanguage = async (): Promise<void> => {
+      if (telegramLanguage == null || sourceUserId == null) return;
+      await this.repository.ensureTelegramAccountLanguage(
+        input.chat_id,
+        source,
+        sourceUserId,
+        telegramLanguage,
+      );
+    };
+
     if (
       isMaintenanceUserAction(input, classification)
       && isMaintenanceBlocked(input.source_user_id)
     ) {
+      await initializeTelegramLanguage();
       return {
         ...passthrough,
         decision: "noop",
@@ -543,6 +561,7 @@ export class AccessDecisionService {
     }
 
     if (!requiresAccessContext(classification)) {
+      await initializeTelegramLanguage();
       return attachDismissedSubscriptionOffer({
         ...passthrough,
         decision: "noop",
@@ -559,6 +578,7 @@ export class AccessDecisionService {
       effectiveCharacterId,
       classification.intent === "character_select"
         || classification.intent === "scene_mode",
+      telegramLanguage,
     );
 
     const resolvedPassthrough = {
