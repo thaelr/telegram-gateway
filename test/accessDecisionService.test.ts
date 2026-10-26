@@ -69,12 +69,9 @@ type RepositoryCall = {
   timeZone: string;
   requestedCharacterId: number | null;
   updateSelectedCharacter: boolean;
-  language: TelegramLanguage | null;
 };
 
 type LanguageCall = {
-  chatId: number;
-  source: string | null;
   sourceUserId: number;
   language: TelegramLanguage;
 };
@@ -95,14 +92,11 @@ type MockRepository = {
     timeZone: string,
     requestedCharacterId?: number | null,
     updateSelectedCharacter?: boolean,
-    language?: TelegramLanguage | null,
   ) => Promise<AccessContext>;
-  ensureTelegramAccountLanguage: (
-    chatId: number,
-    source: string | null,
+  initializeExistingTelegramLanguage: (
     sourceUserId: number,
     language: TelegramLanguage,
-  ) => Promise<string>;
+  ) => Promise<void>;
   popActiveSubscriptionOffer: (
     chatId: number,
     currentOfferId: string | null,
@@ -189,7 +183,6 @@ function createService(
       timeZone,
       requestedCharacterId = null,
       updateSelectedCharacter = true,
-      language = null,
     ) {
       calls.push({
         chatId,
@@ -198,19 +191,17 @@ function createService(
         timeZone,
         requestedCharacterId,
         updateSelectedCharacter,
-        language,
       });
       if (options.throwOnCall) {
         throw new Error("Repository should not be called");
       }
       return context;
     },
-    async ensureTelegramAccountLanguage(chatId, source, sourceUserId, language) {
-      languageCalls.push({ chatId, source, sourceUserId, language });
+    async initializeExistingTelegramLanguage(sourceUserId, language) {
+      languageCalls.push({ sourceUserId, language });
       if (options.throwOnCall) {
         throw new Error("Repository should not be called");
       }
-      return context.user_id ?? "u0000001";
     },
     async popActiveSubscriptionOffer(chatId, currentOfferId) {
       dismissCalls.push({ chatId, currentOfferId });
@@ -243,7 +234,7 @@ async function withMaintenanceConfig<T>(
   }
 }
 
-test("passes a detected Telegram language through access account resolution", async () => {
+test("initializes a detected Telegram language after access account resolution", async () => {
   const { service, calls, languageCalls } = createService();
 
   await service.evaluate(buildRequest({
@@ -255,8 +246,7 @@ test("passes a detected Telegram language through access account resolution", as
   }));
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.language, "ru");
-  assert.equal(languageCalls.length, 0);
+  assert.deepEqual(languageCalls, [{ sourceUserId: 202, language: "ru" }]);
 });
 
 test("initializes Telegram language for updates that do not load access context", async () => {
@@ -277,8 +267,6 @@ test("initializes Telegram language for updates that do not load access context"
   assert.equal(result.decision, "noop");
   assert.equal(calls.length, 0);
   assert.deepEqual(languageCalls, [{
-    chatId: 101,
-    source: "telegram",
     sourceUserId: 202,
     language: "en",
   }]);

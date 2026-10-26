@@ -260,7 +260,7 @@ test("ensureTelegramAccountLink delegates atomic identity resolution to the data
   );
 });
 
-test("initializes Telegram language only while the account language is null", async () => {
+test("initializes language only for an existing Telegram account with no language", async () => {
   const calls: QueryCall[] = [];
   const query = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     calls.push({ strings: Array.from(strings), values });
@@ -273,21 +273,37 @@ test("initializes Telegram language only while the account language is null", as
     }]);
   }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
 
-  const userId = await new ChatAccessRepository(query).ensureTelegramAccountLanguage(
-    999001,
-    "telegram",
+  await new ChatAccessRepository(query).initializeExistingTelegramLanguage(
     777001,
     "ru",
   );
 
-  assert.equal(userId, "u00000ab");
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.values.includes("ru"), true);
+  assert.deepEqual(calls[0]?.values, ["ru", 777001]);
   const statement = calls[0]?.strings.join(" ") ?? "";
   assert.match(statement, /UPDATE public\.users AS account/u);
-  assert.match(statement, /SET language = i\.language/u);
+  assert.match(statement, /FROM public\.user_identities AS identity/u);
+  assert.match(statement, /identity\.provider = 'telegram'/u);
+  assert.match(statement, /identity\.external_id =/u);
   assert.match(statement, /account\.language IS NULL/u);
-  assert.match(statement, /i\.language IS NOT NULL/u);
+  assert.doesNotMatch(statement, /INSERT INTO/u);
+  assert.doesNotMatch(statement, /ensure_telegram_chat_account/u);
+});
+
+test("does nothing when the Telegram account does not exist yet", async () => {
+  const calls: QueryCall[] = [];
+  const query = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    calls.push({ strings: Array.from(strings), values });
+    return Promise.resolve([]);
+  }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
+
+  await new ChatAccessRepository(query).initializeExistingTelegramLanguage(
+    777001,
+    "en",
+  );
+
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(calls[0]?.strings.join(" ") ?? "", /INSERT INTO/u);
 });
 
 test("resolveTelegramChatId follows account identity from an internal dialogue", async () => {

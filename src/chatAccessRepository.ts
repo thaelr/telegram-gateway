@@ -30,140 +30,19 @@ type AccessContextRow = {
 export class ChatAccessRepository {
   constructor(private readonly query: typeof sql = sql) {}
 
-  private async ensureTelegramRoutingAccount(
-    telegramChatId: number,
-    source: string | null,
-    sourceUserId: number | null,
-    requestedCharacterId: number | null,
-    updateSelectedCharacter: boolean,
-    language: TelegramLanguage | null,
-  ): Promise<{
-    user_id: string;
-    selected_character_i: number | null;
-    active_menu_screen: string | null;
-    active_menu_message_id: number | null;
-    requested_character_i: number | null;
-  }> {
-    const routingRows = await this.query<Array<{
-      user_id: string;
-      selected_character_i: number | null;
-      active_menu_screen: string | null;
-      active_menu_message_id: number | null;
-      requested_character_i: number | null;
-    }>>`
-      WITH input AS (
-        SELECT
-          ${telegramChatId}::bigint AS chat_id,
-          NULLIF(BTRIM(${source}), '') AS source,
-          ${sourceUserId}::bigint AS source_user_id,
-          ${requestedCharacterId}::smallint AS requested_character_i,
-          ${updateSelectedCharacter}::boolean AS update_selected_character,
-          ${language}::text AS language
-      ),
-      upserted AS (
-        INSERT INTO public.chat_state AS cs (
-          chat_id,
-          source,
-          source_user_id,
-          mode,
-          current_turn_no,
-          scene_turn_no,
-          debounce_revision,
-          active_scene_session_id,
-          reachability_status,
-          followup_anchor_json,
-          selected_character_i
-        )
-        SELECT
-          i.chat_id,
-          COALESCE(i.source, 'telegram'),
-          i.source_user_id,
-          'bot_active',
-          -1,
-          -1,
-          0,
-          md5(i.chat_id::text || clock_timestamp()::text || random()::text),
-          'reachable',
-          '{}'::jsonb,
-          CASE
-            WHEN i.update_selected_character THEN i.requested_character_i
-            ELSE NULL
-          END
-        FROM input i
-        WHERE i.chat_id IS NOT NULL
-        ON CONFLICT (chat_id) DO UPDATE
-        SET
-          source = COALESCE(EXCLUDED.source, cs.source, 'telegram'),
-          source_user_id = COALESCE(cs.source_user_id, EXCLUDED.source_user_id),
-          selected_character_i = CASE
-            WHEN ${updateSelectedCharacter}::boolean THEN COALESCE(
-              EXCLUDED.selected_character_i,
-              cs.selected_character_i
-            )
-            ELSE cs.selected_character_i
-          END
-        RETURNING
-          cs.chat_id,
-          cs.source_user_id,
-          cs.selected_character_i,
-          cs.active_menu_screen,
-          cs.active_menu_message_id
-      ),
-      linked_account AS MATERIALIZED (
-        SELECT app_private.ensure_telegram_chat_account(
-          u.chat_id,
-          u.source_user_id
-        ) AS user_id
-        FROM upserted u
-      ),
-      initialized_language AS (
-        UPDATE public.users AS account
-        SET language = i.language
-        FROM linked_account link
-        JOIN input i ON TRUE
-        WHERE account.user_id = link.user_id
-          AND account.language IS NULL
-          AND i.language IS NOT NULL
-        RETURNING account.user_id
-      )
-      SELECT
-        link.user_id,
-        u.selected_character_i,
-        u.active_menu_screen,
-        u.active_menu_message_id,
-        i.requested_character_i
-      FROM upserted u
-      JOIN input i ON TRUE
-      JOIN linked_account link ON TRUE
-      LEFT JOIN initialized_language initialized
-        ON initialized.user_id = link.user_id
-    `;
-
-    const routing = routingRows[0];
-    if (!routing?.user_id) {
-      throw new Error(
-        `Unable to resolve Telegram account for chat_id=${telegramChatId}`,
-      );
-    }
-
-    return routing;
-  }
-
-  async ensureTelegramAccountLanguage(
-    telegramChatId: number,
-    source: string | null,
+  async initializeExistingTelegramLanguage(
     sourceUserId: number,
     language: TelegramLanguage,
-  ): Promise<string> {
-    const routing = await this.ensureTelegramRoutingAccount(
-      telegramChatId,
-      source,
-      sourceUserId,
-      null,
-      false,
-      language,
-    );
-    return routing.user_id;
+  ): Promise<void> {
+    await this.query`
+      UPDATE public.users AS account
+      SET language = ${language}::text
+      FROM public.user_identities AS identity
+      WHERE identity.provider = 'telegram'
+        AND identity.external_id = ${sourceUserId}::text
+        AND account.user_id = identity.user_id
+        AND account.language IS NULL
+    `;
   }
 
   async ensureTelegramAccountLink(
@@ -230,16 +109,95 @@ export class ChatAccessRepository {
     timeZone: string,
     requestedCharacterId: number | null = null,
     updateSelectedCharacter = true,
-    language: TelegramLanguage | null = null,
   ): Promise<AccessContext> {
-    const routing = await this.ensureTelegramRoutingAccount(
-      telegramChatId,
-      source,
-      sourceUserId,
-      requestedCharacterId,
-      updateSelectedCharacter,
-      language,
-    );
+    const routingRows = await this.query<Array<{
+      user_id: string;
+      selected_character_i: number | null;
+      active_menu_screen: string | null;
+      active_menu_message_id: number | null;
+      requested_character_i: number | null;
+    }>>`
+      WITH input AS (
+        SELECT
+          ${telegramChatId}::bigint AS chat_id,
+          NULLIF(BTRIM(${source}), '') AS source,
+          ${sourceUserId}::bigint AS source_user_id,
+          ${requestedCharacterId}::smallint AS requested_character_i,
+          ${updateSelectedCharacter}::boolean AS update_selected_character
+      ),
+      upserted AS (
+        INSERT INTO public.chat_state AS cs (
+          chat_id,
+          source,
+          source_user_id,
+          mode,
+          current_turn_no,
+          scene_turn_no,
+          debounce_revision,
+          active_scene_session_id,
+          reachability_status,
+          followup_anchor_json,
+          selected_character_i
+        )
+        SELECT
+          i.chat_id,
+          COALESCE(i.source, 'telegram'),
+          i.source_user_id,
+          'bot_active',
+          -1,
+          -1,
+          0,
+          md5(i.chat_id::text || clock_timestamp()::text || random()::text),
+          'reachable',
+          '{}'::jsonb,
+          CASE
+            WHEN i.update_selected_character THEN i.requested_character_i
+            ELSE NULL
+          END
+        FROM input i
+        WHERE i.chat_id IS NOT NULL
+        ON CONFLICT (chat_id) DO UPDATE
+        SET
+          source = COALESCE(EXCLUDED.source, cs.source, 'telegram'),
+          source_user_id = COALESCE(cs.source_user_id, EXCLUDED.source_user_id),
+          selected_character_i = CASE
+            WHEN ${updateSelectedCharacter}::boolean THEN COALESCE(
+              EXCLUDED.selected_character_i,
+              cs.selected_character_i
+            )
+            ELSE cs.selected_character_i
+          END
+        RETURNING
+          cs.chat_id,
+          cs.source_user_id,
+          cs.selected_character_i,
+          cs.active_menu_screen,
+          cs.active_menu_message_id
+      ),
+      linked_account AS MATERIALIZED (
+        SELECT app_private.ensure_telegram_chat_account(
+          u.chat_id,
+          u.source_user_id
+        ) AS user_id
+        FROM upserted u
+      )
+      SELECT
+        link.user_id,
+        u.selected_character_i,
+        u.active_menu_screen,
+        u.active_menu_message_id,
+        i.requested_character_i
+      FROM upserted u
+      JOIN input i ON TRUE
+      JOIN linked_account link ON TRUE
+    `;
+
+    const routing = routingRows[0];
+    if (!routing?.user_id) {
+      throw new Error(
+        `Unable to resolve Telegram account for chat_id=${telegramChatId}`,
+      );
+    }
 
     let dialogueChatId = telegramChatId;
     const selectedCharacterId = routing.requested_character_i

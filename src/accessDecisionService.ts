@@ -46,7 +46,7 @@ type RouterClassification = {
 type AccessRepository = Pick<
   ChatAccessRepository,
   | "ensureAndLoadAccessContext"
-  | "ensureTelegramAccountLanguage"
+  | "initializeExistingTelegramLanguage"
   | "popActiveSubscriptionOffer"
 >;
 
@@ -535,11 +535,9 @@ export class AccessDecisionService {
       ux_copy: config.TELEGRAM_UX_COPY_JSON,
     } as const;
 
-    const initializeTelegramLanguage = async (): Promise<void> => {
+    const initializeExistingTelegramLanguage = async (): Promise<void> => {
       if (telegramLanguage == null || sourceUserId == null) return;
-      await this.repository.ensureTelegramAccountLanguage(
-        input.chat_id,
-        source,
+      await this.repository.initializeExistingTelegramLanguage(
         sourceUserId,
         telegramLanguage,
       );
@@ -549,7 +547,7 @@ export class AccessDecisionService {
       isMaintenanceUserAction(input, classification)
       && isMaintenanceBlocked(input.source_user_id)
     ) {
-      await initializeTelegramLanguage();
+      await initializeExistingTelegramLanguage();
       return {
         ...passthrough,
         decision: "noop",
@@ -561,7 +559,7 @@ export class AccessDecisionService {
     }
 
     if (!requiresAccessContext(classification)) {
-      await initializeTelegramLanguage();
+      await initializeExistingTelegramLanguage();
       return attachDismissedSubscriptionOffer({
         ...passthrough,
         decision: "noop",
@@ -578,8 +576,8 @@ export class AccessDecisionService {
       effectiveCharacterId,
       classification.intent === "character_select"
         || classification.intent === "scene_mode",
-      telegramLanguage,
     );
+    await initializeExistingTelegramLanguage();
 
     const resolvedPassthrough = {
       ...passthrough,
