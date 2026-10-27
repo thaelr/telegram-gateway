@@ -88,7 +88,7 @@ test("claimReward resolves backend campaign rewards without Telegram callback co
     },
   }), [slot]);
 
-  const claimed = await service.claimReward({ chatId: 42, campaignId: "campaign-a" });
+  const claimed = await service.claimReward({ chatId: 42, campaignId: "campaign-a", now: new Date("2026-09-15T00:00:00Z") });
 
   assert.equal(claimed.status, "claimed");
   assert.deepEqual(received, {

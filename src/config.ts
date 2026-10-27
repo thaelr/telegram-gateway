@@ -278,6 +278,14 @@ const rawEnvSchema = z.object({
   DATABASE_URL: z.string().url(),
   INTERNAL_API_KEY: z.string().min(1),
   INTERNAL_API_KEY_HEADER: z.string().min(1).default("x-internal-api-key"),
+  WEB_ENABLED: z.string().default("false").pipe(z.enum(["true", "false"])).transform((value) => value === "true"),
+  SUPABASE_URL: z.string().trim().optional(),
+  SUPABASE_PUBLISHABLE_KEY: z.string().trim().optional(),
+  WEB_N8N_WEBHOOK_URL: z.string().trim().optional(),
+  WEB_N8N_WEBHOOK_SECRET: z.string().trim().optional(),
+  WEB_DELIVERY_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(15_000),
+  WEB_DELIVERY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
+  WEB_DELIVERY_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
   PUBLIC_OFFER_URL: z.string().trim().url(),
   GATEWAY_PUBLIC_URL: z.string().trim().optional(),
   RAILWAY_PUBLIC_DOMAIN: z.string().trim().optional(),
@@ -291,6 +299,14 @@ const rawEnvSchema = z.object({
   SBP_API_SECRET: z.string().trim().optional(),
   SBP_RETURN_URL: z.string().trim().optional(),
   SBP_FAILED_URL: z.string().trim().optional(),
+  NOWPAYMENTS_ENABLED: z.string().default("false").pipe(z.enum(["true", "false"])).transform((value) => value === "true"),
+  NOWPAYMENTS_API_BASE_URL: z.string().trim().default("https://api.nowpayments.io/v1"),
+  NOWPAYMENTS_API_KEY: z.string().trim().optional(),
+  NOWPAYMENTS_IPN_SECRET: z.string().trim().optional(),
+  NOWPAYMENTS_IPN_URL: z.string().trim().optional(),
+  NOWPAYMENTS_SUCCESS_URL: z.string().trim().optional(),
+  NOWPAYMENTS_CANCEL_URL: z.string().trim().optional(),
+  NOWPAYMENTS_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(15_000),
   MAINTENANCE_MODE: z
     .string()
     .default("false")
@@ -375,6 +391,28 @@ const rawEnvSchema = z.object({
 });
 
 const parsedEnv = rawEnvSchema.parse(process.env);
+
+if (parsedEnv.NOWPAYMENTS_ENABLED) {
+  for (const key of ["NOWPAYMENTS_API_KEY", "NOWPAYMENTS_IPN_SECRET", "NOWPAYMENTS_IPN_URL", "NOWPAYMENTS_SUCCESS_URL", "NOWPAYMENTS_CANCEL_URL"] as const) {
+    if (!parsedEnv[key]) throw new Error(`NOWPayments is enabled but ${key} is missing`);
+  }
+  for (const key of ["NOWPAYMENTS_API_BASE_URL", "NOWPAYMENTS_IPN_URL", "NOWPAYMENTS_SUCCESS_URL", "NOWPAYMENTS_CANCEL_URL"] as const) {
+    const url = new URL(parsedEnv[key]!);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error(`${key} must use HTTPS without URL credentials`);
+  }
+}
+
+if (parsedEnv.WEB_ENABLED) {
+  for (const key of ["SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "WEB_N8N_WEBHOOK_URL", "WEB_N8N_WEBHOOK_SECRET"] as const) {
+    if (!parsedEnv[key]) throw new Error(`Web API is enabled but ${key} is missing`);
+  }
+  for (const key of ["SUPABASE_URL", "WEB_N8N_WEBHOOK_URL"] as const) {
+    const url = new URL(parsedEnv[key]!);
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) {
+      throw new Error(`${key} must use HTTPS without URL credentials`);
+    }
+  }
+}
 
 const normalizedSbpConfig = {
   SBP_ENABLED: parsedEnv.SBP_ENABLED,

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { WebProductPlan } from './web/commerceTypes.js';
 import {
   buildAssignment,
   chooseVariant,
@@ -960,6 +961,28 @@ function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute 
 }
 
 export class MediaCommerceDecisionService {
+  /** Web reads the same promoted plans and account experiment overrides as Telegram.
+   * No invoice is created and no Telegram transport is called here. */
+  async webProductPlans(chatId: number | null): Promise<WebProductPlan[]> {
+    const selection = chatId == null ? null : await this.resolveAbTestSelection(chatId, 'subscription_offer');
+    const params = selection?.params ?? {};
+    const subscriptions = applySubscriptionPlanOverrides(resolveSubscriptionPlans(), params);
+    const actions = config.MEDIA_ACTION_PLANS_JSON.flatMap(item => {
+      const promoted = resolveActionPlanByFeatureKey(item.feature_key);
+      const effective = item.feature_key === 'scene_unlock' ? applySceneUnlockOverride(promoted, params) : promoted;
+      return effective ? [effective] : [];
+    });
+    const photos = config.MEDIA_PHOTO_PLANS_JSON.map(item => resolvePhotoPlanBySku(item.sku)!).filter(Boolean);
+    const base = (p: typeof subscriptions[number] | typeof actions[number] | typeof photos[number]) => ({
+      sku: p.sku, title: p.title, description: p.description, amount_xtr: p.amount_xtr,
+      amount_rub: p.amount_rub ?? null, original_amount_rub: p.original_amount_rub, promo_key: p.promo_key,
+    });
+    return [
+      ...subscriptions.map(p => ({...base(p),kind:'subscription' as const,subscription_days:p.days})),
+      ...photos.map(p => ({...base(p),kind:'photo' as const})),
+      ...actions.map(p => ({...base(p),kind:'feature' as const,feature_key:p.feature_key})),
+    ];
+  }
   private readonly uncertainSbpCheckouts = new Map<
     string,
     { external_payment_id: string | null; checkout_url: string | null }

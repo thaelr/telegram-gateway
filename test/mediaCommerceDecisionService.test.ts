@@ -1588,7 +1588,8 @@ test("prepare_offer defers active photo promotion pricing until click", async ()
   });
 });
 
-test("photo payment resolves by photo_sku when prices overlap and promo applies", async () => {
+test("photo payment resolves by photo_sku when prices overlap and promo applies", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 8, 15) });
   const photoPlans = [
     {
       sku: "payment_media_1",
@@ -2479,7 +2480,8 @@ test("feature_offer render does not acquire a claim or call a timing-out provide
   }
 });
 
-test("feature_offer applies active sku promotion to action pricing", async () => {
+test("feature_offer applies active sku promotion to action pricing", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 8, 15) });
   await withPromotions([
     {
       promo_key: "action_sale",
@@ -7098,7 +7100,8 @@ test("subscription_offer keeps subscription priority over scene pass", async () 
   );
 });
 
-test("subscription_offer applies promotions by sku and last active match wins", async () => {
+test("subscription_offer applies promotions by sku and last active match wins", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 8, 15) });
   await withPromotions([
     {
       promo_key: "all_sale",

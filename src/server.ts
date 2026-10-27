@@ -1,4 +1,8 @@
 import "dotenv/config";
+import { registerWebCommerceRoutes } from './web/commerceRoutes.js';
+import { createWebCommerce } from './web/commerceFactory.js';
+import type { WebCommerceService } from './web/commerce.js';
+import { registerWebEngineRoutes, WebEngineBridge } from './web/engineBridge.js';
 import Fastify from "fastify";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -16,6 +20,10 @@ import { isInternalApiAuthorized } from "./internalApiAuth.js";
 import { runWithRequestContext } from "./requestContext.js";
 import { RewardRepository } from "./rewardRepository.js";
 import { RewardService, RewardUnavailableError } from "./rewardService.js";
+import { SupabaseAuthVerifier } from "./web/auth.js";
+import { registerWebRoutes, type WebRoutesOptions } from "./web/routes.js";
+import { WebRepository } from "./web/repository.js";
+import { createWebDeliveryTransport, WebDeliveryWorker } from "./web/delivery.js";
 import {
   nonNegativeIntegerInputSchema,
   positiveIntegerInputSchema,
@@ -66,6 +74,7 @@ type BuildAppOptions = {
   mediaCommerceDecisionService?: MediaCommerceDecisionEvaluator;
   sbpCheckoutService?: SbpCheckoutResolver;
   rewardService?: RewardClaimer;
+  web?: WebRoutesOptions & { deliveryWorker?: Pick<WebDeliveryWorker, "start" | "stop">; commerce?: WebCommerceService };
   logger?: boolean;
 };
 
@@ -398,6 +407,45 @@ export function buildApp(options: BuildAppOptions = {}) {
       throw error;
     }
   });
+
+  let web = options.web;
+  if (!web && config.WEB_ENABLED) {
+    const repository = new WebRepository();
+    const transport = createWebDeliveryTransport({
+      url: config.WEB_N8N_WEBHOOK_URL!,
+      secret: config.WEB_N8N_WEBHOOK_SECRET!,
+      timeoutMs: config.WEB_DELIVERY_TIMEOUT_MS,
+    });
+    const worker = new WebDeliveryWorker({
+      store: repository,
+      transport,
+      maxAttempts: config.WEB_DELIVERY_MAX_ATTEMPTS,
+      leaseMs: Math.max(30_000, config.WEB_DELIVERY_TIMEOUT_MS + 15_000),
+      pollMs: config.WEB_DELIVERY_POLL_MS,
+      onError: (code) => app.log.error({ code }, "Web delivery temporarily unavailable"),
+    });
+    web = {
+      repository,
+      authenticator: new SupabaseAuthVerifier(config.SUPABASE_URL!, config.SUPABASE_PUBLISHABLE_KEY!),
+      deliveryWorker: worker,
+      commerce: createWebCommerce(repository),
+    };
+  }
+  if (web) {
+    registerWebRoutes(app, web);
+    if (web.commerce) {
+      registerWebCommerceRoutes(app, { ...web, commerce: web.commerce });
+      registerWebEngineRoutes(app,new WebEngineBridge(web.commerce));
+      const commerce=web.commerce;
+      app.addHook('onReady',async()=>{commerce.start();});
+      app.addHook('onClose',async()=>{await commerce.stop();});
+    }
+    const worker = web.deliveryWorker;
+    if (worker) {
+      app.addHook("onReady", async () => { worker.start(); });
+      app.addHook("onClose", async () => { await worker.stop(); });
+    }
+  }
 
   return app;
 }
