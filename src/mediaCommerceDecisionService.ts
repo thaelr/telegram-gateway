@@ -1,4 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { VideoCommerceRepository, type VideoContext, type VideoDelivery, type VideoUi } from './videoCommerce.js';
+import { signVideoUrl } from './videoStorage.js';
 import type { WebProductPlan } from './web/commerceTypes.js';
 import {
   buildAssignment,
@@ -37,11 +39,13 @@ import {
   buildFeaturePaymentInputs,
   buildSceneUnlockPaymentInputs,
   buildSubscriptionPaymentInputs,
+  buildPaymentInputs,
 } from "./mediaCommerce/subscriptionFlow.js";
 import {
   resolveSubscriptionPlans,
   resolveActionPlanByFeatureKey,
   resolvePhotoPlanBySku,
+  calculateFullUpgrade,
 } from "./mediaCommerce/plans.js";
 import {
   INVOICE_TTL_MS,
@@ -481,6 +485,9 @@ function applySubscriptionPlanOverrides<T extends {
   description: string;
   label: string;
   button_text: string;
+  tier?: 'base'|'full';
+  upgrade_full_amount_xtr?: number;
+  upgrade_full_amount_rub?: number | null;
 }>(
   plans: T[],
   params: SubscriptionOfferExperimentParams,
@@ -495,14 +502,17 @@ function applySubscriptionPlanOverrides<T extends {
       return [];
     }
 
+    const fullMultiplier = 1-config.MEDIA_FULL_DISCOUNT_PERCENT/100;
     return [{
       ...plan,
-      days: override?.days ?? plan.days,
-      amount_xtr: override?.amount_xtr ?? plan.amount_xtr,
+      days: plan.tier === 'full' ? 30 : override?.days ?? plan.days,
+      amount_xtr: override?.amount_xtr != null && plan.tier === 'full' ? Math.max(1,Math.round(override.amount_xtr*fullMultiplier)) : override?.amount_xtr ?? plan.amount_xtr,
       amount_rub:
         "amount_rub" in (override ?? {})
-          ? override?.amount_rub ?? null
+          ? override?.amount_rub == null ? null : plan.tier === 'full' ? Math.max(1,Math.round(override.amount_rub*fullMultiplier)) : override.amount_rub
           : plan.amount_rub ?? null,
+      upgrade_full_amount_xtr:override?.amount_xtr != null && plan.tier === 'full' ? override.amount_xtr*fullMultiplier : plan.upgrade_full_amount_xtr,
+      upgrade_full_amount_rub:override?.amount_rub != null && plan.tier === 'full' ? override.amount_rub*fullMultiplier : plan.upgrade_full_amount_rub,
       title: override?.title ?? plan.title,
       description: override?.description ?? plan.description,
       label: override?.label ?? plan.label,
@@ -968,6 +978,7 @@ export class MediaCommerceDecisionService {
     const params = selection?.params ?? {};
     const subscriptions = applySubscriptionPlanOverrides(resolveSubscriptionPlans(), params);
     const actions = config.MEDIA_ACTION_PLANS_JSON.flatMap(item => {
+      if (!config.MEDIA_VIDEO_ENABLED && ['video_unlock','video_pass'].includes(item.feature_key)) return [];
       const promoted = resolveActionPlanByFeatureKey(item.feature_key);
       const effective = item.feature_key === 'scene_unlock' ? applySceneUnlockOverride(promoted, params) : promoted;
       return effective ? [effective] : [];
@@ -976,9 +987,10 @@ export class MediaCommerceDecisionService {
     const base = (p: typeof subscriptions[number] | typeof actions[number] | typeof photos[number]) => ({
       sku: p.sku, title: p.title, description: p.description, amount_xtr: p.amount_xtr,
       amount_rub: p.amount_rub ?? null, original_amount_rub: p.original_amount_rub, promo_key: p.promo_key,
+      upgrade_full_amount_xtr: p.upgrade_full_amount_xtr,upgrade_full_amount_rub:p.upgrade_full_amount_rub,
     });
     return [
-      ...subscriptions.map(p => ({...base(p),kind:'subscription' as const,subscription_days:p.days})),
+      ...subscriptions.map(p => ({...base(p),kind:'subscription' as const,subscription_days:p.days,subscription_tier:p.tier ?? 'base'})),
       ...photos.map(p => ({...base(p),kind:'photo' as const})),
       ...actions.map(p => ({...base(p),kind:'feature' as const,feature_key:p.feature_key})),
     ];
@@ -994,6 +1006,8 @@ export class MediaCommerceDecisionService {
     private readonly sbpClient: SbpPaymentClient | null = config.SBP_ENABLED
       ? new SbpPaymentAdapter()
       : null,
+    private readonly videos: VideoCommerceRepository = new VideoCommerceRepository(),
+    private readonly videoSigner: typeof signVideoUrl = signVideoUrl,
   ) {}
 
   private async runOperation<T>(
@@ -1783,6 +1797,33 @@ export class MediaCommerceDecisionService {
   async evaluate(
     input: MediaCommerceDecisionRequest,
   ): Promise<MediaCommerceDecisionResponse> {
+    if (config.MEDIA_VIDEO_ENABLED && ['video_context','claim_video_delivery','finalize_video_delivery'].includes(input.interaction_mode ?? '')) {
+      return this.evaluateVideoTransport(input);
+    }
+    const response = await this.evaluateCore(input);
+    if (!config.MEDIA_VIDEO_ENABLED || !response.chat_id) return response;
+    if (['finalize_offer','finalize_photo_event'].includes(input.interaction_mode ?? '') && input.current_reply_markup != null) {
+      const panel = response.panel_message_id ?? input.panel_message_id ?? input.target_message_id;
+      if (panel) {
+        const state = parseJsonObject(await this.videos.storePanel(response.chat_id,panel,input.current_reply_markup,
+          response.media_signature ?? input.media_signature ?? null,input.selected_uuid ?? input.current_uuid ?? null));
+        if (state?.panel_delivered === true) {
+          const context = await this.videos.context({chat_id:response.chat_id,scene_session_id:response.scene_session_id ?? null,panel_message_id:panel});
+          return {...response,target_message_id:panel,video_panel_reconcile:true,video:{available:false,consumed:true},
+            current_reply_markup:context.current_reply_markup,reply_markup:context.current_reply_markup,
+            video_control_tokens:context.video_control_tokens ?? context.delivery?.video_control_tokens ?? [],
+            video_payment_urls:context.video_payment_urls ?? context.delivery?.video_payment_urls ?? []};
+        }
+      }
+    }
+    if (response.operation === 'edit_photo' && response.media_signature) {
+      return this.decoratePhotoVideo(response);
+    }
+    if (response.operation === 'scene_access_activated') return this.decorateChatVideoOffer(response);
+    return response;
+  }
+
+  private async evaluateCore(input: MediaCommerceDecisionRequest): Promise<MediaCommerceDecisionResponse> {
     const route = classifyRoute(input);
 
     switch (route) {
@@ -1807,6 +1848,178 @@ export class MediaCommerceDecisionService {
       case "noop":
         return buildBaseResponse(input, route);
     }
+  }
+
+  private videoToken(base: MediaCommerceDecisionResponse, action: string, extra: Record<string,unknown> = {}): InteractionTokenRow {
+    return buildCallbackTokenRow({chat_id:base.chat_id!,scene_session_id:base.scene_session_id ?? null,
+      turn_no:base.turn_no ?? null,scene_turn_no:base.scene_turn_no ?? null,media_signature:base.media_signature ?? null,
+      target_message_id:base.target_message_id ?? base.panel_message_id ?? null,current_uuid:base.current_uuid ?? base.selected_uuid ?? null,
+      base_price_xtr:0,next_action:action,requested_action:action,button_text:action === 'video_request' ? '🎬 Оживить фото' : 'Разблокировать видео',
+      extraPayload:{character_i:base.character_i ?? null,telegram_chat_id:base.telegram_chat_id ?? null,...extra,action_kind:action}});
+  }
+
+  private async loadVideoContext(base: MediaCommerceDecisionResponse): Promise<VideoContext> {
+    return this.videos.context({chat_id:base.chat_id!,scene_session_id:base.scene_session_id ?? null,
+      character_i:base.character_i,media_signature:base.media_signature,panel_message_id:base.target_message_id ?? base.panel_message_id});
+  }
+
+  private async decoratePhotoVideo(base: MediaCommerceDecisionResponse): Promise<MediaCommerceDecisionResponse> {
+    const context = await this.loadVideoContext(base);
+    const video: VideoUi = {available:!!context.video && context.scene_active,consumed:context.panel_delivered,
+      full_active:context.full_active,video_pass_active:context.video_pass_active};
+    const pass = resolveActionPlanByFeatureKey('video_pass');
+    if (context.scene_active && !context.full_active && !context.video_pass_active && pass && !video.consumed) {
+      const chatOffer = this.videoToken(base,'video_pass_options',{pass_only:true});
+      await this.repository.upsertCallbackTokens([chatOffer]);
+      video.chat_offer_callback_data = chatOffer.token;
+      video.pass_price_rub = pass.amount_rub ?? null;
+    }
+    if (!video.available || video.consumed) return {...base,video};
+    const row = this.videoToken(base,'video_request',{video_id:context.video!.video_id,character_i:context.character_i ?? base.character_i});
+    await this.repository.upsertCallbackTokens([row]);
+    return {...base,video:{...video,animate_callback_data:row.token},token_rows:[...(base.token_rows ?? []),row],
+      token_rows_prepared:(base.token_rows_prepared ?? 0)+1,token_rows_inserted:(base.token_rows_inserted ?? 0)+1};
+  }
+
+  private async decorateChatVideoOffer(base: MediaCommerceDecisionResponse): Promise<MediaCommerceDecisionResponse> {
+    const context = await this.loadVideoContext(base);
+    const plan = resolveActionPlanByFeatureKey('video_pass');
+    if (!plan || !context.scene_active || context.full_active || context.video_pass_active) return base;
+    const row = this.videoToken({...base,target_message_id:null,panel_message_id:null},'video_pass_options',{pass_only:true});
+    await this.repository.upsertCallbackTokens([row]);
+    return {...base,video:{available:false,consumed:false,chat_offer_callback_data:row.token,pass_reveal_callback_data:row.token,pass_price_rub:plan.amount_rub ?? null}};
+  }
+
+  private deliveryResponse(base: MediaCommerceDecisionResponse, delivery: VideoDelivery | null): MediaCommerceDecisionResponse {
+    if (!delivery) return {...base,operation:'noop',reason:'video_access_required'};
+    if (delivery.status === 'duplicate_payment_requires_review' || !delivery.delivery_id) {
+      return {...base,operation:'video_payment_review_required',reason:'duplicate_payment_requires_review',
+        text:'Оплата получена, но для этой фотопанели уже зарегистрирована выдача. Проверить платёж можно через /paysupport.'};
+    }
+    return {...base,operation:['queued','pending','failed','ready'].includes(delivery.status) ? 'video_delivery_required' : 'noop',
+      delivery_id:delivery.delivery_id,eligible_at:delivery.eligible_at,target_message_id:delivery.photo_message_id,
+      telegram_chat_id:delivery.telegram_chat_id,reason:`video_delivery_${delivery.status}`};
+  }
+
+  private async evaluateVideoCallback(base: MediaCommerceDecisionResponse, payload: Record<string,unknown>, action: string): Promise<MediaCommerceDecisionResponse> {
+    const targetMessageId = base.target_message_id ?? base.inbound_message_id ?? null;
+    const frozen = {...base,target_message_id:targetMessageId,character_i:normalizePositiveInteger(payload.character_i) ?? base.character_i,
+      telegram_chat_id:normalizePositiveInteger(payload.telegram_chat_id) ?? base.telegram_chat_id};
+    const context = await this.loadVideoContext(frozen);
+    const passOnly = payload.pass_only === true;
+    if (!passOnly && context.delivery) return this.deliveryResponse(frozen,context.delivery);
+    if (!context.scene_active || (!passOnly && (!context.video || context.panel_delivered))) {
+      return {...frozen,operation:'noop',reason:'video_unavailable',callback_answer_text:'Видео недоступно для этой фотопанели.'};
+    }
+    // The callback belongs to the displayed photo, never to a photo visited earlier.
+    if (!passOnly && ((context.panel_media_signature && context.panel_media_signature !== frozen.media_signature)
+      || (context.panel_photo_uuid && frozen.current_uuid && context.panel_photo_uuid !== frozen.current_uuid))) {
+      return {...frozen,operation:'noop',reason:'video_panel_changed',callback_answer_text:'Фотография изменилась. Нажми кнопку на текущем фото.'};
+    }
+    if (context.full_active || context.video_pass_active) {
+      if (passOnly) return {...frozen,operation:'noop',reason:'video_access_already_active'};
+      if (!targetMessageId || !frozen.telegram_chat_id) return {...frozen,operation:'noop',reason:'video_panel_required'};
+      return this.deliveryResponse(frozen,await this.videos.prepareDelivery({request_key:`video:${base.callback_data}`,
+        chat_id:frozen.chat_id!,scene_session_id:frozen.scene_session_id ?? null,video_id:context.video!.video_id,
+        photo_message_id:targetMessageId,telegram_chat_id:frozen.telegram_chat_id,source:'telegram'}));
+    }
+    const unlock = resolveActionPlanByFeatureKey('video_unlock');
+    const pass = resolveActionPlanByFeatureKey('video_pass');
+    const passToken = this.videoToken(frozen,'video_pass_options',{...payload,pass_only:passOnly});
+    const purchaseRoot = typeof payload.video_purchase_key === 'string' ? payload.video_purchase_key
+      : createHash('sha256').update([frozen.chat_id,frozen.scene_session_id,targetMessageId,context.video?.video_id ?? 'pass'].join(':')).digest('hex').slice(0,24);
+    passToken.payload_json.video_purchase_key = purchaseRoot;
+    const snapshot = {chat_id:frozen.chat_id,scene_session_id:frozen.scene_session_id,character_i:context.character_i ?? frozen.character_i,
+      media_signature:frozen.media_signature,video_id:passOnly ? null : context.video?.video_id,
+      photo_message_id:passOnly ? null : targetMessageId,target_message_id:targetMessageId,
+      telegram_chat_id:frozen.telegram_chat_id,source:'telegram',current_uuid:frozen.current_uuid,
+      requested_action:'video_request',base_reply_markup:base.current_reply_markup};
+    const plans = [!passOnly ? unlock : null,pass].filter((plan): plan is NonNullable<typeof plan> => plan != null);
+    const inputs = plans.flatMap(plan => buildPaymentInputs({base_token:`pay_v_${purchaseRoot}_${plan.feature_key === 'video_pass' ? 'p' : 'u'}`,
+      chat_id:frozen.chat_id!,scene_session_id:frozen.scene_session_id ?? null,turn_no:frozen.turn_no ?? null,scene_turn_no:frozen.scene_turn_no ?? null,
+      action_kind:'feature_payment',plan,payload_json:{...snapshot,action_kind:'feature_payment',feature_key:plan.feature_key,
+        idempotency_key:`video:${purchaseRoot}:${plan.feature_key}`,original_amount_xtr:plan.original_amount_xtr,
+        original_amount_rub:plan.original_amount_rub,promo_key:plan.promo_key}}));
+    const stored = await this.upsertCurrentPaymentAttempts(inputs,'video');
+    const rendered = await this.prepareRenderablePaymentRows(stored,'video');
+    const options = rendered.map(buildPaymentOption);
+    await this.repository.upsertCallbackTokens([passToken]);
+    const markup = parseJsonObject(base.current_reply_markup);
+    const buttons = Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard.flat().map(parseJsonObject) : [];
+    const existingTokens = buttons.flatMap(button=>typeof button?.callback_data === 'string' ? [button.callback_data] : []);
+    const keepTokens: string[]=[];
+    const videoTokens = await Promise.all(existingTokens.map(async token=>{
+      const storedToken = await this.repository.loadCallbackToken(token,frozen.chat_id);
+      if(passOnly && storedToken?.chat_id === frozen.chat_id && storedToken.action_kind === 'video_request') {keepTokens.push(token);return null;}
+      return storedToken?.chat_id === frozen.chat_id && ['video_request','video_pass_options'].includes(storedToken.action_kind ?? '') ? token : null;
+    }));
+    const knownTokens = [...new Set([base.callback_data,passToken.token,...videoTokens].filter((value):value is string=>!!value))];
+    return {...frozen,operation:'video_ui_ready',video:{available:!passOnly,consumed:false,
+      unlock_payment_options:options.filter(option=>option.feature_key === 'video_unlock'),
+      pass_reveal_callback_data:passToken.token,pass_price_rub:pass?.amount_rub ?? null,
+      pass_payment_options:action === 'video_pass_options' ? options.filter(option=>option.feature_key === 'video_pass') : []},
+      current_reply_markup:base.current_reply_markup,video_control_tokens:knownTokens,
+      video_keep_tokens:keepTokens,
+      video_payment_urls:options.map(option=>option.checkout_url),reason:'video_payment_options'};
+  }
+
+  private async fulfillVideoPayment(base: MediaCommerceDecisionResponse, paid: PaidInvoiceToken, payload: Record<string,unknown>, feature: string): Promise<MediaCommerceDecisionResponse> {
+    if (feature === 'video_pass') await this.videos.activateVideoPass(paid.token,paid.chat_id);
+    const videoId = typeof payload.video_id === 'string' ? payload.video_id : null;
+    const panelId = normalizePositiveInteger(payload.photo_message_id);
+    const frozen = {...base,chat_id:paid.chat_id,scene_session_id:paid.scene_session_id,target_message_id:panelId,
+      telegram_chat_id:normalizePositiveInteger(payload.telegram_chat_id),payment_token:paid.token,feature_key:feature};
+    if (!videoId || !panelId) {
+      const target=normalizePositiveInteger(payload.target_message_id);
+      const context=feature==='video_pass' && target ? await this.videos.context({chat_id:paid.chat_id,scene_session_id:paid.scene_session_id,panel_message_id:target}) : null;
+      const controls=await Promise.all((context?.video_control_tokens ?? []).map(async token=>{
+        const row=await this.repository.loadCallbackToken(token,paid.chat_id);
+        return row?.action_kind === 'video_pass_options' ? token : null;
+      }));
+      return {...frozen,operation:feature === 'video_pass' ? 'video_pass_activated' : 'noop',target_message_id:target,
+        current_reply_markup:context?.current_reply_markup,reply_markup:context?.current_reply_markup,
+        video_control_tokens:controls.filter((token):token is string=>token!==null),video_payment_urls:context?.video_payment_urls ?? [],
+        text:context?.scene_active === false ? 'Оплата получена. VideoPass относится к сцене, выбранной при оплате; текущая сцена уже изменилась.'
+          : 'Видео в этом чате разблокированы до смены сцены.',reason:feature === 'video_pass' ? 'video_pass_activated' : 'video_snapshot_invalid'};
+    }
+    return this.deliveryResponse(frozen,await this.videos.prepareDelivery({request_key:`paid:${paid.token}`,
+      chat_id:paid.chat_id,scene_session_id:paid.scene_session_id,video_id:videoId,photo_message_id:panelId,
+      telegram_chat_id:frozen.telegram_chat_id,source:'telegram',payment_token:paid.token}));
+  }
+
+  private async evaluateVideoTransport(input: MediaCommerceDecisionRequest): Promise<MediaCommerceDecisionResponse> {
+    const base = buildBaseResponse(input,'noop');
+    if (input.interaction_mode === 'video_context') {
+      if (!base.chat_id) return {...base,reason:'chat_id_required'};
+      const panel = input.panel_message_id ?? input.target_message_id;
+      if (panel && input.current_reply_markup != null) await this.videos.storePanel(base.chat_id,panel,input.current_reply_markup,input.media_signature ?? null,input.current_uuid ?? null);
+      return this.decoratePhotoVideo({...base,target_message_id:panel});
+    }
+    if (!input.delivery_id) return {...base,reason:'delivery_id_required'};
+    if (input.interaction_mode === 'claim_video_delivery') {
+      const claim = randomUUID();
+      const delivery = await this.videos.claimDelivery(input.delivery_id,claim);
+      if (!delivery) return {...base,reason:'video_delivery_not_claimed'};
+      try {
+        const videoUrl = await this.videoSigner(delivery.bucket_name,delivery.storage_path);
+        return {...base,operation:'video_delivery_claimed',delivery_id:delivery.delivery_id,claim_token:claim,
+          video_url:videoUrl,target_message_id:delivery.photo_message_id,telegram_chat_id:delivery.telegram_chat_id,
+          reason:'video_delivery_claimed'};
+      } catch (error) {
+        await this.videos.failDelivery(input.delivery_id,claim,'video_url_signing_failed',true);
+        throw error;
+      }
+    }
+    if (!input.claim_token) return {...base,reason:'claim_token_required'};
+    const delivery = input.delivery_success === true && input.sent_message_id
+      ? await this.videos.completeDelivery(input.delivery_id,input.claim_token,input.sent_message_id)
+      : await this.videos.failDelivery(input.delivery_id,input.claim_token,input.delivery_error ?? 'send_failed',input.retryable === true);
+    const delivered = delivery?.status === 'delivered';
+    return {...base,operation:'video_delivery_stored',delivery_id:input.delivery_id,delivered,delivery_success:delivered,
+      target_message_id:delivery?.photo_message_id ?? null,telegram_chat_id:delivery?.telegram_chat_id ?? null,
+      current_reply_markup:delivery?.current_reply_markup,reply_markup:delivery?.current_reply_markup,
+      video_control_tokens:delivery?.video_control_tokens ?? [],video_payment_urls:delivery?.video_payment_urls ?? [],
+      reason:delivered ? 'video_delivered' : `video_delivery_${delivery?.status ?? 'not_updated'}`};
   }
 
   private async buildSceneUnlockEntryTokenRows(input: {
@@ -2439,6 +2652,10 @@ export class MediaCommerceDecisionService {
         operation: "noop",
         reason: valid ? "chat_id_required" : "callback_invalid",
       };
+    }
+
+    if (config.MEDIA_VIDEO_ENABLED && (actionKind === 'video_request' || actionKind === 'video_pass_options')) {
+      return this.evaluateVideoCallback(callbackBase, payload, actionKind);
     }
 
     if (
@@ -3711,6 +3928,9 @@ export class MediaCommerceDecisionService {
     }
 
     if (resolvedAction.payment_kind === "feature") {
+      if (resolvedAction.feature_key === 'video_unlock' || resolvedAction.feature_key === 'video_pass') {
+        return this.fulfillVideoPayment(base, paidRow, payload, resolvedAction.feature_key);
+      }
       if (resolvedAction.feature_key === "scene_unlock") {
         return this.fulfillSceneAccessPayment(
           base,
@@ -4228,6 +4448,9 @@ export class MediaCommerceDecisionService {
     }
 
     if (resolvedAction.payment_kind === "feature") {
+      if (resolvedAction.feature_key === 'video_unlock' || resolvedAction.feature_key === 'video_pass') {
+        return this.fulfillVideoPayment(base, paidRow, payload, resolvedAction.feature_key);
+      }
       if (resolvedAction.feature_key === "scene_unlock") {
         return this.fulfillSceneAccessPayment(base, paidRow, payload, resolvedAction);
       }
@@ -4264,7 +4487,10 @@ export class MediaCommerceDecisionService {
         sku: subscriptionSku,
         invoice_status: paidRow.status,
       },
-      () => this.repository.activateSubscription({
+      () => paidRow.payload_json?.subscription_tier === 'full'
+        ? this.videos.activateFullSubscription(paidRow.token,paidRow.chat_id,subscriptionSku,subscriptionDays,
+          paidRow.payload_json?.subscription_change === 'upgrade' ? 'upgrade' : 'renew')
+        : this.repository.activateSubscription({
         payment_token: paidRow.token,
         chat_id: paidRow.chat_id,
         subscription_sku: subscriptionSku,
@@ -4655,7 +4881,7 @@ export class MediaCommerceDecisionService {
       abTokenSuffix != null
         ? `${offerId}:ab_${abTokenSuffix}`
         : offerId;
-    const offerText = resolveSubscriptionOfferText(
+    let offerText = resolveSubscriptionOfferText(
       abParams,
       subscriptionOfferReason,
     );
@@ -4687,10 +4913,36 @@ export class MediaCommerceDecisionService {
       && inActiveScene
       && activeSceneSessionId
       && abParams.scene_unlock?.enabled !== false;
-    const subscriptionPlans = applySubscriptionPlanOverrides(
+    let subscriptionPlans = applySubscriptionPlanOverrides(
       resolveSubscriptionPlans(),
       abParams,
     );
+    let videoSubscriptionContext: VideoContext | null = null;
+    if (config.MEDIA_VIDEO_ENABLED) {
+      videoSubscriptionContext = await this.videos.context({chat_id:chatId,scene_session_id:requestSceneSessionId});
+      const activeSku = videoSubscriptionContext.subscription_sku;
+      const active = activeSku && videoSubscriptionContext.subscription_until && Date.parse(videoSubscriptionContext.subscription_until)>Date.now();
+      if (active) {
+        const nominal = config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(plan=>plan.sku === activeSku);
+        const title = nominal?.title ?? activeSku;
+        offerText = `${title}\n${nominal?.description ?? ''}\nДействует до ${videoSubscriptionContext.subscription_until}\nВсе текущие преимущества подписки сохраняются.`;
+        if (videoSubscriptionContext.full_active) {
+          offerText += '\nFull: диалоги, фотографии и безлимитные доступные видео во всех чатах.';
+          subscriptionPlans = [];
+        } else {
+          offerText += '\nBase: действующие преимущества диалогов и фотографий.';
+          subscriptionPlans = !videoSubscriptionContext.video_pass_active && nominal
+            ? subscriptionPlans.filter(plan=>plan.tier === 'full').flatMap(plan=>{
+              const quote = calculateFullUpgrade(plan,nominal,config.MEDIA_UPGRADE_DISCOUNT_PERCENT);
+              if(quote.amount_xtr <= 0 && (quote.amount_rub == null || quote.amount_rub <= 0 || !config.SBP_ENABLED)) return [];
+              return [{...plan,...quote,amount_rub:quote.amount_rub && quote.amount_rub>0 ? quote.amount_rub : null,
+                subscription_change:'upgrade' as const,upgrade_base_sku:nominal.sku,
+                upgrade_discount_percent:config.MEDIA_UPGRADE_DISCOUNT_PERCENT,
+                description:`Апгрейд до Full на новые 30 дней. ${plan.description}`}];
+            }) : [];
+        }
+      }
+    }
     const invoiceInputs = subscriptionPlans.flatMap((plan, index) =>
       buildSubscriptionPaymentInputs({
         chat_id: chatId,
@@ -4820,6 +5072,9 @@ export class MediaCommerceDecisionService {
       token_rows_prepared: tokenRows.length,
       token_rows_inserted: tokenRowsInserted,
       text: offerText,
+      subscription_tier:videoSubscriptionContext?.full_active ? 'full' : 'base',
+      subscription_sku:videoSubscriptionContext?.subscription_sku,
+      subscription_until:videoSubscriptionContext?.subscription_until,
       free_balance_text: freeBalanceText,
       ab_test: abContext,
       subscription_offer_items: subscriptionOfferItems,

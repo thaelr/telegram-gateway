@@ -4,6 +4,8 @@ import { MediaCommerceRepository } from '../mediaCommerceRepository.js';
 import { calculateMediaPriceRequired } from '../mediaCommerce/mediaAction.js';
 import { compareDecimals, normalizeDecimal, type ProviderCheckout, type ProviderPayment } from '../payments/providers.js';
 import { WebError, type SceneMode } from './types.js';
+import { WebVideoAccess } from './videoAccess.js';
+import { config } from '../config.js';
 
 export type WebCommerceContext = {
  chat_id:number; chat_code:string; character_i:number; scene_session_id:string|null;
@@ -12,7 +14,7 @@ export type WebCommerceContext = {
 export type WebCommerceQuote = WebCommerceContext & {
  sku:string; title:string; description:string; kind:'subscription'|'photo'|'feature';
  amount:string; currency:string; amount_xtr:number|null; subscription_days?:number;
- feature_key?:string; media_id?:string; media_signature?:string; panel_id?:number;
+ feature_key?:string; media_id?:string; media_signature?:string; panel_id?:number; video_id?:string;
  price_required?:number; payload?:Record<string,unknown>;
 };
 export type WebPurchase = {
@@ -39,7 +41,8 @@ const contextQuery="SELECT c.chat_id,c.chat_code,c.character_i,c.active_scene_se
 const photoEvents=['media.photo.unlocked.free','media.photo.unlocked.paid','media.photo.unlocked.subscription','media.photo.unlocked.scene_pass'];
 
 export class WebCommerceRepository {
- constructor(private readonly query:typeof sql=sql){}
+ readonly videos: WebVideoAccess;
+ constructor(private readonly query:typeof sql=sql,videos?:WebVideoAccess){this.videos=videos??new WebVideoAccess(query);}
  private async lockPurchaseChat(db:DB,id:string){await r(db,"SELECT c.chat_id FROM public.chat_state c JOIN app_private.web_purchases p ON p.chat_id=c.chat_id WHERE p.purchase_id=$1::uuid FOR UPDATE OF c",[id]);}
  private async recoverCreationLeases(){
   const expired=await r(this.query,"SELECT purchase_id FROM app_private.web_purchases WHERE status='creating' AND creation_started_at<clock_timestamp()-interval '2 minutes' ORDER BY chat_id,purchase_id LIMIT 100");
@@ -53,10 +56,10 @@ export class WebCommerceRepository {
  async getContext(userId:string,code:string){return this.context(this.query,userId,code);}
  async getOwned(userId:string,id:string):Promise<WebPurchase>{await this.recoverCreationLeases();const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE user_id=$1 AND purchase_id=$2::uuid",[userId,id]))[0];if(!row)throw new WebError(404,'purchase_not_found');return asPurchase(row);}
  async getById(id:string):Promise<WebPurchase|null>{const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE purchase_id=$1::uuid",[id]))[0];return row?asPurchase(row):null;}
- async pendingFulfillments(limit=50):Promise<WebPurchase[]>{await this.recoverCreationLeases();return (await r(this.query,"SELECT * FROM app_private.web_purchases WHERE status IN ('paid','fulfillment_pending') ORDER BY updated_at LIMIT $1",[Math.min(100,Math.max(1,limit))])).map(asPurchase);}
+ async pendingFulfillments(limit=50):Promise<WebPurchase[]>{await this.recoverCreationLeases();return (await r(this.query,"SELECT * FROM app_private.web_purchases WHERE status IN ('paid','fulfillment_pending') AND error_code IS DISTINCT FROM 'duplicate_payment_requires_review' ORDER BY updated_at LIMIT $1",[Math.min(100,Math.max(1,limit))])).map(asPurchase);}
  async findByClient(userId:string,clientId:string):Promise<WebPurchase|null>{await this.recoverCreationLeases();const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE user_id=$1 AND client_id=$2",[userId,clientId]))[0];return row?asPurchase(row):null;}
  async getByProviderExternal(provider:string,id:string):Promise<WebPurchase|null>{const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE provider=$1 AND (external_payment_id=$2 OR external_invoice_id=$2)",[provider,id]))[0];return row?asPurchase(row):null;}
- async getEntitlements(userId:string){const row=(await r(this.query,"SELECT subscription_sku,subscription_until,entitlements_jsonb AS balances FROM public.users WHERE user_id=$1",[userId]))[0];if(!row)throw new WebError(401,'account_not_found');return {...row,subscription_until:iso(row.subscription_until)};}
+ async getEntitlements(userId:string){const columns=config.MEDIA_VIDEO_ENABLED?',subscription_tier,subscription_tier_sku':'';const row=(await r(this.query,"SELECT subscription_sku,subscription_until,entitlements_jsonb AS balances"+columns+" FROM public.users WHERE user_id=$1",[userId]))[0];if(!row)throw new WebError(401,'account_not_found');const active=Boolean(row.subscription_until&&new Date(row.subscription_until).getTime()>Date.now());const full=active&&row.subscription_tier==='full'&&row.subscription_tier_sku===row.subscription_sku;return {subscription_sku:row.subscription_sku,subscription_until:iso(row.subscription_until),balances:row.balances,subscription_active:active,subscription_tier:full?'full':'base',full_active:full};}
 
  async createOrGet(userId:string,clientId:string,fingerprint:string,quote:WebCommerceQuote,provider:string):Promise<{purchase:WebPurchase;created:boolean}>{
   return this.query.begin(async tx=>{
@@ -74,13 +77,19 @@ export class WebCommerceRepository {
     if(quote.feature_key==='scene_unlock'&&(state?.subscription_active||state?.scene_access_active))throw new WebError(409,'feature_already_available');
     if((quote.feature_key==='scene_unlock'&&(credits?.free_scene_unlocks??0)>0)||(quote.feature_key==='fast_scene_skip'&&(credits?.free_fast_scene_skips??0)>0))throw new WebError(409,'free_feature_available');
     if(quote.feature_key==='fast_scene_skip'&&current.scene_mode!=='fast')throw new WebError(409,'feature_not_available');
+    if(quote.feature_key==='video_unlock'||quote.feature_key==='video_pass'){
+     const ctx=await this.videos.context({...current,media_signature:quote.media_signature??'',panel_id:quote.panel_id??0},tx);
+     if(!ctx.scene_active)throw new WebError(409,'stale_scene');
+     if(ctx.full_active||ctx.video_pass_active)throw new WebError(409,'video_already_available');
+     if(quote.video_id&&(!ctx.video||ctx.video.video_id!==quote.video_id||ctx.panel_delivered))throw new WebError(409,'stale_video_offer');
+    }
    }
    if(quote.kind==='photo'&&quote.media_id&&await this.isUnlocked(tx,userId,quote.media_id))throw new WebError(409,'media_already_unlocked');
    const amount=normalizeDecimal(quote.amount);
    if(amount.includes('.')||Number(amount)>2147483647||compareDecimals(amount,'0')<=0)throw new WebError(400,'invalid_order_amount');
    const id=randomUUID(),token='web_inv_'+randomUUID();
    const action=quote.kind==='subscription'?'subscription_payment':quote.kind==='photo'?'photo_payment':'feature_payment';
-   const payload={...(quote.payload??{}),source:'web',idempotency_key:id,chat_id:quote.chat_id,scene_session_id:quote.scene_session_id,turn_no:quote.turn_no,scene_turn_no:quote.scene_turn_no,character_i:quote.character_i,scene_mode:quote.scene_mode,subscription_days:quote.subscription_days??null,subscription_sku:quote.kind==='subscription'?quote.sku:null,feature_key:quote.feature_key??null,media_signature:quote.media_signature??null,target_message_id:quote.panel_id??null,photo_uuid:quote.media_id??null,photo_sku:quote.kind==='photo'?quote.sku:null};
+   const payload={...(quote.payload??{}),source:'web',idempotency_key:id,chat_id:quote.chat_id,scene_session_id:quote.scene_session_id,turn_no:quote.turn_no,scene_turn_no:quote.scene_turn_no,character_i:quote.character_i,scene_mode:quote.scene_mode,subscription_days:quote.subscription_days??null,subscription_sku:quote.kind==='subscription'?quote.sku:null,feature_key:quote.feature_key??null,media_signature:quote.media_signature??null,target_message_id:quote.panel_id??null,photo_message_id:quote.panel_id??null,photo_uuid:quote.media_id??null,video_id:quote.video_id??null,photo_sku:quote.kind==='photo'?quote.sku:null};
    await r(tx,"SELECT * FROM public.media_upsert_invoice_token($1,'invoice_payload',$2,$3,$4,$5::smallint,$6::text::jsonb,$7,$8,$9,$10::integer,$11,$12::integer,NULL,NULL,NULL,NULL,$13,$14,$13,$13)",[token,quote.chat_id,quote.scene_session_id,quote.turn_no,quote.scene_turn_no,JSON.stringify(payload),action,quote.sku,provider,amount,quote.currency.toUpperCase(),quote.amount_xtr,quote.title,quote.description]);
    const row=(await r(tx,"INSERT INTO app_private.web_purchases(purchase_id,user_id,chat_id,client_id,fingerprint,provider,payment_token,quote) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8::text::jsonb) RETURNING *",[id,userId,quote.chat_id,clientId,fingerprint,provider,token,JSON.stringify({...quote,amount,currency:quote.currency.toUpperCase()})]))[0]!;
    return {purchase:asPurchase(row),created:true};
@@ -179,7 +188,19 @@ export class WebCommerceRepository {
    await r(tx,"SELECT set_config('app_private.media_source','web',true)");
    if(q.kind==='subscription'){
     if(!q.subscription_days||q.subscription_days<=0)throw new WebError(409,'invalid_subscription_snapshot');
-    await common.activateSubscription({payment_token:p.payment_token,chat_id:Number(p.chat_id),subscription_sku:q.sku,subscription_days:q.subscription_days});
+    if(q.payload?.subscription_tier==='full'){
+     await r(tx,'SELECT public.media_activate_full_subscription($1,$2,$3,$4::integer,$5)',[p.payment_token,p.chat_id,q.sku,q.subscription_days,q.payload.subscription_change??'renew']);
+    }else await common.activateSubscription({payment_token:p.payment_token,chat_id:Number(p.chat_id),subscription_sku:q.sku,subscription_days:q.subscription_days});
+   }else if(q.kind==='feature'&&(q.feature_key==='video_unlock'||q.feature_key==='video_pass')){
+    if(q.feature_key==='video_pass')await r(tx,'SELECT public.media_activate_video_pass($1,$2)',[p.payment_token,p.chat_id]);
+    if(q.video_id){
+     const delivery=await this.videos.prepare({request_key:'paid:'+p.payment_token,payment_token:p.payment_token,chat_id:Number(p.chat_id)},tx);
+     if(delivery.status==='duplicate_payment_requires_review'){
+      return asPurchase((await r(tx,"UPDATE app_private.web_purchases SET status='fulfillment_pending',error_code='duplicate_payment_requires_review',updated_at=clock_timestamp() WHERE purchase_id=$1::uuid RETURNING *",[id]))[0]!);
+     }
+     q.payload={...(q.payload??{}),video_delivery_id:delivery.delivery_id};
+     await r(tx,'UPDATE app_private.web_purchases SET quote=$2::text::jsonb WHERE purchase_id=$1::uuid',[id,JSON.stringify(q)]);
+    }else if(q.feature_key==='video_unlock')throw new WebError(409,'missing_video_snapshot');
    }else if(q.kind==='feature'&&q.feature_key==='scene_unlock'){
     if(!q.scene_session_id)throw new WebError(409,'missing_scene');
     await common.activateSceneAccess({payment_token:p.payment_token,chat_id:Number(p.chat_id),scene_session_id:q.scene_session_id,scene_access_sku:q.sku});
@@ -256,6 +277,6 @@ export class WebCommerceRepository {
   const unlocked=await Promise.all(owned.map(async item=>({media_id:item.media_id,media_kind:'photo',unlocked:true,photo_url:(await common.loadPhotoByUuid(item.media_id))?.photo_url??null})));
   const offers=await r(this.query,"SELECT media_id::text,sku,scene_session_id,conditions FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2 AND scene_session_id=$3 ORDER BY created_at",[userId,c.chat_id,c.scene_session_id]);
   const ownedIds=new Set(owned.map(item=>item.media_id));
-  return {media:[...unlocked,...offers.filter(item=>!ownedIds.has(item.media_id)).map(item=>({...item,media_kind:'photo',unlocked:false}))]};
+  return {media:[...unlocked,...offers.filter(item=>!ownedIds.has(item.media_id)).map(item=>({...item,media_id:String(item.media_id),media_kind:'photo',unlocked:false}))]};
  }
 }

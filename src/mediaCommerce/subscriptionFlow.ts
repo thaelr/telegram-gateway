@@ -123,7 +123,7 @@ function buildPaymentInputRow(input: {
   };
 }
 
-function buildPaymentInputs(input: {
+export function buildPaymentInputs(input: {
   base_token: string;
   chat_id: number;
   scene_session_id: string | null;
@@ -134,9 +134,9 @@ function buildPaymentInputs(input: {
   plan: CommercePlan;
 }): UpsertInvoiceTokenInput[] {
   const sbpExpiresAt = new Date(Date.now() + INVOICE_TTL_MS).toISOString();
-  const sources: PaymentSource[] = ["stars"];
+  const sources: PaymentSource[] = input.plan.amount_xtr > 0 ? ["stars"] : [];
 
-  if (config.SBP_ENABLED && input.plan.amount_rub != null) {
+  if (config.SBP_ENABLED && input.plan.amount_rub != null && input.plan.amount_rub > 0) {
     sources.push("sbp");
   }
 
@@ -283,6 +283,10 @@ export function buildSubscriptionPaymentInputs(input: {
   plan: {
     sku: string;
     days: number;
+    tier?: 'base' | 'full';
+    subscription_change?: 'upgrade' | 'renew';
+    upgrade_base_sku?: string | null;
+    upgrade_discount_percent?: number;
     amount_xtr: number;
     amount_rub?: number | null;
     title: string;
@@ -313,6 +317,11 @@ export function buildSubscriptionPaymentInputs(input: {
     idempotency_key: input.idempotency_key,
     subscription_days: input.plan.days,
     subscription_sku: input.plan.sku,
+    subscription_tier: input.plan.tier ?? 'base',
+    subscription_change: input.plan.subscription_change ?? 'renew',
+    upgrade_base_sku: input.plan.upgrade_base_sku ?? null,
+    upgrade_discount_percent: input.plan.upgrade_discount_percent ?? null,
+    full_discount_percent: input.plan.tier === 'full' ? config.MEDIA_FULL_DISCOUNT_PERCENT : null,
     original_amount_xtr: input.plan.original_amount_xtr ?? input.plan.amount_xtr,
     original_amount_rub: input.plan.original_amount_rub ?? input.plan.amount_rub ?? null,
     promo_key: input.plan.promo_key ?? null,
@@ -322,6 +331,7 @@ export function buildSubscriptionPaymentInputs(input: {
   const baseToken = buildHashedPaymentToken([
     input.idempotency_key,
     input.plan.sku,
+    ...(input.plan.tier === 'full' ? [input.plan.subscription_change ?? 'renew',input.plan.upgrade_base_sku] : []),
     buildAbIdentity(input.ab_test),
   ]);
 

@@ -15,6 +15,12 @@ export type MediaCommerceRoute =
   | "noop";
 
 export type MediaCommerceOperation =
+  | "video_ui_ready"
+  | "video_delivery_required"
+  | "video_delivery_claimed"
+  | "video_delivery_stored"
+  | "video_pass_activated"
+  | "video_payment_review_required"
   | "prepare_offer_none"
   | "prepare_offer_callback"
   | "prepare_offer_ready"
@@ -131,6 +137,19 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
 }
 
 export interface MediaCommerceDecisionResponse {
+  video?: import('./videoCommerce.js').VideoUi;
+  video_panel_reconcile?: boolean;
+  video_control_tokens?: string[];
+  video_keep_tokens?: string[];
+  video_payment_urls?: string[];
+  delivery_id?: string;
+  claim_token?: string;
+  eligible_at?: string;
+  video_url?: string;
+  delivered?: boolean;
+  delivery_success?: boolean;
+  reply_markup?: unknown;
+  subscription_tier?: 'base'|'full';
   route: MediaCommerceRoute;
   operation: MediaCommerceOperation;
   interaction_mode: string | null;

@@ -28,11 +28,24 @@ export function registerWebCommerceRoutes(app:FastifyInstance,options:WebCommerc
   scope.get('/web/commerce/catalog',async request=>{const q=z.object({chat_code:chatCode.optional()}).strict().parse(request.query);return options.commerce.catalog(user(request),q.chat_code);});
   scope.get('/web/commerce/entitlements',async request=>options.commerce.entitlements(user(request)));
   scope.post('/web/commerce/purchases',async(request,reply)=>{
-   const input=z.object({client_message_id:clientId,chat_code:chatCode,sku:z.string().trim().min(1).max(120),provider:providerId,media_id:z.string().uuid().optional()}).strict().parse(request.body);
+   const input=z.object({client_message_id:clientId,chat_code:chatCode,sku:z.string().trim().min(1).max(120),provider:providerId,media_id:z.string().uuid().optional(),subscription_change:z.enum(['renew','upgrade']).optional()}).strict().parse(request.body);
    return reply.status(202).send(await options.commerce.purchase(user(request),input));
   });
   scope.get('/web/commerce/purchases/:purchase_id',async request=>{const p=z.object({purchase_id:z.string().uuid()}).strict().parse(request.params);return options.commerce.status(user(request),p.purchase_id);});
   scope.get('/web/chats/:chat_code/media',async request=>{const p=z.object({chat_code:chatCode}).strict().parse(request.params);return options.commerce.gallery(user(request),p.chat_code);});
+  scope.get('/web/chats/:chat_code/media/:media_id/video',async request=>{
+   const p=z.object({chat_code:chatCode,media_id:z.string().uuid()}).strict().parse(request.params);
+   return options.commerce.videoAvailability(user(request),p.chat_code,p.media_id);
+  });
+  scope.post('/web/chats/:chat_code/media/:media_id/video',async(request,reply)=>{
+   const p=z.object({chat_code:chatCode,media_id:z.string().uuid()}).strict().parse(request.params);
+   const input=z.object({client_message_id:clientId}).strict().parse(request.body);
+   return reply.status(202).send(await options.commerce.requestVideo(user(request),p.chat_code,p.media_id,input.client_message_id));
+  });
+  scope.get('/web/commerce/video-deliveries/:delivery_id',async request=>{
+   const p=z.object({delivery_id:z.string().uuid()}).strict().parse(request.params);
+   return options.commerce.videoAccess(user(request),p.delivery_id);
+  });
   scope.post('/web/chats/:chat_code/media/:media_id/unlock',async(request,reply)=>{
    const p=z.object({chat_code:chatCode,media_id:z.string().uuid()}).strict().parse(request.params);
    const input=z.object({client_message_id:clientId,provider:providerId.optional()}).strict().parse(request.body);

@@ -24,6 +24,8 @@ export type PromotedInvoicePlan<T extends InvoicePlan> = T & {
   final_amount_rub: number | null;
   promo_key: string | null;
   promo_active: boolean;
+  upgrade_full_amount_xtr?: number;
+  upgrade_full_amount_rub?: number | null;
 };
 
 export class UnknownPhotoSkuError extends Error {
@@ -146,7 +148,39 @@ export function resolvePhotoPlanBySku(
 }
 
 export function resolveSubscriptionPlans(): Array<PromotedInvoicePlan<MediaSubscriptionPlan>> {
-  return config.MEDIA_SUBSCRIPTION_PLANS_JSON.map((plan) => applyPromotionToPlan(plan));
+  return config.MEDIA_SUBSCRIPTION_PLANS_JSON.filter(plan=>config.MEDIA_VIDEO_ENABLED || plan.tier !== 'full').map((plan) => {
+    const promoted = applyPromotionToPlan(plan);
+    if (plan.tier !== 'full') return promoted;
+    const multiplier = 1 - config.MEDIA_FULL_DISCOUNT_PERCENT / 100;
+    return {...promoted,
+      upgrade_full_amount_xtr: promoted.amount_xtr * multiplier,
+      upgrade_full_amount_rub: promoted.amount_rub == null ? null : promoted.amount_rub * multiplier,
+      amount_xtr: Math.max(1, Math.round(promoted.amount_xtr * multiplier)),
+      final_amount_xtr: Math.max(1, Math.round(promoted.amount_xtr * multiplier)),
+      amount_rub: promoted.amount_rub == null ? null : Math.max(1, Math.round(promoted.amount_rub * multiplier)),
+      final_amount_rub: promoted.amount_rub == null ? null : Math.max(1, Math.round(promoted.amount_rub * multiplier)),
+    };
+  });
+}
+
+/** Round upward to the next integer ending in 9; preserve 9/19/... exactly.
+ * Non-positive differences have no chargeable upgrade and are never silently charged. */
+export function roundUpgradePrice(value: number): number {
+  if (!Number.isFinite(value)) throw new Error('Upgrade price must be finite');
+  if (value <= 0) return 0;
+  return Math.max(9, Math.ceil((value - 9) / 10) * 10 + 9);
+}
+
+export function calculateFullUpgrade<T extends {amount_xtr:number;amount_rub?:number|null;upgrade_full_amount_xtr?:number;upgrade_full_amount_rub?:number|null}>(
+  discountedFull: T, nominalBase: {amount_xtr:number;amount_rub?:number|null}, discountPercent: number,
+): {amount_xtr:number;amount_rub:number|null} {
+  if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) throw new Error('Invalid upgrade discount');
+  const multiplier = 1 - discountPercent / 100;
+  return {
+    amount_xtr: roundUpgradePrice(((discountedFull.upgrade_full_amount_xtr ?? discountedFull.amount_xtr) - nominalBase.amount_xtr) * multiplier),
+    amount_rub: discountedFull.amount_rub == null || nominalBase.amount_rub == null ? null
+      : roundUpgradePrice(((discountedFull.upgrade_full_amount_rub ?? discountedFull.amount_rub) - nominalBase.amount_rub) * multiplier),
+  };
 }
 
 export function resolveActionPlanByFeatureKey(

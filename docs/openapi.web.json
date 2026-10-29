@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Midnight Persona Web API",
-    "version": "2.0.0",
-    "description": "Supabase-authenticated Gateway and Web Commerce. Responses contain public account/chat data only. Browser sessions use standard Supabase Google OAuth/Anonymous Auth and refresh. Authenticated routes send Cache-Control: no-store. Protected n8n server delivery never includes bearer tokens. NOWPayments server callbacks use IPN signatures."
+    "version": "2.1.0",
+    "description": "Supabase-authenticated Gateway and Web Commerce. Responses contain public account/chat data only. Browser sessions use standard Supabase Google OAuth/Anonymous Auth and refresh. Authenticated routes send Cache-Control: no-store. Protected n8n server delivery never includes bearer tokens. NOWPayments server callbacks use IPN signatures. Video commerce extends the same purchases and account subscriptions. Video URLs are short-lived and issued only through an owned delivery operation."
   },
   "servers": [
     {
@@ -2247,6 +2247,14 @@
                   "media_id": {
                     "type": "string",
                     "format": "uuid"
+                  },
+                  "subscription_change": {
+                    "type": "string",
+                    "enum": [
+                      "renew",
+                      "upgrade"
+                    ],
+                    "description": "Use upgrade with a configured Full SKU and an active Base. The nominal Base price is subtracted; remaining days are not prorated."
                   }
                 },
                 "required": [
@@ -2260,7 +2268,7 @@
             }
           }
         },
-        "description": "Consent and ownership are checked. Client amounts/currency/entitlements are rejected. Same client ID with different purchase data is a conflict. creation_uncertain must be reconciled; retry does not create a second external invoice."
+        "description": "Consent and ownership are checked. Client amounts/currency/entitlements are rejected. Same client ID with different purchase data is a conflict. creation_uncertain must be reconciled; retry does not create a second external invoice. video_unlock requires media_id; video_pass optionally accepts media_id for automatic delivery from that photo. Server freezes video_id, scene and panel at checkout. Full upgrade uses subscription_change=upgrade and returns new 30-day access after payment."
       }
     },
     "/web/commerce/purchases/{purchase_id}": {
@@ -2848,6 +2856,386 @@
           }
         },
         "description": "Verifies signature, order/provider/invoice/payment association and exact stored price. Only full finished payment grants rights. Duplicate and delayed notifications are safe; partial/unconfirmed payments do not grant rights."
+      }
+    },
+    "/web/chats/{chat_code}/media/{media_id}/video": {
+      "get": {
+        "operationId": "photoVideoAvailability",
+        "summary": "Check animation availability and scene/account access for an owned current photo offer",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_code",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^c[a-z0-9]{7}$"
+            }
+          },
+          {
+            "in": "path",
+            "name": "media_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoAvailability"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Video payment required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Consent or access required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Scene, panel, or operation conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Short delivery access window expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retryable delivery failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "requestPhotoVideo",
+        "summary": "Request one video using existing Full or VideoPass",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_code",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^c[a-z0-9]{7}$"
+            }
+          },
+          {
+            "in": "path",
+            "name": "media_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "client_message_id"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "client_message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoDelivery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Video payment required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Consent or access required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Scene, panel, or operation conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Short delivery access window expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retryable delivery failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "The server selects the ready video by character and media signature. client_message_id is idempotent within this account/photo route. Requires separate age and terms consent. Payment-required callers create an existing Commerce purchase with video_unlock/video_pass SKU and media_id. No Writer call is made."
+      }
+    },
+    "/web/commerce/video-deliveries/{delivery_id}": {
+      "get": {
+        "operationId": "getVideoDeliveryAccess",
+        "summary": "Claim or recover short-lived access to an owned delivery",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "delivery_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoDelivery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Video payment required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Consent or access required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Scene, panel, or operation conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Short delivery access window expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retryable delivery failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -3844,6 +4232,44 @@
             "items": {
               "type": "string"
             }
+          },
+          "subscription_tier": {
+            "type": "string",
+            "enum": [
+              "base",
+              "full"
+            ]
+          },
+          "upgrade": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "subscription_change",
+                  "base_sku",
+                  "price",
+                  "days"
+                ],
+                "properties": {
+                  "subscription_change": {
+                    "const": "upgrade"
+                  },
+                  "base_sku": {
+                    "type": "string"
+                  },
+                  "price": {
+                    "$ref": "#/components/schemas/Money"
+                  },
+                  "days": {
+                    "const": 30
+                  }
+                }
+              }
+            ]
           }
         },
         "required": [
@@ -3905,6 +4331,19 @@
               "type": "integer",
               "minimum": 0
             }
+          },
+          "subscription_active": {
+            "type": "boolean"
+          },
+          "subscription_tier": {
+            "type": "string",
+            "enum": [
+              "base",
+              "full"
+            ]
+          },
+          "full_active": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -3971,6 +4410,38 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "video_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "video_delivery_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "subscription_tier": {
+            "type": "string",
+            "enum": [
+              "base",
+              "full"
+            ]
+          },
+          "subscription_change": {
+            "type": "string",
+            "enum": [
+              "renew",
+              "upgrade"
+            ]
+          },
+          "review_required": {
+            "type": "boolean",
+            "description": "A second separately paid checkout for a consumed panel requires operator payment reconciliation; no duplicate delivery."
           }
         },
         "required": [
@@ -4006,6 +4477,20 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "animation_available": {
+            "type": "boolean"
+          },
+          "video_access": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "full",
+              "video_pass",
+              null
             ]
           }
         },
@@ -4072,6 +4557,20 @@
                         "price_required"
                       ],
                       "additionalProperties": false
+                    },
+                    "animation_available": {
+                      "type": "boolean"
+                    },
+                    "video_access": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "full",
+                        "video_pass",
+                        null
+                      ]
                     }
                   },
                   "required": [
@@ -4128,6 +4627,100 @@
         ],
         "additionalProperties": false,
         "description": "Existing/free feature right; no external checkout. A fast skip remains unfulfilled until the engine commits its scene reset."
+      },
+      "VideoAvailability": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "media_id",
+          "animation_available",
+          "video_id",
+          "full_active",
+          "video_pass_active",
+          "panel_delivered",
+          "scene_session_id"
+        ],
+        "properties": {
+          "media_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "animation_available": {
+            "type": "boolean"
+          },
+          "video_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "full_active": {
+            "type": "boolean"
+          },
+          "video_pass_active": {
+            "type": "boolean"
+          },
+          "panel_delivered": {
+            "type": "boolean"
+          },
+          "scene_session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "VideoDelivery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "delivery_id",
+          "video_id",
+          "status",
+          "ready_at",
+          "access_path"
+        ],
+        "properties": {
+          "delivery_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "video_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "sending",
+              "failed",
+              "uncertain",
+              "delivered"
+            ]
+          },
+          "ready_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "access_path": {
+            "type": "string"
+          },
+          "video_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "description": "One delivery operation, not permanent video ownership. GET waits until ready_at and returns a signed URL with a 120-second fixed access window. A lost response can be recovered only within that original window; expired operations return 410. Uncertain delivery is never automatically sent again."
       }
     }
   }

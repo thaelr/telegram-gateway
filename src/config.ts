@@ -17,6 +17,7 @@ const invoicePlanSchema = z.object({
 
 const mediaSubscriptionPlanSchema = invoicePlanSchema.extend({
   days: positiveIntegerSchema,
+  tier: z.enum(['base', 'full']).optional(),
 });
 
 const mediaPhotoPlanSchema = invoicePlanSchema;
@@ -54,6 +55,8 @@ const mediaPromotionSchema = z.object({
 
 const mediaSubscriptionPlansSchema = z.array(mediaSubscriptionPlanSchema).min(1).superRefine((value, ctx) => {
   addUniqueStringIssue(value.map((plan) => plan.sku), "Subscription plan skus must be unique", ctx);
+  if (value.filter(plan => plan.tier === 'full').length > 1) ctx.addIssue({code:z.ZodIssueCode.custom,message:'Configure one Full plan'});
+  value.forEach((plan,index) => { if(plan.tier === 'full' && plan.days !== 30) ctx.addIssue({code:z.ZodIssueCode.custom,path:[index,'days'],message:'Full lasts 30 days'}); });
 });
 
 const mediaPhotoPlansSchema = z.array(mediaPhotoPlanSchema).min(1).superRefine((value, ctx) => {
@@ -280,6 +283,10 @@ const rawEnvSchema = z.object({
   INTERNAL_API_KEY_HEADER: z.string().min(1).default("x-internal-api-key"),
   WEB_ENABLED: z.string().default("false").pipe(z.enum(["true", "false"])).transform((value) => value === "true"),
   SUPABASE_URL: z.string().trim().optional(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().trim().optional(),
+  MEDIA_VIDEO_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),
+  MEDIA_FULL_DISCOUNT_PERCENT: z.coerce.number().min(0).max(100).default(0),
+  MEDIA_UPGRADE_DISCOUNT_PERCENT: z.coerce.number().min(0).max(100).default(0),
   SUPABASE_PUBLISHABLE_KEY: z.string().trim().optional(),
   WEB_N8N_WEBHOOK_URL: z.string().trim().optional(),
   WEB_N8N_WEBHOOK_SECRET: z.string().trim().optional(),
