@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { loadExperimentConfigsFromEnv } from "./abTesting.js";
-import { telegramUxCopySchema, type TelegramUxCopy } from "./telegramUxCopy.js";
+import { characterGalleryOrderSchema } from "./telegramUxCopy.js";
 export type { TelegramUxCopy } from "./telegramUxCopy.js";
 
 const positiveIntegerSchema = z.number().int().positive();
@@ -193,6 +193,13 @@ const rawEnvSchema = z.object({
   WEB_DELIVERY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
   WEB_DELIVERY_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
   LOCALIZATION_CACHE_TTL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
+  TELEGRAM_PROMO_EFFECT_ID: z.string().trim().min(1),
+  TELEGRAM_FAST_SCENE_EFFECT_ID: z.string().trim().min(1),
+  TELEGRAM_ROLEPLAY_SCENE_EFFECT_ID: z.string().trim().min(1),
+  TELEGRAM_CHARACTER_GALLERY_ORDER_JSON: z
+    .string()
+    .transform((raw) => parseJsonEnv(raw, characterGalleryOrderSchema)),
+  TELEGRAM_CHARACTER_VOTE_URL: z.string().trim().url(),
   PUBLIC_OFFER_URL: z.string().trim().url(),
   LEGAL_URLS_JSON: z
     .string()
@@ -292,14 +299,6 @@ const rawEnvSchema = z.object({
       (slots) => new Set(slots.map((slot) => slot.campaign_id)).size === slots.length,
       "Reward campaign ids must be unique",
     ),
-  TELEGRAM_UX_COPY_JSON: z
-    .string()
-    .optional()
-    .transform((raw) =>
-      raw == null ? undefined : parseJsonEnv(
-        raw,
-        telegramUxCopySchema,
-      )),
 });
 
 const parsedEnv = rawEnvSchema.parse(process.env);
@@ -367,10 +366,6 @@ if (normalizedSbpConfig.SBP_ENABLED) {
 
 export const config = {
   ...parsedEnv,
-  // Runtime may omit the legacy JSON after the complete RU dictionary is
-  // imported. Keep the public compatibility type stable for older callers;
-  // localization entry points explicitly handle the absent runtime value.
-  TELEGRAM_UX_COPY_JSON: parsedEnv.TELEGRAM_UX_COPY_JSON as TelegramUxCopy,
   ...normalizedSbpConfig,
   GATEWAY_PUBLIC_URL: gatewayPublicUrl,
   EXPERIMENTS: loadExperimentConfigsFromEnv(process.env),

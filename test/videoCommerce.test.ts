@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { installTestEnv } from './testEnv.js';
+import { installTestEnv, testTelegramUxCopy } from './testEnv.js';
 import type { VideoContext, VideoDelivery } from '../src/videoCommerce.js';
 import type { InteractionTokenRow } from '../src/mediaCommerceTypes.js';
 installTestEnv();
@@ -14,6 +14,7 @@ const {config}=await import('../src/config.js');
 const {calculateFullUpgrade,roundUpgradePrice,resolveSubscriptionPlans}=await import('../src/mediaCommerce/plans.js');
 const {MediaCommerceDecisionService}=await import('../src/mediaCommerceDecisionService.js');
 const {buildSubscriptionPaymentInputs}=await import('../src/mediaCommerce/subscriptionFlow.js');
+const {runWithMediaLocalization}=await import('../src/mediaLocalization.js');
 type Repo=ConstructorParameters<typeof MediaCommerceDecisionService>[0];
 type VideoRepo=NonNullable<ConstructorParameters<typeof MediaCommerceDecisionService>[3]>;
 const videoId='00000000-0000-4000-8000-000000000001';
@@ -22,6 +23,16 @@ const context:VideoContext={video:{video_id:videoId,bucket_name:'videos',storage
   subscription_sku:null,subscription_until:null,panel_delivered:false,scene_active:true};
 const delivery:VideoDelivery={delivery_id:deliveryId,status:'pending',eligible_at:'2026-10-28T12:00:05Z',video_id:videoId,
   photo_message_id:77,telegram_chat_id:900,source:'telegram',bucket_name:'videos',storage_path:'one.mp4'};
+const localization={
+  async getTelegramCopy(){return testTelegramUxCopy;},
+  async getPaymentMethods():Promise<Array<'stars'|'sbp'>>{return config.SBP_ENABLED ? ['sbp','stars'] : ['stars'];},
+  async getNamespace(){return {};},
+};
+const withLocalization=<T>(execute:()=>T)=>runWithMediaLocalization({
+  language:'ru',uxCopy:testTelegramUxCopy,
+  paymentMethods:(config.SBP_ENABLED ? ['sbp','stars'] : ['stars']) as Array<'stars'|'sbp'>,
+  commerceCopy:{},
+},execute);
 
 function setup(overrides:Partial<VideoContext>={}) {
   const tokens=new Map<string,InteractionTokenRow>();
@@ -44,7 +55,7 @@ function setup(overrides:Partial<VideoContext>={}) {
     async failDelivery(...args:unknown[]){requests.push(args);return {...delivery,status:args[3]?'failed':'uncertain'};},
   } as unknown as VideoRepo;
   const service=new MediaCommerceDecisionService(repo,{async createStarsInvoice(){throw Error('Unexpected Stars call');}},null,videos,
-    async()=> 'https://private.test/signed');
+    async()=> 'https://private.test/signed',localization);
   return {service,tokens,requests,invoices};
 }
 
@@ -66,12 +77,12 @@ test('Full discount retains precision until the final upgrade rounding',()=>{
     assert.equal(resolveSubscriptionPlans().filter(plan=>plan.tier!=='full').length,2);
   }finally{config.MEDIA_FULL_DISCOUNT_PERCENT=old;}
 });
-test('subscription invoice snapshot freezes tier, upgrade source and discounts',()=>{
+test('subscription invoice snapshot freezes tier, upgrade source and discounts',()=>withLocalization(()=>{
   const row=buildSubscriptionPaymentInputs({chat_id:1,idempotency_key:'offer',subscription_offer_reason:'subscription_command',turn_limit:20,
     turns_today:2,turn_limit_reset_text:'midnight',sort_order:1,plan:{...plan,sku:'full',days:30,tier:'full',subscription_change:'upgrade',upgrade_base_sku:'base_long',upgrade_discount_percent:15}})[0]!;
   assert.equal(row.action_kind,'subscription_payment');assert.equal(row.payload_json.subscription_tier,'full');
   assert.equal(row.payload_json.subscription_change,'upgrade');assert.equal(row.payload_json.upgrade_base_sku,'base_long');assert.equal(row.payload_json.subscription_days,30);
-});
+}));
 test('video context creates only callback metadata, with independent open-chat offer',async()=>{
   const {service,invoices}=setup();
   const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
@@ -145,10 +156,10 @@ test('stale photo callback cannot mint a payment for the previous photo',async()
 });
 test('upgrade payment sources are independent when only RUB remains positive',()=>{
   const enabled=config.SBP_ENABLED;config.SBP_ENABLED=true;
-  try {const rows=buildSubscriptionPaymentInputs({chat_id:1,idempotency_key:'rub-only',subscription_offer_reason:'subscription_command',turn_limit:20,
+  try {return withLocalization(()=>{const rows=buildSubscriptionPaymentInputs({chat_id:1,idempotency_key:'rub-only',subscription_offer_reason:'subscription_command',turn_limit:20,
     turns_today:2,turn_limit_reset_text:'midnight',sort_order:1,plan:{...plan,amount_xtr:0,amount_rub:99,sku:'full',days:30,tier:'full',subscription_change:'upgrade',upgrade_base_sku:'base'}});
     assert.equal(rows.length,1);assert.equal(rows[0]!.payment_source,'sbp');assert.equal(rows[0]!.amount,99);
-  } finally {config.SBP_ENABLED=enabled;}
+  });} finally {config.SBP_ENABLED=enabled;}
 });
 test('standalone VideoPass reveal retains the animate callback',async()=>{
   const {service}=setup();const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});

@@ -3,6 +3,15 @@ import { z } from "zod";
 const textSchema = z.string().min(1);
 const positiveIntegerSchema = z.number().int().positive();
 
+export const characterGalleryOrderSchema = z.array(positiveIntegerSchema).superRefine((value, ctx) => {
+  if (new Set(value).size !== value.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Character gallery order ids must be unique",
+    });
+  }
+});
+
 export const telegramUxCopySchema = z.object({
   language: z.object({
     message: textSchema,
@@ -68,14 +77,7 @@ export const telegramUxCopySchema = z.object({
   character_gallery: z.object({
     heading: textSchema,
     empty: textSchema,
-    order: z.array(positiveIntegerSchema).superRefine((value, ctx) => {
-      if (new Set(value).size !== value.length) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Character gallery order ids must be unique",
-        });
-      }
-    }).optional(),
+    order: characterGalleryOrderSchema.optional(),
     next_first_button: textSchema,
     next_button: textSchema,
     back_button: textSchema,

@@ -907,6 +907,14 @@ function groupOfferItems(rows: StoredInvoiceToken[]): MediaOfferItem[] {
     );
 }
 
+function getFirstAvailablePaymentSource(items: MediaOfferItem[]): PaymentSource {
+  const available = new Set(
+    items.flatMap((item) => item.payment_options.map((option) => option.source)),
+  );
+  return getMediaPaymentMethods().find((source) => available.has(source))
+    ?? (available.has("sbp") ? "sbp" : "stars");
+}
+
 function selectLegacyPrimaryRow(rows: StoredInvoiceToken[]): StoredInvoiceToken | null {
   if (rows.length === 0) {
     return null;
@@ -1826,7 +1834,7 @@ export class MediaCommerceDecisionService {
       : "ru";
     const uxCopy = this.localization
       ? await this.localization.getTelegramCopy(language)
-      : config.TELEGRAM_UX_COPY_JSON;
+      : null;
     if (!uxCopy) {
       throw new MediaCommerceOperationError(
         "Telegram localization is unavailable",
@@ -3028,13 +3036,9 @@ export class MediaCommerceDecisionService {
     }
     const hasRequestedSource = offerItems.some((item) =>
       item.payment_options.some((option) => option.source === selectedPaymentSource));
-    const hasSbpOption = offerItems.some((item) =>
-      item.payment_options.some((option) => option.source === "sbp"));
     const effectivePaymentSource: PaymentSource = hasRequestedSource
       ? selectedPaymentSource
-      : hasSbpOption
-        ? "sbp"
-        : "stars";
+      : getFirstAvailablePaymentSource(offerItems);
 
     return {
       ...base,
@@ -5082,8 +5086,7 @@ export class MediaCommerceDecisionService {
     const hasStarsSubscriptionOption = subscriptionOfferItems.some((item) =>
       item.payment_kind === "subscription"
       && item.payment_options.some((option) => option.source === "stars"));
-    const defaultPaymentSource: PaymentSource =
-      hasSbpSubscriptionOption ? "sbp" : "stars";
+    const defaultPaymentSource = getFirstAvailablePaymentSource(subscriptionOfferItems);
     const offerMessageId =
       sortedRows
         .map((row) => normalizePositiveInteger(row.telegram_invoice_message_id))

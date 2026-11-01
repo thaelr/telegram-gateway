@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { TelegramLanguage } from "../src/telegramLanguage.js";
 import type { AccessContext, AccessDecisionRequest } from "../src/types.js";
-import { installTestEnv } from "./testEnv.js";
+import { installTestEnv, testTelegramUxCopy } from "./testEnv.js";
 
 installTestEnv();
 process.env.TURN_LIMIT ??= "20";
@@ -215,7 +215,7 @@ function createService(
   return {
     service: new AccessDecisionService(repository, {
       async getTelegramCopy() {
-        return config.TELEGRAM_UX_COPY_JSON;
+        return testTelegramUxCopy;
       },
       async getEnabledLanguages() {
         return [

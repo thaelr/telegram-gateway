@@ -26,8 +26,8 @@ export class LocalizationRepository implements LocalizationStore {
       `;
       return isRecord(rows[0]?.copy_json) ? rows[0].copy_json : null;
     } catch (error) {
-      // During the staged rollout the Gateway may start before the schema migration.
-      // Only that known case falls back to the existing env copy; other DB failures surface.
+      // During a rolling deployment the Gateway may start before the additive table migration.
+      // Only that known case is treated as missing data; other DB failures surface.
       if (postgresCode(error) === "42P01") return null;
       throw error;
     }
@@ -39,11 +39,7 @@ export class LocalizationRepository implements LocalizationStore {
         SELECT locale, copy_json -> '_language' AS metadata
         FROM public.ui_localizations
         WHERE namespace = 'telegram'
-          AND jsonb_typeof(copy_json -> '_language') = 'object'
-          AND COALESCE((copy_json -> '_language' ->> 'enabled')::boolean, false)
-        ORDER BY
-          COALESCE((copy_json -> '_language' ->> 'sort_order')::integer, 2147483647),
-          locale
+        ORDER BY locale
       `;
     } catch (error) {
       if (postgresCode(error) === "42P01") return [];

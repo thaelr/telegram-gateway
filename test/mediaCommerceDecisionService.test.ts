@@ -15,7 +15,7 @@ import type {
   StoredInvoiceToken,
 } from "../src/mediaCommerceTypes.js";
 import type { MediaCommerceDecisionRequest } from "../src/mediaCommerce/requestSchema.js";
-import { installTestEnv } from "./testEnv.js";
+import { installTestEnv, testTelegramUxCopy } from "./testEnv.js";
 
 installTestEnv();
 process.env.TURN_LIMIT ??= "20";
@@ -113,12 +113,22 @@ const { MediaRepositoryContractError } = await import(
   "../src/mediaCommerceRepository/errors.js"
 );
 const { config } = await import("../src/config.js");
+const { runWithMediaLocalization } = await import("../src/mediaLocalization.js");
 const { SbpPaymentError } = await import("../src/payments/sbp.js");
 const { TelegramStarsInvoiceError } = await import("../src/payments/stars.js");
 const {
   buildAssignment,
   loadExperimentConfigsFromEnv,
 } = await import("../src/abTesting.js");
+
+function withTestMediaLocalization<T>(execute: () => T): T {
+  return runWithMediaLocalization({
+    language: "ru",
+    uxCopy: testTelegramUxCopy,
+    paymentMethods: config.SBP_ENABLED ? ["sbp", "stars"] : ["stars"],
+    commerceCopy: {},
+  }, execute);
+}
 
 async function withMaintenanceConfig<T>(
   enabled: boolean,
@@ -399,7 +409,7 @@ function buildMediaContext(
   };
 }
 
-test("media action caps each panel at five new photos while keeping navigation", () => {
+test("media action caps each panel at five new photos while keeping navigation", () => withTestMediaLocalization(() => {
   const unlockedItems = [1, 2, 3, 4, 5].map((index) => ({
     uuid: `u${index}`,
     photo_url: `https://cdn.test/u${index}.jpg`,
@@ -448,7 +458,7 @@ test("media action caps each panel at five new photos while keeping navigation",
   assert.equal(cappedNavigation.operation, "edit_photo");
   assert.equal(cappedNavigation.selected_uuid, "u1");
   assert.equal(cappedNavigation.invoice_sku, null);
-});
+}));
 
 function buildStoredInvoiceToken(
   overrides: Partial<StoredInvoiceToken> = {},
@@ -723,7 +733,7 @@ test("buildPaymentOption requires explicit persisted payment fields", () => {
   }
 });
 
-test("subscription payment inputs do not fabricate SBP amount", () => {
+test("subscription payment inputs do not fabricate SBP amount", () => withTestMediaLocalization(() => {
   const previousEnabled = config.SBP_ENABLED;
   config.SBP_ENABLED = true;
   try {
@@ -753,17 +763,19 @@ test("subscription payment inputs do not fabricate SBP amount", () => {
   } finally {
     config.SBP_ENABLED = previousEnabled;
   }
-});
+}));
 
 function createRepository(
   overrides: Partial<MockRepository> = {},
   starsOverrides: Partial<MockStarsClient> = {},
   sbpOverrides: Partial<MockSbpClient> = {},
   localization: {
-    getTelegramCopy(locale: string): Promise<typeof config.TELEGRAM_UX_COPY_JSON>;
+    getTelegramCopy(locale: string): Promise<typeof testTelegramUxCopy>;
     getPaymentMethods?(locale: string, channel: "telegram"): Promise<Array<"stars" | "sbp">>;
     getNamespace?(locale: string, namespace: string): Promise<Record<string, unknown>>;
-  } | null = null,
+  } | null = {
+    async getTelegramCopy() { return testTelegramUxCopy; },
+  },
 ) {
   const calls = {
     loadMediaContext: 0,
@@ -2552,7 +2564,7 @@ test("invalid callback returns noop without media context query", async () => {
 });
 
 test("asynchronous commerce resolves UX copy from the saved account language", async () => {
-  const englishCopy = structuredClone(config.TELEGRAM_UX_COPY_JSON);
+  const englishCopy = structuredClone(testTelegramUxCopy);
   englishCopy.payment_errors.stale = "English stale callback";
   const { service } = createRepository(
     {
@@ -2608,7 +2620,7 @@ test("EN payment policy filters SBP before token creation and localizes Telegram
       {},
       {},
       {
-        async getTelegramCopy() { return config.TELEGRAM_UX_COPY_JSON; },
+        async getTelegramCopy() { return testTelegramUxCopy; },
         async getPaymentMethods(locale, channel) {
           assert.equal(locale, "en");
           assert.equal(channel, "telegram");
@@ -5746,7 +5758,7 @@ test("subscription_offer creates missing invoice links internally", async () => 
 });
 
 test("subscription_offer uses localized command and daily-limit copy when AB copy is absent", async () => {
-  const localizedCopy = structuredClone(config.TELEGRAM_UX_COPY_JSON);
+  const localizedCopy = structuredClone(testTelegramUxCopy);
   localizedCopy.subscription.command_offer = "EN localized command offer";
   localizedCopy.subscription.daily_limit_offer = "EN localized daily offer";
   const { service } = createRepository(
@@ -6116,7 +6128,7 @@ test("subscription_offer logs and skips ab when saved variant is missing from cu
 
       assert.equal(result.operation, "subscription_offer_ready");
       assert.equal(result.ab_test, null);
-      assert.equal(result.text, config.TELEGRAM_UX_COPY_JSON.subscription.command_offer);
+      assert.equal(result.text, testTelegramUxCopy.subscription.command_offer);
       assert.equal(
         result.subscription_invoice_tokens?.some((token) => token.includes(":ab_")),
         false,
@@ -6273,7 +6285,7 @@ test("subscription_offer ignores inactive ab experiment without loading assignme
     );
 
     assert.equal(result.ab_test, null);
-    assert.equal(result.text, config.TELEGRAM_UX_COPY_JSON.subscription.command_offer);
+    assert.equal(result.text, testTelegramUxCopy.subscription.command_offer);
   });
 });
 
@@ -6373,6 +6385,9 @@ test("subscription_offer returns SBP default source and toggle callback tokens w
           scene_is_active: false,
         };
       },
+    }, {}, {}, {
+      async getTelegramCopy() { return testTelegramUxCopy; },
+      async getPaymentMethods() { return ["sbp", "stars"]; },
     });
 
     const result = await service.evaluate(
@@ -6417,6 +6432,56 @@ test("subscription_offer returns SBP default source and toggle callback tokens w
     }
     assert.equal(calls.createStarsInvoice, 2);
     assert.equal(calls.createSbpPayment, 0);
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_SUBSCRIPTION_PLANS_JSON = previousSubscriptionPlans;
+  }
+});
+
+test("subscription_offer uses Stars first when payment policy orders Stars before SBP", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousSubscriptionPlans = config.MEDIA_SUBSCRIPTION_PLANS_JSON;
+  config.SBP_ENABLED = true;
+  config.MEDIA_SUBSCRIPTION_PLANS_JSON = [{
+    sku: "payment_plan_order",
+    days: 7,
+    amount_xtr: 100,
+    amount_rub: 199,
+    title: "text",
+    description: "text",
+    label: "text",
+    button_text: "text",
+  }];
+
+  try {
+    const { service } = createRepository({
+      async loadSceneAccessStatus() {
+        return {
+          chat_id: 101,
+          scene_session_id: null,
+          active_scene_session_id: null,
+          subscription_active: false,
+          scene_access_active: true,
+          scene_is_active: false,
+        };
+      },
+    }, {}, {}, {
+      async getTelegramCopy() { return testTelegramUxCopy; },
+      async getPaymentMethods() { return ["stars", "sbp"]; },
+    });
+
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: "subscription_offer",
+      idempotency_key: "telegram:stars-first",
+      subscription_offer_reason: "subscription_command",
+    }));
+
+    assert.equal(result.operation, "subscription_offer_ready");
+    assert.equal(result.selected_payment_source, "stars");
+    assert.deepEqual(
+      result.subscription_offer_items?.[0]?.payment_options.map((option) => option.source),
+      ["stars", "sbp"],
+    );
   } finally {
     config.SBP_ENABLED = previousEnabled;
     config.MEDIA_SUBSCRIPTION_PLANS_JSON = previousSubscriptionPlans;
@@ -6616,6 +6681,9 @@ test("subscription payment source toggle callback reuses stored offer data", asy
     async loadActiveSubscriptionOfferId() {
       return "telegram:offer-7";
     },
+  }, {}, {}, {
+    async getTelegramCopy() { return testTelegramUxCopy; },
+    async getPaymentMethods() { return ["sbp", "stars"]; },
   });
 
   const result = await service.evaluate(
@@ -6847,7 +6915,7 @@ test("subscription payment source toggle callback rejects mismatched payload off
   assert.equal(calls.createStarsInvoice, 0);
 });
 
-test("legacy subscription payment source toggle callback derives offer id from invoice rows", async () => {
+test("restored subscription source falls back to the first available policy method", async () => {
   const invoiceRows = [
     buildStoredInvoiceToken({
       token: "stars-token",
@@ -6879,7 +6947,7 @@ test("legacy subscription payment source toggle callback derives offer id from i
         payload_json: {
           action_kind: "subscription_payment_source_toggle",
           chat_id: 101,
-          selected_payment_source: "stars",
+          selected_payment_source: "sbp",
           subscription_offer_items: [
             {
               sku: "stale-snapshot",
@@ -6902,6 +6970,9 @@ test("legacy subscription payment source toggle callback derives offer id from i
     async loadActiveSubscriptionOfferId() {
       return "telegram:offer-7";
     },
+  }, {}, {}, {
+    async getTelegramCopy() { return testTelegramUxCopy; },
+    async getPaymentMethods() { return ["stars", "sbp"]; },
   });
 
   const result = await service.evaluate(buildRequest({
@@ -7364,7 +7435,7 @@ test("subscription_offer persists freshly created links without reload loop", as
   assert.equal(calls.createStarsInvoice, 2);
   assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.offer_reused, false);
-  assert.equal(result.text, config.TELEGRAM_UX_COPY_JSON.subscription.daily_limit_offer);
+  assert.equal(result.text, testTelegramUxCopy.subscription.daily_limit_offer);
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
     [
@@ -7434,7 +7505,7 @@ test("subscription_offer reuses stored invoice links from batch upsert without r
   assert.equal(calls.loadStoredInvoiceTokens, 0);
   assert.equal(calls.createStarsInvoice, 0);
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.equal(result.text, config.TELEGRAM_UX_COPY_JSON.subscription.command_offer);
+  assert.equal(result.text, testTelegramUxCopy.subscription.command_offer);
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
     [
@@ -9424,7 +9495,7 @@ for (const flow of ["feature", "scene_unlock"] as const) {
 }
 
 test("missing mandatory free-action copy cannot downgrade a free entitlement to paid", async () => {
-  const uxCopy = config.TELEGRAM_UX_COPY_JSON;
+  const uxCopy = testTelegramUxCopy;
   const previous = uxCopy.free_actions;
   Reflect.set(uxCopy, "free_actions", undefined);
   try {

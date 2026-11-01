@@ -14,6 +14,14 @@ export type LanguageOption = {
   sort_order: number;
 };
 
+export type TelegramRuntimeSettings = {
+  promoEffectId: string;
+  fastSceneEffectId: string;
+  roleplaySceneEffectId: string;
+  characterGalleryOrder: number[];
+  characterVoteUrl: string;
+};
+
 export type PaymentChannel = "telegram" | "web";
 export type ConfiguredPaymentMethod = "stars" | "sbp";
 
@@ -62,7 +70,7 @@ export class LocalizationService {
 
   constructor(
     private readonly store: LocalizationStore,
-    private readonly telegramCompatibilityCopy: TelegramUxCopy | undefined,
+    private readonly telegramRuntimeSettings: TelegramRuntimeSettings,
     private readonly ttlMs = 60_000,
     private readonly now: () => number = Date.now,
     private readonly maxCacheEntries = 256,
@@ -115,17 +123,13 @@ export class LocalizationService {
   async getNamespace(
     locale: string | null | undefined,
     namespace: string,
-    compatibilityFallback: LocalizationDictionary = {},
   ): Promise<LocalizationDictionary> {
     const selectedLocale = normalizeLocale(locale);
     const russian = await this.load("ru", namespace);
     const selected = selectedLocale === "ru"
       ? russian
       : await this.load(selectedLocale, namespace);
-    return mergeDictionaries(
-      mergeDictionaries(compatibilityFallback, russian),
-      selected,
-    );
+    return mergeDictionaries(russian ?? {}, selected);
   }
 
   async getExactNamespace(
@@ -151,26 +155,17 @@ export class LocalizationService {
   }
 
   async getTelegramCopy(locale: string | null | undefined): Promise<TelegramUxCopy> {
-    const dictionary = await this.getNamespace(
-      locale,
-      "telegram",
-      this.telegramCompatibilityCopy as unknown as LocalizationDictionary ?? {},
-    );
+    const dictionary = await this.getNamespace(locale, "telegram");
     const localized = telegramUxCopySchema.parse(dictionary);
 
     // These values steer runtime behavior and are intentionally not translations.
     // Keep them owned by validated runtime config even if a malformed localization
     // import contains fields with the same shape.
-    const runtime = this.telegramCompatibilityCopy;
-    if (runtime) {
-      localized.promo.effect_id = runtime.promo.effect_id;
-      localized.scene_mode.transition.fast.effect_id = runtime.scene_mode.transition.fast.effect_id;
-      localized.scene_mode.transition.roleplay.effect_id = runtime.scene_mode.transition.roleplay.effect_id;
-      localized.character_gallery.order = runtime.character_gallery.order
-        ? [...runtime.character_gallery.order]
-        : undefined;
-      localized.character_gallery.vote_url = runtime.character_gallery.vote_url;
-    }
+    localized.promo.effect_id = this.telegramRuntimeSettings.promoEffectId;
+    localized.scene_mode.transition.fast.effect_id = this.telegramRuntimeSettings.fastSceneEffectId;
+    localized.scene_mode.transition.roleplay.effect_id = this.telegramRuntimeSettings.roleplaySceneEffectId;
+    localized.character_gallery.order = [...this.telegramRuntimeSettings.characterGalleryOrder];
+    localized.character_gallery.vote_url = this.telegramRuntimeSettings.characterVoteUrl;
 
     return localized;
   }

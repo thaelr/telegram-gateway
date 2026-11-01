@@ -22,7 +22,7 @@ export function getMediaLanguage(): string {
 }
 
 export function getMediaUxCopy(): TelegramUxCopy {
-  const copy = storage.getStore()?.uxCopy ?? config.TELEGRAM_UX_COPY_JSON;
+  const copy = storage.getStore()?.uxCopy;
   if (!copy) {
     throw new Error("Telegram localization is unavailable: required RU copy was not loaded");
   }
