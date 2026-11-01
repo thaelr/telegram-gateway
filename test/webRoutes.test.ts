@@ -37,7 +37,11 @@ function createApp(overrides: Partial<WebRepositoryContract> = {}) {
   registerWebRoutes(app, {
     repository,
     authenticator: { async verify(authorization) { if (authorization !== bearer.authorization) throw new WebAuthError(401, "unauthorized"); return identity; } },
-    localization: { async getNamespace(locale, namespace) { return { locale, namespace, message: "localized" }; } },
+    localization: {
+      async getNamespace(locale, namespace) { return { locale, namespace, message: "localized" }; },
+      async getEnabledLanguages() { return [{ locale: "ru", display_name: "Русский", sort_order: 10 }, { locale: "en", display_name: "English", sort_order: 20 }]; },
+      async isEnabledLanguage(locale) { return locale === "ru" || locale === "en"; },
+    },
   });
   return { app, calls };
 }
@@ -45,10 +49,23 @@ function createApp(overrides: Partial<WebRepositoryContract> = {}) {
 test("localization dictionaries are available before authorization", async (t) => {
   const { app } = createApp();
   t.after(() => app.close());
-  const result = await app.inject({ url: "/web/localizations/en/onboarding" });
+  const result = await app.inject({ url: "/web/localizations/en/web" });
   assert.equal(result.statusCode, 200);
   assert.equal(result.json().copy.message, "localized");
   assert.equal(result.headers["cache-control"], "public, max-age=60");
+});
+
+test("public localization rejects disabled locales and internal namespaces", async (t) => {
+  const { app } = createApp();
+  t.after(() => app.close());
+  assert.equal((await app.inject({ url: "/web/localizations/de/web" })).statusCode, 404);
+  assert.equal((await app.inject({ url: "/web/localizations/ru/payment_methods" })).statusCode, 404);
+  const languages = await app.inject({ url: "/web/localizations" });
+  assert.equal(languages.statusCode, 200);
+  assert.deepEqual(languages.json().languages, [
+    { locale: "ru", display_name: "Русский" },
+    { locale: "en", display_name: "English" },
+  ]);
 });
 
 test("all Web routes authenticate before reading an account and hide internal errors", async (t) => {

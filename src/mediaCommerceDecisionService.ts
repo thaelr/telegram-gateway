@@ -14,7 +14,7 @@ import {
 } from "./abTesting.js";
 import { config } from "./config.js";
 import type { LocalizationService } from "./localization.js";
-import { getMediaUxCopy, runWithMediaLocalization } from "./mediaLocalization.js";
+import { getMediaPaymentMethods, getMediaUxCopy, runWithMediaLocalization } from "./mediaLocalization.js";
 import { isMaintenanceBlocked } from "./maintenance.js";
 import {
   buildCallbackTokenRow,
@@ -140,6 +140,12 @@ type MediaRepository = Pick<
   | "clearActiveSubscriptionOffer"
 > & Partial<Pick<MediaCommerceRepository, "loadAccountLanguage">>;
 
+type MediaLocalizationReader = {
+  getTelegramCopy(locale: string): Promise<ReturnType<typeof getMediaUxCopy>>;
+  getPaymentMethods?(locale: string, channel: "telegram"): Promise<Array<"stars" | "sbp">>;
+  getNamespace?(locale: string, namespace: string): Promise<Record<string, unknown>>;
+};
+
 type SubscriptionPaymentAction = Extract<
   ResolvedInvoiceAction,
   { payment_kind: "subscription" }
@@ -171,7 +177,9 @@ function normalizePaymentKindFromActionKind(
 }
 
 function getSourceSortOrder(source: PaymentSource | null | undefined): number {
-  return source === "sbp" ? 0 : source === "stars" ? 1 : 2;
+  const order = getMediaPaymentMethods();
+  const index = source == null ? -1 : order.indexOf(source);
+  return index >= 0 ? index : order.length;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1020,7 +1028,7 @@ export class MediaCommerceDecisionService {
       : null,
     private readonly videos: VideoCommerceRepository = new VideoCommerceRepository(),
     private readonly videoSigner: typeof signVideoUrl = signVideoUrl,
-    private readonly localization: Pick<LocalizationService, "getTelegramCopy"> | null = null,
+    private readonly localization: MediaLocalizationReader | null = null,
   ) {}
 
   private async runOperation<T>(
@@ -1819,8 +1827,21 @@ export class MediaCommerceDecisionService {
     const uxCopy = this.localization
       ? await this.localization.getTelegramCopy(language)
       : config.TELEGRAM_UX_COPY_JSON;
+    if (!uxCopy) {
+      throw new MediaCommerceOperationError(
+        "Telegram localization is unavailable",
+        "localization.loadTelegramCopy",
+        "localization_configuration_invalid",
+      );
+    }
+    const paymentMethods = this.localization?.getPaymentMethods
+      ? await this.localization.getPaymentMethods(language, "telegram")
+      : config.SBP_ENABLED ? ["sbp", "stars"] as const : ["stars"] as const;
+    const commerceCopy = this.localization?.getNamespace
+      ? await this.localization.getNamespace(language, "commerce")
+      : {};
 
-    return runWithMediaLocalization({ language, uxCopy }, async () => {
+    return runWithMediaLocalization({ language, uxCopy, paymentMethods: [...paymentMethods], commerceCopy }, async () => {
       const response = await this.evaluateLocalized(input);
       return { ...response, language, ux_copy: uxCopy };
     });

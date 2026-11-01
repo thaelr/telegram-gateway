@@ -67,11 +67,7 @@ export class ChatAccessRepository {
         AND identity.external_id = ${sourceUserId}::text
       LIMIT 1
     `;
-    return rows[0]?.language === "en"
-      ? "en"
-      : rows[0]?.language === "ru"
-        ? "ru"
-        : null;
+    return rows[0]?.language ?? null;
   }
 
   async ensureTelegramAccountLink(

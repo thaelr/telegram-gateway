@@ -8,7 +8,10 @@ import { WebError, type WebIdentity, type WebRepositoryContract } from "./types.
 export type WebRoutesOptions = {
   authenticator: WebAuthenticator;
   repository: WebRepositoryContract;
-  localization: Pick<LocalizationService, "getNamespace">;
+  localization: Pick<
+    LocalizationService,
+    "getNamespace" | "getEnabledLanguages" | "isEnabledLanguage"
+  >;
 };
 
 const clientId = z.string().trim().min(1).max(128);
@@ -19,6 +22,30 @@ const sceneMode = z.enum(["fast", "roleplay"]);
 const pageLimit = z.coerce.number().int().min(1).max(100).optional();
 const localeParam = z.string().regex(/^[a-z][a-z0-9-]*$/u);
 const namespaceParam = z.string().regex(/^[a-z][a-z0-9_.-]*$/u);
+const PUBLIC_LOCALIZATION_NAMESPACES = new Set(["telegram", "web", "commerce"]);
+
+function publicLocalizationCopy(namespace: string, dictionary: Record<string, unknown>): Record<string, unknown> {
+  const copy = structuredClone(dictionary);
+  delete copy._language;
+  if (namespace !== "telegram") return copy;
+  const promo = copy.promo;
+  if (promo && typeof promo === "object" && !Array.isArray(promo)) delete (promo as Record<string, unknown>).effect_id;
+  const gallery = copy.character_gallery;
+  if (gallery && typeof gallery === "object" && !Array.isArray(gallery)) {
+    delete (gallery as Record<string, unknown>).order;
+    delete (gallery as Record<string, unknown>).vote_url;
+  }
+  const sceneMode = copy.scene_mode;
+  if (sceneMode && typeof sceneMode === "object" && !Array.isArray(sceneMode)) {
+    const transition = (sceneMode as Record<string, unknown>).transition;
+    if (transition && typeof transition === "object" && !Array.isArray(transition)) {
+      for (const value of Object.values(transition)) {
+        if (value && typeof value === "object" && !Array.isArray(value)) delete (value as Record<string, unknown>).effect_id;
+      }
+    }
+  }
+  return copy;
+}
 
 export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOptions): void {
   void app.register(async (scope) => {
@@ -42,7 +69,8 @@ export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOption
     };
     scope.addHook("onRequest", async (request, reply) => {
       const isPublicLocalization = request.routeOptions.url
-        === "/web/localizations/:locale/:namespace";
+        === "/web/localizations/:locale/:namespace"
+        || request.routeOptions.url === "/web/localizations";
       reply.header("Cache-Control", isPublicLocalization ? "public, max-age=60" : "no-store");
       if (isPublicLocalization) return;
       reply.header("Vary", "Authorization");
@@ -70,18 +98,28 @@ export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOption
       return reply.status(500).send({ error: "internal_error", request_id: request.id });
     });
 
+    scope.get("/web/localizations", async () => ({
+      languages: (await options.localization.getEnabledLanguages())
+        .map(({ locale, display_name }) => ({ locale, display_name })),
+    }));
+
     scope.get("/web/localizations/:locale/:namespace", async (request) => {
       const params = z.object({
         locale: localeParam,
         namespace: namespaceParam,
       }).strict().parse(request.params);
+      if (!PUBLIC_LOCALIZATION_NAMESPACES.has(params.namespace)
+        || !await options.localization.isEnabledLanguage(params.locale)) {
+        throw new WebError(404, "localization_not_found");
+      }
+      const dictionary = await options.localization.getNamespace(
+        params.locale,
+        params.namespace,
+      );
       return {
         locale: params.locale,
         namespace: params.namespace,
-        copy: await options.localization.getNamespace(
-          params.locale,
-          params.namespace,
-        ),
+        copy: publicLocalizationCopy(params.namespace, dictionary),
       };
     });
 
@@ -91,8 +129,11 @@ export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOption
     });
     scope.get("/web/me", async (request) => repository.getMe(user(request)));
     scope.patch("/web/me", async (request) => {
-      const patch = z.object({ display_name: z.string().trim().min(1).max(120).optional(), language: z.enum(["ru", "en"]).optional() })
+      const patch = z.object({ display_name: z.string().trim().min(1).max(120).optional(), language: localeParam.optional() })
         .strict().refine((value) => Object.keys(value).length > 0).parse(request.body);
+      if (patch.language && !await options.localization.isEnabledLanguage(patch.language)) {
+        throw new WebError(400, "unsupported_language");
+      }
       return repository.updateMe(user(request), patch);
     });
     scope.post("/web/me/confirm-age", async (request) => {

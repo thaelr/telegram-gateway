@@ -217,6 +217,15 @@ function createService(
       async getTelegramCopy() {
         return config.TELEGRAM_UX_COPY_JSON;
       },
+      async getEnabledLanguages() {
+        return [
+          { locale: "ru", display_name: "Русский", sort_order: 10 },
+          { locale: "en", display_name: "English", sort_order: 20 },
+        ];
+      },
+      async isEnabledLanguage(locale) {
+        return locale === "ru" || locale === "en";
+      },
     }),
     calls,
     languageCalls,
@@ -317,6 +326,20 @@ test("language selection after onboarding only acknowledges the change", async (
   assert.equal(result.action, "acknowledge_language_change");
   assert.equal(result.allowed, true);
   assert.equal(result.language, "en");
+});
+
+test("syntactically valid old callbacks cannot select a disabled database language", async () => {
+  const { service, languageCalls } = createService(buildAccessContext());
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "language_select:de",
+    callback_query_id: "language-callback",
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "ignore");
+  assert.equal(result.reason, "language_selection_invalid");
+  assert.equal(languageCalls.length, 0);
 });
 
 test("a legacy terms callback cannot bypass required language selection", async () => {
@@ -1615,6 +1638,33 @@ test("payment and opaque commerce events do not dismiss subscription offer panel
     const result = await service.evaluate(request);
 
     assert.equal(result.action, "handle_commerce_interaction");
+    assert.deepEqual(dismissCalls, []);
+  }
+});
+
+test("language selector and language change keep existing payment offers valid", async () => {
+  const requests = [
+    buildRequest({
+      command: "/language",
+      event_type: "command.received",
+      message_type: "command",
+      user_message: "/language",
+    }),
+    buildRequest({
+      command: null,
+      event_type: "callback_query.received",
+      message_type: null,
+      user_message: null,
+      callback_data: "language_select:en",
+      callback_query_id: "language-callback",
+    }),
+  ];
+
+  for (const request of requests) {
+    const { service, dismissCalls } = createService(buildAccessContext(), {
+      dismissMessageId: 888,
+    });
+    await service.evaluate(request);
     assert.deepEqual(dismissCalls, []);
   }
 });

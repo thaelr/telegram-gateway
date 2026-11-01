@@ -57,7 +57,10 @@ type AccessRepository = Pick<
   | "popActiveSubscriptionOffer"
 > & Partial<Pick<ChatAccessRepository, "resolveTelegramLanguage">>;
 
-type LocalizationReader = Pick<LocalizationService, "getTelegramCopy">;
+type LocalizationReader = Pick<
+  LocalizationService,
+  "getTelegramCopy" | "getEnabledLanguages" | "isEnabledLanguage"
+>;
 
 function isAllowedClassification(classification: RouterClassification): boolean {
   switch (classification.intent) {
@@ -167,6 +170,8 @@ function shouldDismissSubscriptionOffer(classification: RouterClassification): b
 
   return classification.intent !== "interaction_event"
     && classification.intent !== "commerce_callback"
+    && classification.intent !== "language"
+    && classification.intent !== "language_select"
     && classification.intent !== "reachability_update"
     && classification.intent !== "unknown_command"
     && classification.intent !== "noop";
@@ -496,7 +501,7 @@ function formatPaysupportText(
 }
 
 function legalUrl(
-  locale: TelegramLanguage,
+  locale: string,
   kind: "terms" | "privacy",
 ): string | null {
   return config.LEGAL_URLS_JSON[locale]?.[kind]
@@ -526,9 +531,7 @@ export class AccessDecisionService {
       && this.repository.resolveTelegramLanguage
       ? await this.repository.resolveTelegramLanguage(sourceUserId)
       : null;
-    const defaultUxCopy = await this.localization.getTelegramCopy(
-      passthroughLanguage === "en" ? "en" : "ru",
-    );
+    const defaultUxCopy = await this.localization.getTelegramCopy(passthroughLanguage ?? "ru");
     const idempotencyKey = buildIdempotencyKey(source, input.update_id);
     const effectiveCharacterId =
       classification.character_i ?? input.character_i ?? null;
@@ -642,14 +645,26 @@ export class AccessDecisionService {
           reason: "language_selection_invalid",
         });
       }
+      const enabled = await this.localization.isEnabledLanguage(classification.selected_language);
+      if (!enabled) {
+        return attachDismissedSubscriptionOffer({
+          ...passthrough,
+          decision: "noop",
+          action: "ignore",
+          allowed: false,
+          reason: "language_selection_invalid",
+        });
+      }
       languageConfirmedAt = await this.repository.setTelegramLanguage(
         sourceUserId,
         classification.selected_language,
       );
       language = classification.selected_language;
     }
-    const resolvedLanguage: TelegramLanguage = language === "en" ? "en" : "ru";
+    const resolvedLanguage: TelegramLanguage = language ?? "ru";
     const uxCopy = await this.localization.getTelegramCopy(resolvedLanguage);
+    const languageOptions = (await this.localization.getEnabledLanguages())
+      .map(({ locale, display_name }) => ({ locale, display_name }));
 
     const resolvedPassthrough = {
       ...passthrough,
@@ -705,6 +720,7 @@ export class AccessDecisionService {
         ...contextFields,
         decision: "show_language_selector",
         action: "show_language_selector",
+        language_options: languageOptions,
         allowed: true,
         reason: "language_command",
       });
@@ -744,6 +760,7 @@ export class AccessDecisionService {
         ...contextFields,
         decision: "show_language_selector",
         action: "show_language_selector",
+        language_options: languageOptions,
         allowed: false,
         reason: "language_selection_required",
       });

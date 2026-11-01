@@ -17,6 +17,7 @@ import {
   parseJsonObject,
 } from "./utils.js";
 import { resolvePhotoPlanBySku, UnknownPhotoSkuError } from "./plans.js";
+import { getMediaCommerceCopy, getMediaUxCopy } from "../mediaLocalization.js";
 
 export type MediaActionDecision = {
   operation: "noop" | "edit_photo";
@@ -386,8 +387,8 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
 
   if (unlockedAfter.length > 1) {
     addCallbackRow([
-      { text: config.TELEGRAM_UX_COPY_JSON.media.prev_button, action: "photo_prev" },
-      { text: config.TELEGRAM_UX_COPY_JSON.media.next_button, action: "photo_next" },
+      { text: getMediaUxCopy().media.prev_button, action: "photo_prev" },
+      { text: getMediaUxCopy().media.next_button, action: "photo_next" },
     ]);
   }
 
@@ -415,10 +416,20 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
       invoiceAmount = photoPlan.amount_xtr;
       originalInvoiceAmount = photoPlan.original_amount_xtr;
       promoKey = photoPlan.promo_key;
-      invoiceTitle = photoPlan.title;
-      invoiceDescription = photoPlan.description;
-      invoiceLabel = photoPlan.label;
-      invoiceButtonText = photoPlan.button_text;
+      const products = getMediaCommerceCopy().products;
+      const localized = products && typeof products === "object" && !Array.isArray(products)
+        ? (products as Record<string, unknown>)[photoPlan.sku]
+        : null;
+      const copy = localized && typeof localized === "object" && !Array.isArray(localized)
+        ? localized as Record<string, unknown>
+        : {};
+      const localizedText = (key: string, fallback: string): string =>
+        typeof copy[key] === "string" && copy[key].trim() ? copy[key] : fallback;
+      invoiceTitle = localizedText("title", photoPlan.title);
+      invoiceDescription = localizedText("description", photoPlan.description);
+      invoiceLabel = localizedText("label", photoPlan.label);
+      invoiceButtonText = localizedText("button_text", photoPlan.button_text)
+        .replaceAll("{amount}", String(photoPlan.amount_xtr));
       invoicePayload = {
         action_kind: "photo_payment",
         chat_id: context.chat_id,
@@ -438,7 +449,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
       };
     } else {
       addCallbackRow([{
-        text: config.TELEGRAM_UX_COPY_JSON.media.more_photo_button,
+        text: getMediaUxCopy().media.more_photo_button,
         action: "photo_regen",
       }]);
     }

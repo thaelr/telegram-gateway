@@ -14,7 +14,14 @@ export class WebCommerceService {
  private timer:ReturnType<typeof setTimeout>|null=null;
  private recovering:Promise<void>|null=null;
  private stopped=true;
- constructor(readonly repository:WebCommerceRepository, readonly providers:PaymentProviderRegistry, readonly decisions:MediaCommerceDecisionService, readonly accounts:WebRepositoryContract, readonly localization:Pick<LocalizationService,'getNamespace'|'getTelegramCopy'>|null=null) {}
+ constructor(readonly repository:WebCommerceRepository, readonly providers:PaymentProviderRegistry, readonly decisions:MediaCommerceDecisionService, readonly accounts:WebRepositoryContract, readonly localization:Pick<LocalizationService,'getNamespace'|'getTelegramCopy'|'getPaymentMethods'>|null=null) {}
+ private async allowedProviders(userId:string):Promise<string[]> {
+  if(!this.localization)return this.providers.list('web');
+  const profile=await this.accounts.getMe(userId);
+  const configured=await this.localization.getPaymentMethods(profile.language,'web');
+  const available=new Set(this.providers.list('web'));
+  return configured.filter(provider=>available.has(provider));
+ }
  private async plans(userId:string,chatId:number|null){
   const plans=await this.decisions.webProductPlans(chatId);
   if(!this.localization)return plans;
@@ -34,10 +41,11 @@ export class WebCommerceService {
   if(code) chatId=(await this.repository.getContext(userId,code)).chat_id;
   const plans=await this.plans(userId,chatId);
   const rights=await this.repository.getEntitlements(userId);
+  const providers=await this.allowedProviders(userId);
   return {products:plans.map(p=>{
    const upgrade=p.subscription_tier==='full'?this.upgrade(p,rights):null;
-   return {sku:p.sku,kind:p.kind,title:p.title,description:p.description,price:p.amount_rub==null?null:{amount:String(p.amount_rub),currency:'RUB'},original_price:p.original_amount_rub==null?null:{amount:String(p.original_amount_rub),currency:'RUB'},promo_key:p.promo_key,subscription_days:p.subscription_days,subscription_tier:p.subscription_tier,feature_key:p.feature_key,upgrade:upgrade&&upgrade.amount_rub!=null&&upgrade.amount_rub>0?{subscription_change:'upgrade',base_sku:upgrade.base_sku,price:{amount:String(upgrade.amount_rub),currency:'RUB'},days:30}:null,providers:p.amount_rub==null?[]:this.providers.list('web')};
-  }),providers:this.providers.list('web'),pricing_requires_chat:chatId==null};
+   return {sku:p.sku,kind:p.kind,title:p.title,description:p.description,price:p.amount_rub==null?null:{amount:String(p.amount_rub),currency:'RUB'},original_price:p.original_amount_rub==null?null:{amount:String(p.original_amount_rub),currency:'RUB'},promo_key:p.promo_key,subscription_days:p.subscription_days,subscription_tier:p.subscription_tier,feature_key:p.feature_key,upgrade:upgrade&&upgrade.amount_rub!=null&&upgrade.amount_rub>0?{subscription_change:'upgrade',base_sku:upgrade.base_sku,price:{amount:String(upgrade.amount_rub),currency:'RUB'},days:30}:null,providers:p.amount_rub==null?[]:providers};
+  }),providers,pricing_requires_chat:chatId==null};
  }
  entitlements(userId:string){return this.repository.getEntitlements(userId);}
  async gallery(userId:string,code:string){
@@ -136,6 +144,7 @@ export class WebCommerceService {
   if(quote.kind==='photo'&&quote.media_id){const free=await this.repository.unlockFree(userId,input.chat_code,quote.media_id,quote);if(free.unlocked)return free;}
   if(quote.kind==='feature'){const free=await this.repository.redeemFreeFeature(userId,quote,input.client_message_id);if(free.available)return free;}
   if(quote.amount==='0')throw new WebError(409,'web_price_unavailable');
+  if(!(await this.allowedProviders(userId)).includes(input.provider))throw new WebError(400,'payment_method_unavailable');
   const provider=this.providers.get(input.provider,'web');
   const result=await this.repository.createOrGet(userId,input.client_message_id,fingerprint,quote,provider.id);
   const p=result.purchase;

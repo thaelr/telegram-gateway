@@ -10,6 +10,7 @@ import type {
 } from "../mediaCommerceTypes.js";
 import { buildTelegramInvoicePayload, INVOICE_TTL_MS } from "./utils.js";
 import { MediaRepositoryContractError } from "../mediaCommerceRepository/errors.js";
+import { getMediaCommerceCopy, getMediaPaymentMethods, getMediaUxCopy } from "../mediaLocalization.js";
 
 type CommercePlan = {
   sku: string;
@@ -60,14 +61,14 @@ function applyPaymentTemplate(
 
 function buildStarsButtonText(amountXtr: number): string {
   return applyPaymentTemplate(
-    config.TELEGRAM_UX_COPY_JSON.payment_ui.stars_payment_button,
+    getMediaUxCopy().payment_ui.stars_payment_button,
     { amount: Math.trunc(amountXtr) },
   );
 }
 
 function buildSbpButtonText(amountRub: number): string {
   return applyPaymentTemplate(
-    config.TELEGRAM_UX_COPY_JSON.payment_ui.sbp_payment_button,
+    getMediaUxCopy().payment_ui.sbp_payment_button,
     { amount: Math.trunc(amountRub) },
   );
 }
@@ -84,6 +85,15 @@ function buildPaymentInputRow(input: {
   expires_at: string | null;
   plan: CommercePlan;
 }): UpsertInvoiceTokenInput {
+  const products = getMediaCommerceCopy().products;
+  const localized = products && typeof products === "object" && !Array.isArray(products)
+    ? (products as Record<string, unknown>)[input.plan.sku]
+    : null;
+  const copy = localized && typeof localized === "object" && !Array.isArray(localized)
+    ? localized as Record<string, unknown>
+    : {};
+  const localizedText = (key: string, fallback: string): string =>
+    typeof copy[key] === "string" && copy[key].trim() ? copy[key] : fallback;
   const isStars = input.source === "stars";
   const amount = isStars ? input.plan.amount_xtr : input.plan.amount_rub;
   if (amount == null || !Number.isInteger(amount) || amount <= 0) {
@@ -114,12 +124,16 @@ function buildPaymentInputRow(input: {
     checkout_url: null,
     external_payment_id: null,
     expires_at: input.expires_at,
-    invoice_title: input.plan.title,
-    invoice_description: input.plan.description,
-    invoice_label: input.plan.label,
-    invoice_button_text: isStars
-      ? buildStarsButtonText(input.plan.amount_xtr)
-      : buildSbpButtonText(amount),
+    invoice_title: localizedText("title", input.plan.title),
+    invoice_description: localizedText("description", input.plan.description),
+    invoice_label: localizedText("label", input.plan.label),
+    invoice_button_text: applyPaymentTemplate(
+      localizedText(
+        "button_text",
+        isStars ? buildStarsButtonText(input.plan.amount_xtr) : buildSbpButtonText(amount),
+      ),
+      { amount: Math.trunc(amount) },
+    ),
   };
 }
 
@@ -134,11 +148,11 @@ export function buildPaymentInputs(input: {
   plan: CommercePlan;
 }): UpsertInvoiceTokenInput[] {
   const sbpExpiresAt = new Date(Date.now() + INVOICE_TTL_MS).toISOString();
-  const sources: PaymentSource[] = input.plan.amount_xtr > 0 ? ["stars"] : [];
-
-  if (config.SBP_ENABLED && input.plan.amount_rub != null && input.plan.amount_rub > 0) {
-    sources.push("sbp");
-  }
+  const sources = getMediaPaymentMethods().filter((source) =>
+    source === "stars"
+      ? input.plan.amount_xtr > 0
+      : config.SBP_ENABLED && input.plan.amount_rub != null && input.plan.amount_rub > 0,
+  );
 
   return sources.map((source) =>
     buildPaymentInputRow({

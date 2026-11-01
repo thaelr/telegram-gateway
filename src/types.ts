@@ -119,7 +119,8 @@ export interface AccessDecisionResponse {
   reachability_status?: string | null;
   telegram_chat_status?: string | null;
   terms_accepted_at?: string | null;
-  language?: "ru" | "en" | null;
+  language?: string | null;
+  language_options?: Array<{ locale: string; display_name: string }>;
   language_confirmed_at?: string | null;
   subscription_active?: boolean;
   subscription_sku?: string | null;
@@ -164,7 +165,7 @@ export interface AccessContext {
   character_i: number | null;
   source: string | null;
   source_user_id: number | null;
-  language: "ru" | "en" | null;
+  language: string | null;
   language_confirmed_at: string | null;
   terms_accepted_at: string | null;
   subscription_sku: string | null;

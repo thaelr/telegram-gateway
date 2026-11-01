@@ -32,4 +32,22 @@ export class LocalizationRepository implements LocalizationStore {
       throw error;
     }
   }
+
+  async listLanguages(): Promise<Array<{ locale: string; metadata: unknown }>> {
+    try {
+      return await this.query<Array<{ locale: string; metadata: unknown }>>`
+        SELECT locale, copy_json -> '_language' AS metadata
+        FROM public.ui_localizations
+        WHERE namespace = 'telegram'
+          AND jsonb_typeof(copy_json -> '_language') = 'object'
+          AND COALESCE((copy_json -> '_language' ->> 'enabled')::boolean, false)
+        ORDER BY
+          COALESCE((copy_json -> '_language' ->> 'sort_order')::integer, 2147483647),
+          locale
+      `;
+    } catch (error) {
+      if (postgresCode(error) === "42P01") return [];
+      throw error;
+    }
+  }
 }

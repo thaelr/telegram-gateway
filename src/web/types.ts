@@ -15,7 +15,7 @@ export interface WebRepositoryContract {
   bootstrap(identity: WebIdentity): Promise<WebProfile>;
   resolveIdentity(authUserId: string): Promise<string | null>;
   getMe(userId: string): Promise<WebProfile>;
-  updateMe(userId: string, patch: { display_name?: string; language?: 'ru' | 'en' }): Promise<WebProfile>;
+  updateMe(userId: string, patch: { display_name?: string; language?: string }): Promise<WebProfile>;
   confirmAge(userId: string): Promise<WebProfile>;
   acceptTerms(userId: string): Promise<WebProfile>;
   listCharacters(userId: string): Promise<WebCharacter[]>;

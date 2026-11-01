@@ -759,7 +759,11 @@ function createRepository(
   overrides: Partial<MockRepository> = {},
   starsOverrides: Partial<MockStarsClient> = {},
   sbpOverrides: Partial<MockSbpClient> = {},
-  localization: { getTelegramCopy(locale: "ru" | "en"): Promise<typeof config.TELEGRAM_UX_COPY_JSON> } | null = null,
+  localization: {
+    getTelegramCopy(locale: string): Promise<typeof config.TELEGRAM_UX_COPY_JSON>;
+    getPaymentMethods?(locale: string, channel: "telegram"): Promise<Array<"stars" | "sbp">>;
+    getNamespace?(locale: string, namespace: string): Promise<Record<string, unknown>>;
+  } | null = null,
 ) {
   const calls = {
     loadMediaContext: 0,
@@ -2582,6 +2586,67 @@ test("asynchronous commerce resolves UX copy from the saved account language", a
   assert.equal(result.language, "en");
   assert.equal(result.callback_answer_text, "English stale callback");
   assert.equal((result.ux_copy as typeof englishCopy).payment_errors.stale, "English stale callback");
+});
+
+test("EN payment policy filters SBP before token creation and localizes Telegram invoice payload", async () => {
+  const previousEnabled = config.SBP_ENABLED;
+  const previousActionPlans = config.MEDIA_ACTION_PLANS_JSON;
+  config.SBP_ENABLED = true;
+  config.MEDIA_ACTION_PLANS_JSON = [{
+    sku: "payment_action_1",
+    feature_key: "fast_scene_skip",
+    amount_xtr: 50,
+    amount_rub: 80,
+    title: "Base title",
+    description: "Base description",
+    label: "Base label",
+    button_text: "Base button",
+  }];
+  try {
+    const { service, calls } = createRepository(
+      { async loadAccountLanguage() { return "en"; } },
+      {},
+      {},
+      {
+        async getTelegramCopy() { return config.TELEGRAM_UX_COPY_JSON; },
+        async getPaymentMethods(locale, channel) {
+          assert.equal(locale, "en");
+          assert.equal(channel, "telegram");
+          return ["stars"];
+        },
+        async getNamespace(locale, namespace) {
+          assert.equal(locale, "en");
+          assert.equal(namespace, "commerce");
+          return { products: { payment_action_1: {
+            title: "English title",
+            description: "English description",
+            label: "English label",
+            button_text: "English button {amount}",
+          } } };
+        },
+      },
+    );
+
+    const result = await service.evaluate(buildRequest({
+      interaction_mode: "feature_offer",
+      feature_key: "fast_scene_skip",
+    }));
+    assert.deepEqual(result.payment_options?.map((option) => option.source), ["stars"]);
+    assert.equal(calls.createSbpPayment, 0);
+    const invoiceInput = calls.createStarsInvoiceInputs[0] as Record<string, unknown>;
+    assert.deepEqual({ ...invoiceInput, payload: undefined }, {
+      title: "English title",
+      description: "English description",
+      payload: undefined,
+      label: "English label",
+      amount_xtr: 50,
+    });
+    assert.match(String(invoiceInput.payload), /^stars_[0-9a-f]{64}$/u);
+    assert.equal(result.payment_options?.[0]?.button_text, "English button 50");
+  } finally {
+    config.SBP_ENABLED = previousEnabled;
+    config.MEDIA_ACTION_PLANS_JSON = previousActionPlans;
+  }
 });
 
 test("feature payment reveal callback returns payment options without creating checkout", async () => {

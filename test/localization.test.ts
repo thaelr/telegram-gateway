@@ -12,12 +12,17 @@ class MemoryStore implements LocalizationStore {
 
   constructor(
     private readonly dictionaries: Record<string, LocalizationDictionary>,
+    private readonly languages: Array<{ locale: string; metadata: unknown }> = [],
   ) {}
 
   async load(locale: string, namespace: string) {
     const key = `${locale}:${namespace}`;
     this.calls.push(key);
     return this.dictionaries[key] ?? null;
+  }
+
+  async listLanguages() {
+    return this.languages;
   }
 }
 
@@ -111,4 +116,51 @@ test("translation parameters are substituted after locale fallback", async () =>
     "Paid 10 XTR",
   );
   assert.equal(await service.translate("en", "commerce", "missing"), null);
+});
+
+test("enabled languages come from raw telegram metadata in database order", async () => {
+  const service = new LocalizationService(new MemoryStore({}, [
+    { locale: "en", metadata: { display_name: "English", enabled: true, sort_order: 20 } },
+    { locale: "ru", metadata: { display_name: "Русский", enabled: true, sort_order: 10 } },
+    { locale: "de", metadata: { display_name: "Deutsch", enabled: false, sort_order: 5 } },
+    { locale: "bad_locale", metadata: { display_name: "Bad", enabled: true, sort_order: 1 } },
+  ]), testTelegramUxCopy);
+
+  assert.deepEqual(await service.getEnabledLanguages(), [
+    { locale: "ru", display_name: "Русский", sort_order: 10 },
+    { locale: "en", display_name: "English", sort_order: 20 },
+  ]);
+  assert.equal(await service.isEnabledLanguage("EN"), true);
+  assert.equal(await service.isEnabledLanguage("de"), false);
+  assert.equal(await service.isEnabledLanguage("not_a_locale"), false);
+});
+
+test("payment methods use exact locale policy, ignore unknown providers and keep Telegram Stars", async () => {
+  const service = new LocalizationService(new MemoryStore({
+    "ru:payment_methods": { telegram: ["sbp", "unknown", "stars"], web: ["unknown", "sbp"] },
+  }), testTelegramUxCopy);
+
+  assert.deepEqual(await service.getPaymentMethods("ru", "telegram"), ["sbp", "stars"]);
+  assert.deepEqual(await service.getPaymentMethods("ru", "web"), ["sbp"]);
+  assert.deepEqual(await service.getPaymentMethods("en", "telegram"), ["stars"]);
+  assert.deepEqual(await service.getPaymentMethods("en", "web"), []);
+  assert.deepEqual(await service.getPaymentMethods("not_a_locale", "telegram"), ["stars"]);
+  assert.deepEqual(await service.getPaymentMethods("not_a_locale", "web"), []);
+});
+
+test("bounded localization cache evicts old arbitrary namespaces", async () => {
+  const store = new MemoryStore({
+    "ru:one": { value: 1 },
+    "ru:two": { value: 2 },
+  });
+  const service = new LocalizationService(store, testTelegramUxCopy, 60_000, Date.now, 1);
+  await service.getExactNamespace("ru", "one");
+  await service.getExactNamespace("ru", "two");
+  await service.getExactNamespace("ru", "one");
+  assert.deepEqual(store.calls, ["ru:one", "ru:two", "ru:one"]);
+});
+
+test("missing required Russian text is an explicit configuration error", async () => {
+  const service = new LocalizationService(new MemoryStore({ "ru:telegram": {} }), undefined);
+  await assert.rejects(() => service.getTelegramCopy("en"), { name: "ZodError" });
 });

@@ -14,6 +14,7 @@ import {
 import { resolveActionPlanByFeatureKey } from "./plans.js";
 import { MediaRepositoryContractError } from "../mediaCommerceRepository/errors.js";
 import { parseStrictJsonObject } from "../mediaCommerceRepository/shared.js";
+import { getMediaUxCopy } from "../mediaLocalization.js";
 
 const SUPPORTED_PAYMENT_ACTIONS = new Set([
   "subscription_payment",
@@ -273,7 +274,7 @@ export function validatePrecheckout(
   if (!tokenRow?.found || !tokenRow.token) {
     return {
       ok: false,
-      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      error: getMediaUxCopy().payment_errors.stale,
       reason: "invoice_not_found",
       action: actionResolution.action,
     };
@@ -282,7 +283,7 @@ export function validatePrecheckout(
   if (normalizeString(tokenRow.kind) !== INVOICE_PAYLOAD_KIND) {
     return {
       ok: false,
-      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      error: getMediaUxCopy().payment_errors.stale,
       reason: "invoice_kind_invalid",
       action: actionResolution.action,
     };
@@ -291,7 +292,7 @@ export function validatePrecheckout(
   if (actionResolution.reason != null) {
     return {
       ok: false,
-      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      error: getMediaUxCopy().payment_errors.stale,
       reason: actionResolution.reason,
       action: actionResolution.action,
     };
@@ -300,7 +301,7 @@ export function validatePrecheckout(
   if (isExpired(tokenRow.expires_at)) {
     return {
       ok: false,
-      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.expired,
+      error: getMediaUxCopy().payment_errors.expired,
       reason: "invoice_expired",
       action: actionResolution.action,
     };
@@ -309,7 +310,7 @@ export function validatePrecheckout(
   if (normalizeString(tokenRow.status) !== "invoice_sent") {
     return {
       ok: false,
-      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      error: getMediaUxCopy().payment_errors.stale,
       reason: "invoice_status_invalid",
       action: actionResolution.action,
     };
@@ -325,7 +326,7 @@ export function validatePrecheckout(
   ) {
     return {
       ok: false,
-      error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      error: getMediaUxCopy().payment_errors.stale,
       reason: "payment_details_mismatch",
       action: actionResolution.action,
     };

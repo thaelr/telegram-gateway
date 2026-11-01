@@ -29,7 +29,7 @@ export const telegramUxCopySchema = z.object({
   }),
   promo: z.object({
     activated: textSchema,
-    effect_id: textSchema,
+    effect_id: textSchema.optional(),
   }),
   paysupport: z.object({
     message_html: textSchema,
@@ -61,8 +61,8 @@ export const telegramUxCopySchema = z.object({
     fast_button: textSchema,
     back_button: textSchema,
     transition: z.object({
-      fast: z.object({ text: textSchema, effect_id: textSchema }),
-      roleplay: z.object({ text: textSchema, effect_id: textSchema }),
+      fast: z.object({ text: textSchema, effect_id: textSchema.optional() }),
+      roleplay: z.object({ text: textSchema, effect_id: textSchema.optional() }),
     }),
   }),
   character_gallery: z.object({
@@ -75,12 +75,12 @@ export const telegramUxCopySchema = z.object({
           message: "Character gallery order ids must be unique",
         });
       }
-    }),
+    }).optional(),
     next_first_button: textSchema,
     next_button: textSchema,
     back_button: textSchema,
     vote_button: textSchema,
-    vote_url: z.string().url(),
+    vote_url: z.string().url().optional(),
     resume_with_name: textSchema.optional(),
     resume_without_name: textSchema.optional(),
     characters: z.record(z.string().min(1), z.object({

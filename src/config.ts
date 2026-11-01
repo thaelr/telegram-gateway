@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { loadExperimentConfigsFromEnv } from "./abTesting.js";
-import { telegramUxCopySchema } from "./telegramUxCopy.js";
+import { telegramUxCopySchema, type TelegramUxCopy } from "./telegramUxCopy.js";
 export type { TelegramUxCopy } from "./telegramUxCopy.js";
 
 const positiveIntegerSchema = z.number().int().positive();
@@ -294,8 +294,9 @@ const rawEnvSchema = z.object({
     ),
   TELEGRAM_UX_COPY_JSON: z
     .string()
+    .optional()
     .transform((raw) =>
-      parseJsonEnv(
+      raw == null ? undefined : parseJsonEnv(
         raw,
         telegramUxCopySchema,
       )),
@@ -366,6 +367,10 @@ if (normalizedSbpConfig.SBP_ENABLED) {
 
 export const config = {
   ...parsedEnv,
+  // Runtime may omit the legacy JSON after the complete RU dictionary is
+  // imported. Keep the public compatibility type stable for older callers;
+  // localization entry points explicitly handle the absent runtime value.
+  TELEGRAM_UX_COPY_JSON: parsedEnv.TELEGRAM_UX_COPY_JSON as TelegramUxCopy,
   ...normalizedSbpConfig,
   GATEWAY_PUBLIC_URL: gatewayPublicUrl,
   EXPERIMENTS: loadExperimentConfigsFromEnv(process.env),

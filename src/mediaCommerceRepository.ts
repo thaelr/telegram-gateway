@@ -59,7 +59,7 @@ export class MediaCommerceRepository {
   async loadAccountLanguage(
     chatId: number | null,
     sourceUserId: number | null,
-  ): Promise<"ru" | "en"> {
+  ): Promise<string> {
     const rows = await this.query<Array<{ language: string | null }>>`
       SELECT account.language
       FROM public.users AS account
@@ -81,7 +81,7 @@ export class MediaCommerceRepository {
       LIMIT 1
     `;
 
-    return rows[0]?.language === "en" ? "en" : "ru";
+    return rows[0]?.language?.trim() || "ru";
   }
 
   async loadOfferStats(input: LoadOfferStatsInput): Promise<MediaOfferStats> {

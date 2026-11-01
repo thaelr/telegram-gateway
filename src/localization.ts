@@ -1,11 +1,27 @@
+import { z } from "zod";
 import { telegramUxCopySchema, type TelegramUxCopy } from "./telegramUxCopy.js";
 
-export type SupportedLocale = "ru" | "en";
 export type LocalizationDictionary = Record<string, unknown>;
 
 export interface LocalizationStore {
   load(locale: string, namespace: string): Promise<LocalizationDictionary | null>;
+  listLanguages?(): Promise<Array<{ locale: string; metadata: unknown }>>;
 }
+
+export type LanguageOption = {
+  locale: string;
+  display_name: string;
+  sort_order: number;
+};
+
+export type PaymentChannel = "telegram" | "web";
+export type ConfiguredPaymentMethod = "stars" | "sbp";
+
+const languageMetadataSchema = z.object({
+  display_name: z.string().trim().min(1).max(80),
+  enabled: z.literal(true),
+  sort_order: z.number().int(),
+}).passthrough();
 
 function isRecord(value: unknown): value is LocalizationDictionary {
   return value != null && typeof value === "object" && !Array.isArray(value);
@@ -26,9 +42,13 @@ function mergeDictionaries(
   return result;
 }
 
-function normalizeLocale(locale: string | null | undefined): string {
+function parseLocale(locale: string | null | undefined): string | null {
   const normalized = String(locale ?? "").trim().toLowerCase();
-  return /^[a-z][a-z0-9-]*$/u.test(normalized) ? normalized : "ru";
+  return /^[a-z][a-z0-9-]*$/u.test(normalized) ? normalized : null;
+}
+
+function normalizeLocale(locale: string | null | undefined): string {
+  return parseLocale(locale) ?? "ru";
 }
 
 type CacheEntry = {
@@ -38,12 +58,14 @@ type CacheEntry = {
 
 export class LocalizationService {
   private readonly cache = new Map<string, CacheEntry>();
+  private languageCache: { expiresAt: number; value: LanguageOption[] } | null = null;
 
   constructor(
     private readonly store: LocalizationStore,
-    private readonly telegramCompatibilityCopy: TelegramUxCopy,
+    private readonly telegramCompatibilityCopy: TelegramUxCopy | undefined,
     private readonly ttlMs = 60_000,
     private readonly now: () => number = Date.now,
+    private readonly maxCacheEntries = 256,
   ) {}
 
   private async load(locale: string, namespace: string): Promise<LocalizationDictionary | null> {
@@ -53,8 +75,41 @@ export class LocalizationService {
     if (cached && cached.expiresAt > currentTime) return cached.value;
 
     const value = await this.store.load(locale, namespace);
+    if (this.cache.size >= this.maxCacheEntries) {
+      for (const [cacheKey, entry] of this.cache) {
+        if (entry.expiresAt <= currentTime) this.cache.delete(cacheKey);
+      }
+      while (this.cache.size >= this.maxCacheEntries) {
+        const oldestKey = this.cache.keys().next().value as string | undefined;
+        if (oldestKey == null) break;
+        this.cache.delete(oldestKey);
+      }
+    }
     this.cache.set(key, { value, expiresAt: currentTime + this.ttlMs });
     return value;
+  }
+
+  async getEnabledLanguages(): Promise<LanguageOption[]> {
+    const currentTime = this.now();
+    if (this.languageCache && this.languageCache.expiresAt > currentTime) {
+      return this.languageCache.value.map((value) => ({ ...value }));
+    }
+    const rows = await this.store.listLanguages?.() ?? [];
+    const languages = rows.flatMap((row) => {
+      const locale = parseLocale(row.locale);
+      const parsed = languageMetadataSchema.safeParse(row.metadata);
+      return parsed.success && locale != null && locale === row.locale
+        ? [{ locale, display_name: parsed.data.display_name, sort_order: parsed.data.sort_order }]
+        : [];
+    }).sort((left, right) => left.sort_order - right.sort_order || left.locale.localeCompare(right.locale));
+    this.languageCache = { value: languages, expiresAt: currentTime + this.ttlMs };
+    return languages.map((value) => ({ ...value }));
+  }
+
+  async isEnabledLanguage(locale: string | null | undefined): Promise<boolean> {
+    const normalized = parseLocale(locale);
+    if (normalized == null) return false;
+    return (await this.getEnabledLanguages()).some((item) => item.locale === normalized);
   }
 
   async getNamespace(
@@ -73,27 +128,49 @@ export class LocalizationService {
     );
   }
 
+  async getExactNamespace(
+    locale: string | null | undefined,
+    namespace: string,
+  ): Promise<LocalizationDictionary | null> {
+    const normalized = parseLocale(locale);
+    return normalized == null ? null : this.load(normalized, namespace);
+  }
+
+  async getPaymentMethods(
+    locale: string | null | undefined,
+    channel: PaymentChannel,
+  ): Promise<ConfiguredPaymentMethod[]> {
+    const dictionary = await this.getExactNamespace(locale, "payment_methods");
+    const configured = dictionary?.[channel];
+    const methods = Array.isArray(configured)
+      ? configured.filter((value): value is ConfiguredPaymentMethod => value === "stars" || value === "sbp")
+      : [];
+    const unique = [...new Set(methods)];
+    if (channel === "telegram" && !unique.includes("stars")) unique.push("stars");
+    return channel === "telegram" ? unique : unique.filter((value) => value !== "stars");
+  }
+
   async getTelegramCopy(locale: string | null | undefined): Promise<TelegramUxCopy> {
     const dictionary = await this.getNamespace(
       locale,
       "telegram",
-      this.telegramCompatibilityCopy as unknown as LocalizationDictionary,
+      this.telegramCompatibilityCopy as unknown as LocalizationDictionary ?? {},
     );
     const localized = telegramUxCopySchema.parse(dictionary);
 
     // These values steer runtime behavior and are intentionally not translations.
     // Keep them owned by validated runtime config even if a malformed localization
     // import contains fields with the same shape.
-    localized.promo.effect_id = this.telegramCompatibilityCopy.promo.effect_id;
-    localized.scene_mode.transition.fast.effect_id =
-      this.telegramCompatibilityCopy.scene_mode.transition.fast.effect_id;
-    localized.scene_mode.transition.roleplay.effect_id =
-      this.telegramCompatibilityCopy.scene_mode.transition.roleplay.effect_id;
-    localized.character_gallery.order = [
-      ...this.telegramCompatibilityCopy.character_gallery.order,
-    ];
-    localized.character_gallery.vote_url =
-      this.telegramCompatibilityCopy.character_gallery.vote_url;
+    const runtime = this.telegramCompatibilityCopy;
+    if (runtime) {
+      localized.promo.effect_id = runtime.promo.effect_id;
+      localized.scene_mode.transition.fast.effect_id = runtime.scene_mode.transition.fast.effect_id;
+      localized.scene_mode.transition.roleplay.effect_id = runtime.scene_mode.transition.roleplay.effect_id;
+      localized.character_gallery.order = runtime.character_gallery.order
+        ? [...runtime.character_gallery.order]
+        : undefined;
+      localized.character_gallery.vote_url = runtime.character_gallery.vote_url;
+    }
 
     return localized;
   }
@@ -120,5 +197,6 @@ export class LocalizationService {
 
   clear(): void {
     this.cache.clear();
+    this.languageCache = null;
   }
 }
