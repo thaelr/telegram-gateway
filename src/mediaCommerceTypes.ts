@@ -137,6 +137,8 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
 }
 
 export interface MediaCommerceDecisionResponse {
+  language?: "ru" | "en";
+  ux_copy?: unknown;
   video?: import('./videoCommerce.js').VideoUi;
   video_panel_reconcile?: boolean;
   video_control_tokens?: string[];

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { languageFromLocale, SupabaseAuthVerifier, WebAuthError } from "../src/web/auth.js";
+import { SupabaseAuthVerifier, WebAuthError } from "../src/web/auth.js";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -51,16 +51,4 @@ test("web auth fails closed for missing, expired, malformed and unavailable auth
 
 test("web auth refuses non-HTTPS project endpoints", () => {
   assert.throws(() => new SupabaseAuthVerifier("http://project.supabase.co", "key"), /HTTPS/u);
-});
-
-test("web locale mapping leaves missing locale for manual selection", () => {
-  assert.equal(languageFromLocale(null), null);
-  assert.equal(languageFromLocale(""), null);
-  assert.equal(languageFromLocale("ru_RU"), "ru");
-  assert.equal(languageFromLocale("en-US"), "en");
-  assert.equal(languageFromLocale("kk-KZ"), "ru");
-  assert.equal(languageFromLocale("hy"), "ru");
-  assert.equal(languageFromLocale("fr-FR"), "en");
-  assert.equal(languageFromLocale("ro-RO"), "en");
-  assert.equal(languageFromLocale("ro-MD"), "ru");
 });

@@ -13,6 +13,8 @@ import {
   type SubscriptionOfferExperimentParams,
 } from "./abTesting.js";
 import { config } from "./config.js";
+import type { LocalizationService } from "./localization.js";
+import { getMediaUxCopy, runWithMediaLocalization } from "./mediaLocalization.js";
 import { isMaintenanceBlocked } from "./maintenance.js";
 import {
   buildCallbackTokenRow,
@@ -136,7 +138,7 @@ type MediaRepository = Pick<
   | "recordAbTestDelivered"
   | "storeSubscriptionOfferMessageId"
   | "clearActiveSubscriptionOffer"
->;
+> & Partial<Pick<MediaCommerceRepository, "loadAccountLanguage">>;
 
 type SubscriptionPaymentAction = Extract<
   ResolvedInvoiceAction,
@@ -197,6 +199,16 @@ function buildSbpGatewayCheckoutUrl(token: string): string {
 
 function replaceCount(template: string, count: number): string {
   return template.replaceAll("{count}", String(count));
+}
+
+function renderUx(
+  template: string | null | undefined,
+  values: Record<string, string | number> = {},
+): string {
+  return Object.entries(values).reduce(
+    (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
+    String(template ?? ""),
+  );
 }
 
 function buildStableCallbackToken(parts: Array<string | number | null | undefined>): string {
@@ -333,16 +345,16 @@ function buildFreeActionTokenRow(input: {
 }
 
 function buildPaymentUiCopy(): PaymentUiCopy {
-  return { ...config.TELEGRAM_UX_COPY_JSON.payment_ui };
+  return { ...getMediaUxCopy().payment_ui };
 }
 
 function getFeaturePaymentHint(featureKey: string | null | undefined): string | null {
   if (featureKey === "fast_scene_skip") {
-    return config.TELEGRAM_UX_COPY_JSON.payment_ui.fast_scene_skip_hint;
+    return getMediaUxCopy().payment_ui.fast_scene_skip_hint;
   }
 
   if (featureKey === "scene_unlock") {
-    return config.TELEGRAM_UX_COPY_JSON.payment_ui.scene_unlock_hint;
+    return getMediaUxCopy().payment_ui.scene_unlock_hint;
   }
 
   return null;
@@ -1008,6 +1020,7 @@ export class MediaCommerceDecisionService {
       : null,
     private readonly videos: VideoCommerceRepository = new VideoCommerceRepository(),
     private readonly videoSigner: typeof signVideoUrl = signVideoUrl,
+    private readonly localization: Pick<LocalizationService, "getTelegramCopy"> | null = null,
   ) {}
 
   private async runOperation<T>(
@@ -1797,6 +1810,25 @@ export class MediaCommerceDecisionService {
   async evaluate(
     input: MediaCommerceDecisionRequest,
   ): Promise<MediaCommerceDecisionResponse> {
+    const language = this.localization && this.repository.loadAccountLanguage
+      ? await this.repository.loadAccountLanguage(
+        normalizePositiveInteger(input.chat_id ?? input.telegram_chat_id),
+        normalizePositiveInteger(input.source_user_id),
+      )
+      : "ru";
+    const uxCopy = this.localization
+      ? await this.localization.getTelegramCopy(language)
+      : config.TELEGRAM_UX_COPY_JSON;
+
+    return runWithMediaLocalization({ language, uxCopy }, async () => {
+      const response = await this.evaluateLocalized(input);
+      return { ...response, language, ux_copy: uxCopy };
+    });
+  }
+
+  private async evaluateLocalized(
+    input: MediaCommerceDecisionRequest,
+  ): Promise<MediaCommerceDecisionResponse> {
     if (config.MEDIA_VIDEO_ENABLED && ['video_context','claim_video_delivery','finalize_video_delivery'].includes(input.interaction_mode ?? '')) {
       return this.evaluateVideoTransport(input);
     }
@@ -1854,7 +1886,7 @@ export class MediaCommerceDecisionService {
     return buildCallbackTokenRow({chat_id:base.chat_id!,scene_session_id:base.scene_session_id ?? null,
       turn_no:base.turn_no ?? null,scene_turn_no:base.scene_turn_no ?? null,media_signature:base.media_signature ?? null,
       target_message_id:base.target_message_id ?? base.panel_message_id ?? null,current_uuid:base.current_uuid ?? base.selected_uuid ?? null,
-      base_price_xtr:0,next_action:action,requested_action:action,button_text:action === 'video_request' ? '🎬 Оживить фото' : 'Разблокировать видео',
+      base_price_xtr:0,next_action:action,requested_action:action,button_text:action === 'video_request' ? renderUx(getMediaUxCopy().media.animate_photo_button) : renderUx(getMediaUxCopy().media.video_unlock_button),
       extraPayload:{character_i:base.character_i ?? null,telegram_chat_id:base.telegram_chat_id ?? null,...extra,action_kind:action}});
   }
 
@@ -1894,7 +1926,7 @@ export class MediaCommerceDecisionService {
     if (!delivery) return {...base,operation:'noop',reason:'video_access_required'};
     if (delivery.status === 'duplicate_payment_requires_review' || !delivery.delivery_id) {
       return {...base,operation:'video_payment_review_required',reason:'duplicate_payment_requires_review',
-        text:'Оплата получена, но для этой фотопанели уже зарегистрирована выдача. Проверить платёж можно через /paysupport.'};
+        text:renderUx(getMediaUxCopy().video?.duplicate_payment_review)};
     }
     return {...base,operation:['queued','pending','failed','ready'].includes(delivery.status) ? 'video_delivery_required' : 'noop',
       delivery_id:delivery.delivery_id,eligible_at:delivery.eligible_at,target_message_id:delivery.photo_message_id,
@@ -1909,12 +1941,12 @@ export class MediaCommerceDecisionService {
     const passOnly = payload.pass_only === true;
     if (!passOnly && context.delivery) return this.deliveryResponse(frozen,context.delivery);
     if (!context.scene_active || (!passOnly && (!context.video || context.panel_delivered))) {
-      return {...frozen,operation:'noop',reason:'video_unavailable',callback_answer_text:'Видео недоступно для этой фотопанели.'};
+      return {...frozen,operation:'noop',reason:'video_unavailable',callback_answer_text:renderUx(getMediaUxCopy().video?.unavailable)};
     }
     // The callback belongs to the displayed photo, never to a photo visited earlier.
     if (!passOnly && ((context.panel_media_signature && context.panel_media_signature !== frozen.media_signature)
       || (context.panel_photo_uuid && frozen.current_uuid && context.panel_photo_uuid !== frozen.current_uuid))) {
-      return {...frozen,operation:'noop',reason:'video_panel_changed',callback_answer_text:'Фотография изменилась. Нажми кнопку на текущем фото.'};
+      return {...frozen,operation:'noop',reason:'video_panel_changed',callback_answer_text:renderUx(getMediaUxCopy().video?.panel_changed)};
     }
     if (context.full_active || context.video_pass_active) {
       if (passOnly) return {...frozen,operation:'noop',reason:'video_access_already_active'};
@@ -1979,8 +2011,8 @@ export class MediaCommerceDecisionService {
       return {...frozen,operation:feature === 'video_pass' ? 'video_pass_activated' : 'noop',target_message_id:target,
         current_reply_markup:context?.current_reply_markup,reply_markup:context?.current_reply_markup,
         video_control_tokens:controls.filter((token):token is string=>token!==null),video_payment_urls:context?.video_payment_urls ?? [],
-        text:context?.scene_active === false ? 'Оплата получена. VideoPass относится к сцене, выбранной при оплате; текущая сцена уже изменилась.'
-          : 'Видео в этом чате разблокированы до смены сцены.',reason:feature === 'video_pass' ? 'video_pass_activated' : 'video_snapshot_invalid'};
+        text:context?.scene_active === false ? renderUx(getMediaUxCopy().video?.pass_scene_changed)
+          : renderUx(getMediaUxCopy().video?.pass_activated),reason:feature === 'video_pass' ? 'video_pass_activated' : 'video_snapshot_invalid'};
     }
     return this.deliveryResponse(frozen,await this.videos.prepareDelivery({request_key:`paid:${paid.token}`,
       chat_id:paid.chat_id,scene_session_id:paid.scene_session_id,video_id:videoId,photo_message_id:panelId,
@@ -2062,7 +2094,7 @@ export class MediaCommerceDecisionService {
         current_uuid: input.current_uuid,
         base_price_xtr: input.base_price_xtr,
         feature_key: "scene_unlock",
-        action_button_text: config.TELEGRAM_UX_COPY_JSON.media.scene_unlock_button,
+        action_button_text: getMediaUxCopy().media.scene_unlock_button,
         ab_test: toAbTestContext(abSelection),
       }),
     ];
@@ -2135,7 +2167,7 @@ export class MediaCommerceDecisionService {
       requested_action: input.requested_action,
       panel_text: input.panel_text,
       panel_entities_json: input.panel_entities_json,
-      action_button_text: config.TELEGRAM_UX_COPY_JSON.media.get_photo_button,
+      action_button_text: getMediaUxCopy().media.get_photo_button,
     });
   }
 
@@ -2332,7 +2364,7 @@ export class MediaCommerceDecisionService {
       base_price_xtr: basePrice,
       next_action: "photo_request",
       requested_action: "photo_request",
-      button_text: config.TELEGRAM_UX_COPY_JSON.media.get_photo_button,
+      button_text: getMediaUxCopy().media.get_photo_button,
       extraPayload: { photo_sku: photoSku },
     });
     const tokenRows = [tokenRow, ...sceneUnlockTokenRows];
@@ -2417,7 +2449,7 @@ export class MediaCommerceDecisionService {
     }
 
     const freeFastSkipButton =
-      config.TELEGRAM_UX_COPY_JSON.free_actions.fast_scene_skip_button;
+      getMediaUxCopy().free_actions.fast_scene_skip_button;
     const freeCredits =
       featureKey === "fast_scene_skip"
         ? await this.repository.loadFreeCredits(chatId)
@@ -2592,9 +2624,9 @@ export class MediaCommerceDecisionService {
       && !isExpired(callbackRow?.expires_at)
       && (callbackStatus === "active" || isFreeActionReplay);
     const answerText = !valid
-      ? config.TELEGRAM_UX_COPY_JSON.payment_errors.stale
+      ? getMediaUxCopy().payment_errors.stale
       : (actionKind === "photo_request" || actionKind === "photo_regen")
-        ? config.TELEGRAM_UX_COPY_JSON.media.generating
+        ? getMediaUxCopy().media.generating
         : "";
 
     const callbackBase = {
@@ -2760,7 +2792,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "noop",
         callback_valid: false,
-        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_answer_text: getMediaUxCopy().payment_errors.stale,
         callback_show_alert: false,
         reason: "callback_invalid",
       };
@@ -2778,7 +2810,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "noop",
         callback_valid: false,
-        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_answer_text: getMediaUxCopy().payment_errors.stale,
         callback_show_alert: false,
         reason: "callback_invalid",
       };
@@ -2807,7 +2839,7 @@ export class MediaCommerceDecisionService {
           ...base,
           operation: "noop",
           callback_valid: false,
-          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_answer_text: getMediaUxCopy().payment_errors.stale,
           callback_show_alert: false,
           reason: "callback_invalid",
         };
@@ -2820,7 +2852,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "noop",
         callback_valid: false,
-        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_answer_text: getMediaUxCopy().payment_errors.stale,
         callback_show_alert: false,
         reason: "callback_invalid",
       };
@@ -2838,7 +2870,7 @@ export class MediaCommerceDecisionService {
           ...base,
           operation: "noop",
           callback_valid: false,
-          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_answer_text: getMediaUxCopy().payment_errors.stale,
           callback_show_alert: false,
           reason: "callback_invalid",
         };
@@ -2854,7 +2886,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "noop",
         callback_valid: false,
-        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_answer_text: getMediaUxCopy().payment_errors.stale,
         callback_show_alert: false,
         reason: "callback_invalid",
       };
@@ -2886,7 +2918,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "noop",
         callback_valid: false,
-        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_answer_text: getMediaUxCopy().payment_errors.stale,
         callback_show_alert: false,
         reason: "callback_invalid",
       };
@@ -2909,7 +2941,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "noop",
         callback_valid: false,
-        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_answer_text: getMediaUxCopy().payment_errors.stale,
         callback_show_alert: false,
         reason: "callback_invalid",
       };
@@ -2933,7 +2965,7 @@ export class MediaCommerceDecisionService {
           ...base,
           operation: "noop",
           callback_valid: false,
-          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_answer_text: getMediaUxCopy().payment_errors.stale,
           callback_show_alert: false,
           reason: "callback_invalid",
         };
@@ -2952,7 +2984,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "noop",
         callback_valid: false,
-        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_answer_text: getMediaUxCopy().payment_errors.stale,
         callback_show_alert: false,
         reason: "callback_invalid",
       };
@@ -2968,7 +3000,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "noop",
         callback_valid: false,
-        callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        callback_answer_text: getMediaUxCopy().payment_errors.stale,
         callback_show_alert: false,
         reason: "callback_invalid",
       };
@@ -3071,7 +3103,7 @@ export class MediaCommerceDecisionService {
       ...base,
       operation: "noop",
       callback_valid: false,
-      callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      callback_answer_text: getMediaUxCopy().payment_errors.stale,
       callback_show_alert: false,
       payment_kind: "feature",
       payment_token: token,
@@ -3101,7 +3133,7 @@ export class MediaCommerceDecisionService {
       return {
         ...base,
         operation: "scene_access_activated",
-        text: config.TELEGRAM_UX_COPY_JSON.callbacks.scene_access_activated,
+        text: getMediaUxCopy().callbacks.scene_access_activated,
         callback_valid: true,
         callback_answer_text: "",
         chat_id:
@@ -3154,7 +3186,7 @@ export class MediaCommerceDecisionService {
           ...base,
           operation: "noop",
           callback_valid: false,
-          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_answer_text: getMediaUxCopy().payment_errors.stale,
           callback_show_alert: false,
           reason: "scene_session_id_required",
         };
@@ -3170,7 +3202,7 @@ export class MediaCommerceDecisionService {
           ...base,
           operation: "noop",
           callback_valid: false,
-          callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+          callback_answer_text: getMediaUxCopy().payment_errors.stale,
           callback_show_alert: false,
           reason: "scene_unlock_plan_missing",
         };
@@ -3196,7 +3228,7 @@ export class MediaCommerceDecisionService {
       ...base,
       operation: "noop",
       callback_valid: false,
-      callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      callback_answer_text: getMediaUxCopy().payment_errors.stale,
       callback_show_alert: false,
       payment_kind: "feature",
       payment_token: token,
@@ -3390,7 +3422,7 @@ export class MediaCommerceDecisionService {
       ...base,
       operation: "noop",
       callback_valid: false,
-      callback_answer_text: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+      callback_answer_text: getMediaUxCopy().payment_errors.stale,
       callback_show_alert: false,
       payment_kind: "photo",
       payment_token: token,
@@ -3518,7 +3550,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "answer_precheckout",
         precheckout_ok: false,
-        precheckout_error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        precheckout_error: getMediaUxCopy().payment_errors.stale,
         reason: "invoice_payload_required",
       };
     }
@@ -3550,7 +3582,7 @@ export class MediaCommerceDecisionService {
         ...base,
         operation: "answer_precheckout",
         precheckout_ok: false,
-        precheckout_error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+        precheckout_error: getMediaUxCopy().payment_errors.stale,
         reason: "chat_id_required",
       };
     }
@@ -3586,7 +3618,7 @@ export class MediaCommerceDecisionService {
           validation = {
             ...validation,
             ok: false,
-            error: config.TELEGRAM_UX_COPY_JSON.payment_errors.stale,
+            error: getMediaUxCopy().payment_errors.stale,
             reason: "subscription_offer_not_active",
           };
         }
@@ -3616,21 +3648,21 @@ export class MediaCommerceDecisionService {
           validation = {
             ...validation,
             ok: false,
-            error: config.TELEGRAM_UX_COPY_JSON.payment_errors.different_scene,
+            error: getMediaUxCopy().payment_errors.different_scene,
             reason: "scene_invoice_not_active",
           };
         } else if (sceneStatus.subscription_active) {
           validation = {
             ...validation,
             ok: false,
-            error: config.TELEGRAM_UX_COPY_JSON.payment_errors.subscription_active,
+            error: getMediaUxCopy().payment_errors.subscription_active,
             reason: "subscription_already_active",
           };
         } else if (sceneStatus.scene_access_active) {
           validation = {
             ...validation,
             ok: false,
-            error: config.TELEGRAM_UX_COPY_JSON.payment_errors.scene_already_unlocked,
+            error: getMediaUxCopy().payment_errors.scene_already_unlocked,
             reason: "scene_access_already_active",
           };
         }
@@ -3766,7 +3798,7 @@ export class MediaCommerceDecisionService {
         return {
           ...base,
           operation: "scene_access_activated",
-          text: config.TELEGRAM_UX_COPY_JSON.callbacks.scene_access_activated,
+          text: getMediaUxCopy().callbacks.scene_access_activated,
           chat_id: normalizePositiveInteger(loaded.chat_id) ?? base.chat_id,
           scene_session_id: loaded.scene_session_id ?? base.scene_session_id,
           turn_no: normalizeNonNegativeInteger(loaded.turn_no) ?? base.turn_no,
@@ -4642,7 +4674,7 @@ export class MediaCommerceDecisionService {
       ...base,
       operation: activatedCount > 0 ? "scene_access_activated" : "noop",
       text: activatedCount > 0
-        ? config.TELEGRAM_UX_COPY_JSON.callbacks.scene_access_activated
+        ? getMediaUxCopy().callbacks.scene_access_activated
         : undefined,
       chat_id:
         normalizePositiveInteger(payload.chat_id)
@@ -4885,7 +4917,15 @@ export class MediaCommerceDecisionService {
       abParams,
       subscriptionOfferReason,
     );
-    const freeBalanceText = formatFreeBalances(input);
+    if (offerText == null) {
+      const subscriptionCopy = getMediaUxCopy().subscription;
+      offerText = subscriptionOfferReason === "daily_turn_limit"
+        ? subscriptionCopy.daily_limit_offer
+        : subscriptionOfferReason === "subscription_command"
+          ? subscriptionCopy.command_offer
+          : null;
+    }
+    const freeBalanceText = formatFreeBalances(input, getMediaUxCopy().free_balances);
     const offerAccessStatus = await this.runRepositoryOperation(
       "subscription.loadSceneAccessStatus",
       {
@@ -4925,12 +4965,17 @@ export class MediaCommerceDecisionService {
       if (active) {
         const nominal = config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(plan=>plan.sku === activeSku);
         const title = nominal?.title ?? activeSku;
-        offerText = `${title}\n${nominal?.description ?? ''}\nДействует до ${videoSubscriptionContext.subscription_until}\nВсе текущие преимущества подписки сохраняются.`;
+        offerText = [
+          title,
+          nominal?.description ?? '',
+          renderUx(getMediaUxCopy().video?.subscription_valid_until, { date: videoSubscriptionContext.subscription_until ?? "" }),
+          renderUx(getMediaUxCopy().video?.subscription_benefits_preserved),
+        ].filter(Boolean).join('\n');
         if (videoSubscriptionContext.full_active) {
-          offerText += '\nFull: диалоги, фотографии и безлимитные доступные видео во всех чатах.';
+          offerText += '\n' + renderUx(getMediaUxCopy().video?.full_benefits);
           subscriptionPlans = [];
         } else {
-          offerText += '\nBase: действующие преимущества диалогов и фотографий.';
+          offerText += '\n' + renderUx(getMediaUxCopy().video?.base_benefits);
           subscriptionPlans = !videoSubscriptionContext.video_pass_active && nominal
             ? subscriptionPlans.filter(plan=>plan.tier === 'full').flatMap(plan=>{
               const quote = calculateFullUpgrade(plan,nominal,config.MEDIA_UPGRADE_DISCOUNT_PERCENT);
@@ -4938,7 +4983,7 @@ export class MediaCommerceDecisionService {
               return [{...plan,...quote,amount_rub:quote.amount_rub && quote.amount_rub>0 ? quote.amount_rub : null,
                 subscription_change:'upgrade' as const,upgrade_base_sku:nominal.sku,
                 upgrade_discount_percent:config.MEDIA_UPGRADE_DISCOUNT_PERCENT,
-                description:`Апгрейд до Full на новые 30 дней. ${plan.description}`}];
+                description:renderUx(getMediaUxCopy().video?.full_upgrade_description,{description:plan.description})}];
             }) : [];
         }
       }

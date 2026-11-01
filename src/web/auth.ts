@@ -11,7 +11,6 @@ export class WebAuthError extends Error {
     super(code);
   }
 }
-
 const userSchema = z.object({
   id: z.string().uuid(),
   is_anonymous: z.boolean().optional(),
@@ -85,16 +84,4 @@ export class SupabaseAuthVerifier implements WebAuthenticator {
       locale: google ? optionalText(user.user_metadata?.locale, 40) : null,
     };
   }
-}
-
-/** A manual language stored in users.language always takes precedence. */
-export function languageFromLocale(locale: string | null | undefined): "ru" | "en" | null {
-  if (!locale?.trim()) return null;
-  const normalized = locale.trim().replace(/_/gu, "-").toLowerCase();
-  const [language] = normalized.split("-");
-  if (language === "ru" || language === "en") return language;
-  const cisLanguages = new Set(["uk", "be", "kk", "ky", "tg", "tk", "uz", "hy", "az", "mo"]);
-  const region = normalized.split("-").find((part, index) => index > 0 && /^[a-z]{2}$/u.test(part));
-  const cisRegions = new Set(["ru", "by", "kz", "kg", "tj", "tm", "uz", "am", "az", "md", "ua"]);
-  return cisLanguages.has(language ?? "") || (region != null && cisRegions.has(region)) ? "ru" : "en";
 }

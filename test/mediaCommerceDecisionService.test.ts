@@ -138,6 +138,10 @@ async function withMaintenanceConfig<T>(
 }
 
 type MockRepository = {
+  loadAccountLanguage?: (
+    chatId: number | null,
+    sourceUserId: number | null,
+  ) => Promise<"ru" | "en">;
   loadOfferStats: (
     input: unknown,
   ) => Promise<MediaOfferStats>;
@@ -755,6 +759,7 @@ function createRepository(
   overrides: Partial<MockRepository> = {},
   starsOverrides: Partial<MockStarsClient> = {},
   sbpOverrides: Partial<MockSbpClient> = {},
+  localization: { getTelegramCopy(locale: "ru" | "en"): Promise<typeof config.TELEGRAM_UX_COPY_JSON> } | null = null,
 ) {
   const calls = {
     loadMediaContext: 0,
@@ -1256,7 +1261,14 @@ function createRepository(
   };
 
   return {
-    service: new MediaCommerceDecisionService(repository, starsClient, sbpClient),
+    service: new MediaCommerceDecisionService(
+      repository,
+      starsClient,
+      sbpClient,
+      undefined,
+      undefined,
+      localization,
+    ),
     calls,
   };
 }
@@ -2533,6 +2545,43 @@ test("invalid callback returns noop without media context query", async () => {
   assert.equal(result.callback_valid, false);
   assert.equal(result.callback_answer_text, "text");
   assert.equal(calls.loadMediaContext, 0);
+});
+
+test("asynchronous commerce resolves UX copy from the saved account language", async () => {
+  const englishCopy = structuredClone(config.TELEGRAM_UX_COPY_JSON);
+  englishCopy.payment_errors.stale = "English stale callback";
+  const { service } = createRepository(
+    {
+      async loadAccountLanguage(chatId, sourceUserId) {
+        assert.equal(chatId, 101);
+        assert.equal(sourceUserId, 202);
+        return "en";
+      },
+      async loadCallbackToken() {
+        return buildLoadedCallbackToken({ found: false, token: null });
+      },
+    },
+    {},
+    {},
+    {
+      async getTelegramCopy(locale) {
+        assert.equal(locale, "en");
+        return englishCopy;
+      },
+    },
+  );
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: "btn_missing",
+    callback_query_id: "cbq-en",
+    source_user_id: 202,
+  }));
+
+  assert.equal(result.language, "en");
+  assert.equal(result.callback_answer_text, "English stale callback");
+  assert.equal((result.ux_copy as typeof englishCopy).payment_errors.stale, "English stale callback");
 });
 
 test("feature payment reveal callback returns payment options without creating checkout", async () => {
@@ -5631,6 +5680,32 @@ test("subscription_offer creates missing invoice links internally", async () => 
   assert.equal(calls.createStarsInvoice, 6);
 });
 
+test("subscription_offer uses localized command and daily-limit copy when AB copy is absent", async () => {
+  const localizedCopy = structuredClone(config.TELEGRAM_UX_COPY_JSON);
+  localizedCopy.subscription.command_offer = "EN localized command offer";
+  localizedCopy.subscription.daily_limit_offer = "EN localized daily offer";
+  const { service } = createRepository(
+    { async loadAccountLanguage() { return "en"; } },
+    {},
+    {},
+    { async getTelegramCopy() { return localizedCopy; } },
+  );
+
+  const command = await service.evaluate(buildRequest({
+    interaction_mode: "subscription_offer",
+    idempotency_key: "localized-command",
+    subscription_offer_reason: "subscription_command",
+  }));
+  const daily = await service.evaluate(buildRequest({
+    interaction_mode: "subscription_offer",
+    idempotency_key: "localized-daily",
+    subscription_offer_reason: "daily_turn_limit",
+  }));
+
+  assert.equal(command.text, "EN localized command offer");
+  assert.equal(daily.text, "EN localized daily offer");
+});
+
 test("subscription_offer does not silently succeed when configured invoice attempts are missing", async () => {
   const { service, calls } = createRepository({
     async upsertInvoiceTokens() {
@@ -5976,7 +6051,7 @@ test("subscription_offer logs and skips ab when saved variant is missing from cu
 
       assert.equal(result.operation, "subscription_offer_ready");
       assert.equal(result.ab_test, null);
-      assert.equal(result.text, null);
+      assert.equal(result.text, config.TELEGRAM_UX_COPY_JSON.subscription.command_offer);
       assert.equal(
         result.subscription_invoice_tokens?.some((token) => token.includes(":ab_")),
         false,
@@ -6133,7 +6208,7 @@ test("subscription_offer ignores inactive ab experiment without loading assignme
     );
 
     assert.equal(result.ab_test, null);
-    assert.equal(result.text, null);
+    assert.equal(result.text, config.TELEGRAM_UX_COPY_JSON.subscription.command_offer);
   });
 });
 
@@ -6838,9 +6913,9 @@ test("subscription_offer returns reusable free balance text for the inactive sub
 
   assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.free_balance_text, [
-    "🎁 У тебя есть:",
-    "• 2 бесплатные разблокировки сцены",
-    "• 1 бесплатный пропуск сцены",
+    "Gifts:",
+    "• 2 scene unlocks",
+    "• 1 scene skip",
   ].join("\n"));
 });
 
@@ -7224,7 +7299,7 @@ test("subscription_offer persists freshly created links without reload loop", as
   assert.equal(calls.createStarsInvoice, 2);
   assert.equal(result.operation, "subscription_offer_ready");
   assert.equal(result.offer_reused, false);
-  assert.equal(result.text, null);
+  assert.equal(result.text, config.TELEGRAM_UX_COPY_JSON.subscription.daily_limit_offer);
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
     [
@@ -7294,7 +7369,7 @@ test("subscription_offer reuses stored invoice links from batch upsert without r
   assert.equal(calls.loadStoredInvoiceTokens, 0);
   assert.equal(calls.createStarsInvoice, 0);
   assert.equal(result.operation, "subscription_offer_ready");
-  assert.equal(result.text, null);
+  assert.equal(result.text, config.TELEGRAM_UX_COPY_JSON.subscription.command_offer);
   assert.deepEqual(
     result.subscription_offer_items?.map((item) => firstOfferPaymentOption(item)?.checkout_url),
     [

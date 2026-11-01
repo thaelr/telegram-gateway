@@ -93,10 +93,10 @@ type MockRepository = {
     requestedCharacterId?: number | null,
     updateSelectedCharacter?: boolean,
   ) => Promise<AccessContext>;
-  initializeExistingTelegramLanguage: (
+  setTelegramLanguage: (
     sourceUserId: number,
     language: TelegramLanguage,
-  ) => Promise<void>;
+  ) => Promise<string>;
   popActiveSubscriptionOffer: (
     chatId: number,
     currentOfferId: string | null,
@@ -113,6 +113,8 @@ function buildAccessContext(
     character_i: 1,
     source: "telegram",
     source_user_id: 202,
+    language: null,
+    language_confirmed_at: null,
     terms_accepted_at: "2026-08-01T10:00:00.000Z",
     subscription_sku: null,
     subscription_until: null,
@@ -197,11 +199,12 @@ function createService(
       }
       return context;
     },
-    async initializeExistingTelegramLanguage(sourceUserId, language) {
+    async setTelegramLanguage(sourceUserId, language) {
       languageCalls.push({ sourceUserId, language });
       if (options.throwOnCall) {
         throw new Error("Repository should not be called");
       }
+      return "2026-10-30T00:00:00.000Z";
     },
     async popActiveSubscriptionOffer(chatId, currentOfferId) {
       dismissCalls.push({ chatId, currentOfferId });
@@ -210,7 +213,11 @@ function createService(
   };
 
   return {
-    service: new AccessDecisionService(repository),
+    service: new AccessDecisionService(repository, {
+      async getTelegramCopy() {
+        return config.TELEGRAM_UX_COPY_JSON;
+      },
+    }),
     calls,
     languageCalls,
     dismissCalls,
@@ -234,57 +241,100 @@ async function withMaintenanceConfig<T>(
   }
 }
 
-test("initializes a detected Telegram language after access account resolution", async () => {
-  const { service, calls, languageCalls } = createService();
-
-  await service.evaluate(buildRequest({
-    raw_update: {
-      message: {
-        from: { id: 202, language_code: "ru" },
-      },
-    },
+test("Telegram language_code is ignored and a new user must choose explicitly", async () => {
+  const { service, calls, languageCalls } = createService(buildAccessContext({
+    language: null,
+    language_confirmed_at: null,
+    terms_accepted_at: null,
   }));
-
-  assert.equal(calls.length, 1);
-  assert.deepEqual(languageCalls, [{ sourceUserId: 202, language: "ru" }]);
-});
-
-test("initializes Telegram language for updates that do not load access context", async () => {
-  const { service, calls, languageCalls } = createService();
 
   const result = await service.evaluate(buildRequest({
-    event_type: "message.image.received",
-    route_target: "noop",
-    message_type: "image",
+    command: "/start",
+    event_type: "command.received",
+    message_type: "command",
     user_message: null,
-    raw_update: {
-      message: {
-        from: { id: 202, language_code: "de" },
-      },
-    },
+    raw_update: { message: { from: { id: 202, language_code: "en" } } },
   }));
 
-  assert.equal(result.decision, "noop");
-  assert.equal(calls.length, 0);
-  assert.deepEqual(languageCalls, [{
-    sourceUserId: 202,
-    language: "en",
-  }]);
+  assert.equal(result.action, "show_language_selector");
+  assert.equal(result.reason, "language_selection_required");
+  assert.equal(calls.length, 1);
+  assert.equal(languageCalls.length, 0);
 });
 
-test("does not initialize Telegram language when language_code is absent", async () => {
-  const { service, calls, languageCalls } = createService();
-
-  await service.evaluate(buildRequest({
-    event_type: "message.image.received",
-    route_target: "noop",
-    message_type: "image",
-    user_message: null,
-    raw_update: { message: { from: { id: 202 } } },
+test("/language opens the selector without changing an active account", async () => {
+  const { service, languageCalls } = createService(buildAccessContext({
+    language: "ru",
+    language_confirmed_at: "2026-10-29T00:00:00.000Z",
   }));
 
-  assert.equal(calls.length, 0);
+  const result = await service.evaluate(buildRequest({
+    command: "/language",
+    event_type: "command.received",
+    message_type: "command",
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "show_language_selector");
+  assert.equal(result.allowed, true);
   assert.equal(languageCalls.length, 0);
+});
+
+test("language selection persists explicitly and continues to terms", async () => {
+  const { service, languageCalls } = createService(buildAccessContext({
+    language: null,
+    language_confirmed_at: null,
+    terms_accepted_at: null,
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "language_select:en",
+    callback_query_id: "language-callback",
+    user_message: null,
+  }));
+
+  assert.deepEqual(languageCalls, [{ sourceUserId: 202, language: "en" }]);
+  assert.equal(result.language, "en");
+  assert.equal(result.language_confirmed_at, "2026-10-30T00:00:00.000Z");
+  assert.equal(result.action, "show_terms_gate");
+  assert.equal(result.reason, "language_selected_terms_required");
+});
+
+test("language selection after onboarding only acknowledges the change", async () => {
+  const { service } = createService(buildAccessContext({
+    language: "ru",
+    language_confirmed_at: "2026-10-29T00:00:00.000Z",
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "language_select:en",
+    callback_query_id: "language-callback",
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "acknowledge_language_change");
+  assert.equal(result.allowed, true);
+  assert.equal(result.language, "en");
+});
+
+test("a legacy terms callback cannot bypass required language selection", async () => {
+  const { service } = createService(buildAccessContext({
+    language: null,
+    language_confirmed_at: null,
+    terms_accepted_at: null,
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "terms_accept:start",
+    callback_query_id: "terms-callback",
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "show_language_selector");
+  assert.equal(result.reason, "language_selection_required");
 });
 
 test("maintenance blocks messages and callbacks before repository access", async () => {
@@ -305,7 +355,7 @@ test("maintenance blocks messages and callbacks before repository access", async
       const result = await service.evaluate(request);
       assert.equal(result.action, "show_maintenance");
       assert.equal(result.allowed, false);
-      assert.equal(result.text, config.MAINTENANCE_TEXT);
+      assert.equal(result.text, "Maintenance");
       assert.equal(result.reason, "maintenance_mode");
       assert.equal(calls.length, 0);
       assert.equal(dismissCalls.length, 0);
@@ -354,7 +404,12 @@ test("maintenance does not block payment events or chat status updates", async (
 
 test("returns show_terms_gate when terms are not accepted", async () => {
   const { service, calls } = createService(
-    buildAccessContext({ terms_accepted_at: null, turns_today: 3 }),
+    buildAccessContext({
+      language: "ru",
+      language_confirmed_at: "2026-10-29T00:00:00.000Z",
+      terms_accepted_at: null,
+      turns_today: 3,
+    }),
   );
 
   const result = await service.evaluate(buildRequest());
@@ -370,7 +425,12 @@ test("returns show_terms_gate when terms are not accepted", async () => {
 
 test("returns show_terms_gate for /start with active scene when terms are not accepted", async () => {
   const { service, calls } = createService(
-    buildAccessContext({ terms_accepted_at: null, scene_turn_no: 3 }),
+    buildAccessContext({
+      language: "ru",
+      language_confirmed_at: "2026-10-29T00:00:00.000Z",
+      terms_accepted_at: null,
+      scene_turn_no: 3,
+    }),
   );
 
   const result = await service.evaluate(
@@ -613,7 +673,7 @@ test("returns subscription status for /subscription with active subscription", a
   assert.equal(result.action, "show_subscription_status");
   assert.equal(result.decision, "show_subscription_status");
   assert.equal(result.allowed, true);
-  assert.equal(result.text, "🎁 У тебя есть:\n• 2 бесплатных фото\n\ntext");
+  assert.equal(result.text, "Gifts:\n• 2 photos\n\ntext");
 });
 
 test("formats 14-day subscription plan from sku even when 4 days are left", async () => {
@@ -906,21 +966,25 @@ test("routes valid structured callbacks by exact contract", async () => {
       callback_data: "terms_accept:start",
       intent: "terms_accept",
       action: "handle_terms_accept",
+      uses_access: true,
     },
     {
       callback_data: "terms_accept:menu",
       intent: "terms_accept",
       action: "handle_terms_accept",
+      uses_access: true,
     },
     {
       callback_data: "terms_accept:subscription",
       intent: "terms_accept",
       action: "handle_terms_accept",
+      uses_access: true,
     },
     {
       callback_data: "terms_accept:paysupport",
       intent: "terms_accept",
       action: "handle_terms_accept",
+      uses_access: true,
     },
   ] as const;
 
@@ -976,7 +1040,8 @@ test("structured callback payload fields are returned for n8n contracts", async 
   ] as const;
 
   for (const entry of cases) {
-    const usesAccess = entry.callback_data.startsWith("newscene_confirm:");
+    const usesAccess = entry.callback_data.startsWith("newscene_confirm:")
+      || entry.callback_data.startsWith("terms_accept:");
     const { service, calls } = createService(buildAccessContext(), {
       throwOnCall: !usesAccess,
     });
@@ -1337,13 +1402,8 @@ test("reachability is classified by event_type without route_target", async () =
   assert.equal(calls.length, 0);
 });
 
-test("bypass events do not call repository", async () => {
+test("non-gated bypass events do not call repository", async () => {
   const cases: AccessDecisionRequest[] = [
-    buildRequest({
-      callback_data: "terms_accept:start",
-      event_type: "callback_query.received",
-      user_message: null,
-    }),
     buildRequest({
       callback_data: "character_menu:back",
       event_type: "callback_query.received",
@@ -1561,7 +1621,11 @@ test("payment and opaque commerce events do not dismiss subscription offer panel
 
 test("uses special post_accept_intent for gated subscription, paysupport, and menu commands", async () => {
   const { service } = createService(
-    buildAccessContext({ terms_accepted_at: null }),
+    buildAccessContext({
+      language: "ru",
+      language_confirmed_at: "2026-10-29T00:00:00.000Z",
+      terms_accepted_at: null,
+    }),
   );
 
   const subscriptionResult = await service.evaluate(

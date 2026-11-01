@@ -8,10 +8,17 @@ import { TelegramStarsPaymentAdapter } from '../payments/stars.js';
 import { WebCommerceService } from './commerce.js';
 import { WebCommerceRepository } from './commerceRepository.js';
 import type { WebRepositoryContract } from './types.js';
+import type { LocalizationService } from '../localization.js';
 
-export function createWebCommerce(accounts:WebRepositoryContract){
+export function createWebCommerce(accounts:WebRepositoryContract,localization:LocalizationService){
  const providers=new PaymentProviderRegistry([new StarsProvider(new TelegramStarsPaymentAdapter())]);
  if(config.SBP_ENABLED)providers.register(new SbpProvider(new SbpPaymentAdapter()));
  if(config.NOWPAYMENTS_ENABLED)providers.register(new NowPaymentsProvider({apiKey:config.NOWPAYMENTS_API_KEY!,ipnSecret:config.NOWPAYMENTS_IPN_SECRET!,callbackUrl:config.NOWPAYMENTS_IPN_URL!,successUrl:config.NOWPAYMENTS_SUCCESS_URL!,cancelUrl:config.NOWPAYMENTS_CANCEL_URL!,apiBaseUrl:config.NOWPAYMENTS_API_BASE_URL,timeoutMs:config.NOWPAYMENTS_TIMEOUT_MS}));
- return new WebCommerceService(new WebCommerceRepository(),providers,new MediaCommerceDecisionService(new MediaCommerceRepository()),accounts);
+ return new WebCommerceService(
+  new WebCommerceRepository(),
+  providers,
+  new MediaCommerceDecisionService(new MediaCommerceRepository(),undefined,undefined,undefined,undefined,localization),
+  accounts,
+  localization,
+ );
 }

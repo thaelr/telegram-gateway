@@ -38,6 +38,8 @@ import {
 import { MediaInteractionTokenRepository } from "./mediaCommerceRepository/tokenRepository.js";
 
 export class MediaCommerceRepository {
+  private readonly query: QueryClient;
+
   private readonly catalogRepository: MediaCatalogRepository;
 
   private readonly tokenRepository: MediaInteractionTokenRepository;
@@ -47,10 +49,39 @@ export class MediaCommerceRepository {
   private readonly mediaEventRepository: MediaEventRepository;
 
   constructor(query: QueryClient = sql) {
+    this.query = query;
     this.catalogRepository = new MediaCatalogRepository(query);
     this.tokenRepository = new MediaInteractionTokenRepository(query);
     this.paymentRepository = new MediaPaymentRepository(query);
     this.mediaEventRepository = new MediaEventRepository(query);
+  }
+
+  async loadAccountLanguage(
+    chatId: number | null,
+    sourceUserId: number | null,
+  ): Promise<"ru" | "en"> {
+    const rows = await this.query<Array<{ language: string | null }>>`
+      SELECT account.language
+      FROM public.users AS account
+      WHERE account.user_id = COALESCE(
+        (
+          SELECT identity.user_id
+          FROM public.user_identities AS identity
+          WHERE identity.provider = 'telegram'
+            AND identity.external_id = ${sourceUserId}::text
+          LIMIT 1
+        ),
+        (
+          SELECT state.user_id
+          FROM public.chat_state AS state
+          WHERE state.chat_id = ${chatId}::bigint
+          LIMIT 1
+        )
+      )
+      LIMIT 1
+    `;
+
+    return rows[0]?.language === "en" ? "en" : "ru";
   }
 
   async loadOfferStats(input: LoadOfferStatsInput): Promise<MediaOfferStats> {

@@ -46,6 +46,11 @@ export class RewardService {
     chatId: number;
     slot: number;
     telegramMessageId: number | null;
+    copy?: {
+      activated: string;
+      already_activated: string;
+      unavailable: string;
+    };
   }): Promise<RewardGrantClaimResult & {
     callback_answer_text: string;
     next_action: string | null;
@@ -64,10 +69,10 @@ export class RewardService {
       ...result,
       callback_answer_text:
         result.status === "claimed"
-          ? result.success_text ?? "Подарок активирован"
+          ? result.success_text ?? input.copy?.activated ?? ""
           : result.status === "already_claimed"
-            ? "Подарок уже активирован"
-            : "Подарок недоступен",
+            ? input.copy?.already_activated ?? ""
+            : input.copy?.unavailable ?? "",
       next_action: result.status === "not_eligible" ? null : result.next_action,
       reward_slot: input.slot,
     };

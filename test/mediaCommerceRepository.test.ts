@@ -94,6 +94,19 @@ function assertJsonbParameter(value: unknown, expectedValue: unknown) {
   assert.deepEqual((value as JsonParameter).value, expectedValue);
 }
 
+test("loadAccountLanguage resolves the saved account and defaults legacy users to Russian", async () => {
+  const first = createTaggedQueryStub([[{ language: "en" }]]);
+  const englishRepository = new MediaCommerceRepository(first.query as never);
+  assert.equal(await englishRepository.loadAccountLanguage(101, 202), "en");
+  assert.match(first.calls[0]?.sql ?? "", /public\.user_identities/);
+  assert.match(first.calls[0]?.sql ?? "", /public\.chat_state/);
+  assert.deepEqual(first.calls[0]?.values, [202, 101]);
+
+  const legacy = createTaggedQueryStub([[{ language: null }]]);
+  const legacyRepository = new MediaCommerceRepository(legacy.query as never);
+  assert.equal(await legacyRepository.loadAccountLanguage(101, null), "ru");
+});
+
 test("loadOfferStats delegates to media_load_offer_stats and preserves empty-catalog result", async () => {
   const { query, calls } = createTaggedQueryStub([[
     {

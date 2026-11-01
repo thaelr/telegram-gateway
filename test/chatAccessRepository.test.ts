@@ -61,6 +61,8 @@ function buildAccessContext(overrides: Partial<AccessContext> = {}): AccessConte
     character_i: null,
     source: "telegram",
     source_user_id: 777001,
+    language: null,
+    language_confirmed_at: null,
     terms_accepted_at: null,
     subscription_sku: null,
     subscription_until: null,
@@ -260,24 +262,19 @@ test("ensureTelegramAccountLink delegates atomic identity resolution to the data
   );
 });
 
-test("initializes language only for an existing Telegram account with no language", async () => {
+test("stores only an explicit Telegram language selection", async () => {
   const calls: QueryCall[] = [];
   const query = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     calls.push({ strings: Array.from(strings), values });
-    return Promise.resolve([{
-      user_id: "u00000ab",
-      selected_character_i: null,
-      active_menu_screen: null,
-      active_menu_message_id: null,
-      requested_character_i: null,
-    }]);
+    return Promise.resolve([{ language_confirmed_at: "2026-10-30T00:00:00.000Z" }]);
   }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
 
-  await new ChatAccessRepository(query).initializeExistingTelegramLanguage(
+  const confirmedAt = await new ChatAccessRepository(query).setTelegramLanguage(
     777001,
     "ru",
   );
 
+  assert.equal(confirmedAt, "2026-10-30T00:00:00.000Z");
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0]?.values, ["ru", 777001]);
   const statement = calls[0]?.strings.join(" ") ?? "";
@@ -285,21 +282,22 @@ test("initializes language only for an existing Telegram account with no languag
   assert.match(statement, /FROM public\.user_identities AS identity/u);
   assert.match(statement, /identity\.provider = 'telegram'/u);
   assert.match(statement, /identity\.external_id =/u);
-  assert.match(statement, /account\.language IS NULL/u);
+  assert.match(statement, /language_confirmed_at = clock_timestamp\(\)/u);
+  assert.doesNotMatch(statement, /language_code/u);
   assert.doesNotMatch(statement, /INSERT INTO/u);
   assert.doesNotMatch(statement, /ensure_telegram_chat_account/u);
 });
 
-test("does nothing when the Telegram account does not exist yet", async () => {
+test("fails closed when an explicit Telegram language has no linked account", async () => {
   const calls: QueryCall[] = [];
   const query = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     calls.push({ strings: Array.from(strings), values });
     return Promise.resolve([]);
   }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
 
-  await new ChatAccessRepository(query).initializeExistingTelegramLanguage(
-    777001,
-    "en",
+  await assert.rejects(
+    new ChatAccessRepository(query).setTelegramLanguage(777001, "en"),
+    /Unable to save Telegram language/u,
   );
 
   assert.equal(calls.length, 1);

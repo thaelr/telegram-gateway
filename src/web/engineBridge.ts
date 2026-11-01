@@ -41,6 +41,9 @@ export class WebEngineBridge {
   const c=candidates[0];if(!c)return none;
   const reply=(await this.query<Row[]>`SELECT t.n,t.assistant_text,t.sent_at FROM public.chat_turns t WHERE t.chat_id=${c.chat_id} AND t.scene_session_id=${c.scene_session_id} AND t.assistant_text IS NOT NULL AND t.sent_at IS NOT NULL ORDER BY t.n DESC LIMIT 1`)[0];
   if(!reply)return none;
+  const profile=await this.commerce.accounts.getMe(identity.user_id);
+  const language=profile.language==='en'?'en':'ru';
+  const uxCopy=this.commerce.localization?await this.commerce.localization.getTelegramCopy(language):null;
   if(input.acknowledge){
    if(input.scene_session_id!==c.scene_session_id||input.turn_no!==Number(reply.n))throw new WebError(409,'continuation_changed');
    await this.query.begin(async tx=>{
@@ -51,10 +54,10 @@ export class WebEngineBridge {
     await tx`UPDATE app_private.web_activity SET last_telegram_at=GREATEST(last_telegram_at,${c.last_web_at}::text::timestamptz) WHERE chat_id=${c.chat_id}`;
     await tx`UPDATE public.chat_state SET selected_character_i=${c.character_i} WHERE chat_id=${input.telegram_chat_id} AND user_id=${identity.user_id}`;
    });
-   return {...none,acknowledged:true};
+   return {...none,language,ux_copy:uxCopy,acknowledged:true};
   }
   if(!c.web_is_newer)return none;
-  return {action:input.confirm?'continue' as const:'offer' as const,chat_id:Number(c.chat_id),chat_code:c.chat_code,telegram_chat_id:input.telegram_chat_id,user_id:identity.user_id,character_i:Number(c.character_i),scene_session_id:c.scene_session_id,scene_mode:c.scene_mode,turn_no:Number(reply.n),assistant_text:input.confirm?reply.assistant_text:null,callback_data:'web_continue:'+c.character_i};
+  return {action:input.confirm?'continue' as const:'offer' as const,chat_id:Number(c.chat_id),chat_code:c.chat_code,telegram_chat_id:input.telegram_chat_id,user_id:identity.user_id,character_i:Number(c.character_i),scene_session_id:c.scene_session_id,scene_mode:c.scene_mode,turn_no:Number(reply.n),assistant_text:input.confirm?reply.assistant_text:null,callback_data:'web_continue:'+c.character_i,language,ux_copy:uxCopy};
  }
 }
 

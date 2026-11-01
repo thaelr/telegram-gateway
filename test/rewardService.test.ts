@@ -186,9 +186,12 @@ test("unknown or mismatched callback identity reports not eligible", async () =>
     { chatId: 42, slot: 2, telegramMessageId: 100 },
     { chatId: 42, slot: 1, telegramMessageId: null },
   ]) {
-    const response = await service.claimConfiguredSlot(input);
+    const response = await service.claimConfiguredSlot({
+      ...input,
+      copy: { activated: "Activated", already_activated: "Already activated", unavailable: "Unavailable" },
+    });
     assert.equal(response.status, "not_eligible");
-    assert.equal(response.callback_answer_text, "Подарок недоступен");
+    assert.equal(response.callback_answer_text, "Unavailable");
     assert.equal(response.next_action, null);
   }
 });
@@ -201,9 +204,10 @@ test("repeat claim uses idempotent status without reading Railway config", async
     chatId: 42,
     slot: 1,
     telegramMessageId: 100,
+    copy: { activated: "Activated", already_activated: "Already activated", unavailable: "Unavailable" },
   });
   assert.equal(result.status, "already_claimed");
-  assert.equal(result.callback_answer_text, "Подарок уже активирован");
+  assert.equal(result.callback_answer_text, "Already activated");
 });
 
 test("bindGrantMessage delegates grant and Telegram message identifiers", async () => {

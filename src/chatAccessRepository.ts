@@ -10,6 +10,8 @@ type AccessContextRow = {
   character_i: number | null;
   source: string | null;
   source_user_id: number | null;
+  language: TelegramLanguage | null;
+  language_confirmed_at: string | null;
   terms_accepted_at: string | null;
   subscription_sku: string | null;
   subscription_until: string | null;
@@ -30,19 +32,46 @@ type AccessContextRow = {
 export class ChatAccessRepository {
   constructor(private readonly query: typeof sql = sql) {}
 
-  async initializeExistingTelegramLanguage(
+  async setTelegramLanguage(
     sourceUserId: number,
     language: TelegramLanguage,
-  ): Promise<void> {
-    await this.query`
+  ): Promise<string> {
+    const rows = await this.query<Array<{ language_confirmed_at: string }>>`
       UPDATE public.users AS account
-      SET language = ${language}::text
+      SET
+        language = ${language}::text,
+        language_confirmed_at = clock_timestamp()
       FROM public.user_identities AS identity
       WHERE identity.provider = 'telegram'
         AND identity.external_id = ${sourceUserId}::text
         AND account.user_id = identity.user_id
-        AND account.language IS NULL
+      RETURNING to_char(
+        account.language_confirmed_at AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+      ) AS language_confirmed_at
     `;
+    const confirmedAt = rows[0]?.language_confirmed_at;
+    if (!confirmedAt) {
+      throw new Error(`Unable to save Telegram language for source_user_id=${sourceUserId}`);
+    }
+    return confirmedAt;
+  }
+
+  async resolveTelegramLanguage(sourceUserId: number): Promise<TelegramLanguage | null> {
+    const rows = await this.query<Array<{ language: TelegramLanguage | null }>>`
+      SELECT account.language
+      FROM public.user_identities AS identity
+      JOIN public.users AS account
+        ON account.user_id = identity.user_id
+      WHERE identity.provider = 'telegram'
+        AND identity.external_id = ${sourceUserId}::text
+      LIMIT 1
+    `;
+    return rows[0]?.language === "en"
+      ? "en"
+      : rows[0]?.language === "ru"
+        ? "ru"
+        : null;
   }
 
   async ensureTelegramAccountLink(
@@ -309,6 +338,11 @@ export class ChatAccessRepository {
         t.character_i,
         t.source,
         t.source_user_id,
+        account.language,
+        CASE
+          WHEN account.language_confirmed_at IS NULL THEN NULL
+          ELSE to_char(account.language_confirmed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        END AS language_confirmed_at,
         CASE
           WHEN account.terms_accepted_at IS NULL THEN NULL
           ELSE to_char(account.terms_accepted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')

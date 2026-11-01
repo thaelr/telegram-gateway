@@ -23,6 +23,7 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
  const service=new WebCommerceService(repo,new PaymentProviderRegistry([provider]),decisions,accounts);
  const owner=async()=>{
   const userId=(await accounts.bootstrap({auth_user_id:randomUUID(),is_anonymous:false,display_name:'Video fixture',locale:'en'})).user_id;
+  await accounts.updateMe(userId,{language:'en'});
   await accounts.confirmAge(userId);await accounts.acceptTerms(userId);
   const created=await accounts.createChat(userId,1,'roleplay',randomUUID());
   const [c]=await db`SELECT chat_id FROM public.chat_state WHERE chat_code=${created.chat.chat_code}`;const chatId=Number(c!.chat_id),scene='video-web-'+randomUUID();

@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { WebAuthError, type WebAuthenticator } from "./auth.js";
+import type { LocalizationService } from "../localization.js";
 import { WebError, type WebIdentity, type WebRepositoryContract } from "./types.js";
 
 export type WebRoutesOptions = {
   authenticator: WebAuthenticator;
   repository: WebRepositoryContract;
+  localization: Pick<LocalizationService, "getNamespace">;
 };
 
 const clientId = z.string().trim().min(1).max(128);
@@ -15,6 +17,8 @@ const codeParams = z.object({ chat_code: chatCode }).strict();
 const characterId = z.coerce.number().int().positive().max(32767);
 const sceneMode = z.enum(["fast", "roleplay"]);
 const pageLimit = z.coerce.number().int().min(1).max(100).optional();
+const localeParam = z.string().regex(/^[a-z][a-z0-9-]*$/u);
+const namespaceParam = z.string().regex(/^[a-z][a-z0-9_.-]*$/u);
 
 export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOptions): void {
   void app.register(async (scope) => {
@@ -29,12 +33,18 @@ export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOption
     const consent = async (request: FastifyRequest): Promise<string> => {
       const id = user(request);
       const profile = await repository.getMe(id);
+      if (!profile.terms_accepted_at && !profile.language_confirmed_at) {
+        throw new WebError(403, "language_selection_required");
+      }
       if (!profile.age_confirmed_at) throw new WebError(403, "age_confirmation_required");
       if (!profile.terms_accepted_at) throw new WebError(403, "terms_acceptance_required");
       return id;
     };
     scope.addHook("onRequest", async (request, reply) => {
-      reply.header("Cache-Control", "no-store");
+      const isPublicLocalization = request.routeOptions.url
+        === "/web/localizations/:locale/:namespace";
+      reply.header("Cache-Control", isPublicLocalization ? "public, max-age=60" : "no-store");
+      if (isPublicLocalization) return;
       reply.header("Vary", "Authorization");
       const identity = await options.authenticator.verify(request.headers.authorization);
       identities.set(request, identity);
@@ -58,6 +68,21 @@ export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOption
       // Do not serialize SQL errors, auth bearer headers, or private model inputs.
       request.log.error({ request_id: request.id }, "Web API operation failed");
       return reply.status(500).send({ error: "internal_error", request_id: request.id });
+    });
+
+    scope.get("/web/localizations/:locale/:namespace", async (request) => {
+      const params = z.object({
+        locale: localeParam,
+        namespace: namespaceParam,
+      }).strict().parse(request.params);
+      return {
+        locale: params.locale,
+        namespace: params.namespace,
+        copy: await options.localization.getNamespace(
+          params.locale,
+          params.namespace,
+        ),
+      };
     });
 
     scope.post("/web/auth/bootstrap", async (request) => {

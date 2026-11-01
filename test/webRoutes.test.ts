@@ -6,7 +6,7 @@ import { WebAuthError } from "../src/web/auth.js";
 import { WebError, type WebRepositoryContract, type WebProfile, type WebChat } from "../src/web/types.js";
 
 const identity = { auth_user_id: "11111111-1111-4111-8111-111111111111", is_anonymous: false, display_name: "User", locale: "en" };
-const profile: WebProfile = { user_id: "u0000001", display_name: "User", language: "en", age_confirmed_at: "2026-10-25T00:00:00Z", terms_accepted_at: "2026-10-25T00:00:00Z", subscription_sku: null, subscription_until: null, entitlements: {}, needs_language_selection: false };
+const profile: WebProfile = { user_id: "u0000001", display_name: "User", language: "en", language_confirmed_at: "2026-10-25T00:00:00Z", age_confirmed_at: "2026-10-25T00:00:00Z", terms_accepted_at: "2026-10-25T00:00:00Z", subscription_sku: null, subscription_until: null, entitlements: {}, needs_language_selection: false };
 const chat: WebChat = { chat_code: "c0000001", character_i: 1, scene_mode: "roleplay", scene_session_id: "scene-1", turn_no: 0, scene_turn_no: 0, updated_at: "2026-10-25T00:00:00Z" };
 const bearer = { authorization: "Bearer test" };
 
@@ -22,7 +22,7 @@ function createApp(overrides: Partial<WebRepositoryContract> = {}) {
     async updateMe(id, patch) { calls.push({ method: "updateMe", args: [id, patch] }); return { ...profile, ...patch }; },
     async confirmAge(id) { calls.push({ method: "confirmAge", args: [id] }); return profile; },
     async acceptTerms(id) { calls.push({ method: "acceptTerms", args: [id] }); return profile; },
-    async listCharacters() { return [{ character_i: 1, name: "Character", description: "Public", image_url: null, modes: ["roleplay", "fast"], chat_code: chat.chat_code }]; },
+    async listCharacters() { return [{ character_i: 1, name: "Character", description: "Public", image_url: null, gallery_photo_url: null, menu_photo_url: null, scene_start_exposition_text: null, scene_start_greeting_text: null, fast_mode_scene_start_exposition_text: null, fast_mode_scene_start_greeting_text: null, modes: ["roleplay", "fast"], chat_code: chat.chat_code }]; },
     async getCharacter() { return (await repository.listCharacters(profile.user_id))[0]!; },
     async listChats() { return [chat]; },
     async createChat(id, character, mode, clientId) { calls.push({ method: "createChat", args: [id, character, mode, clientId] }); return { chat, operation: null }; },
@@ -34,9 +34,22 @@ function createApp(overrides: Partial<WebRepositoryContract> = {}) {
     ...overrides,
   };
   const app = Fastify({ logger: false });
-  registerWebRoutes(app, { repository, authenticator: { async verify(authorization) { if (authorization !== bearer.authorization) throw new WebAuthError(401, "unauthorized"); return identity; } } });
+  registerWebRoutes(app, {
+    repository,
+    authenticator: { async verify(authorization) { if (authorization !== bearer.authorization) throw new WebAuthError(401, "unauthorized"); return identity; } },
+    localization: { async getNamespace(locale, namespace) { return { locale, namespace, message: "localized" }; } },
+  });
   return { app, calls };
 }
+
+test("localization dictionaries are available before authorization", async (t) => {
+  const { app } = createApp();
+  t.after(() => app.close());
+  const result = await app.inject({ url: "/web/localizations/en/onboarding" });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.json().copy.message, "localized");
+  assert.equal(result.headers["cache-control"], "public, max-age=60");
+});
 
 test("all Web routes authenticate before reading an account and hide internal errors", async (t) => {
   const { app } = createApp({ async resolveIdentity() { throw new Error("private SQL/auth material"); } });

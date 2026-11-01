@@ -2,6 +2,7 @@ export type RouterDecision =
   | "allow_scene"
   | "show_subscription_status"
   | "show_subscription_offer"
+  | "show_language_selector"
   | "show_terms_gate"
   | "noop";
 
@@ -18,6 +19,8 @@ export type RouterIntent =
   | "menu"
   | "subscription"
   | "paysupport"
+  | "language"
+  | "language_select"
   | "terms_accept"
   | "reward_claim"
   | "newscene_confirm"
@@ -39,6 +42,8 @@ export type RouterAction =
   | "show_newscene_confirm"
   | "show_subscription_status"
   | "show_subscription_offer"
+  | "show_language_selector"
+  | "acknowledge_language_change"
   | "show_terms_gate"
   | "send_paysupport_message"
   | "show_maintenance"
@@ -114,6 +119,8 @@ export interface AccessDecisionResponse {
   reachability_status?: string | null;
   telegram_chat_status?: string | null;
   terms_accepted_at?: string | null;
+  language?: "ru" | "en" | null;
+  language_confirmed_at?: string | null;
   subscription_active?: boolean;
   subscription_sku?: string | null;
   subscription_until?: string | null;
@@ -131,6 +138,8 @@ export interface AccessDecisionResponse {
   subscription_offer_reason?: "subscription_command" | "daily_turn_limit" | null;
   post_accept_intent?: "start" | "menu" | "subscription" | "paysupport" | null;
   terms_offer_url?: string | null;
+  privacy_policy_url?: string | null;
+  callback_answer_text?: string | null;
   newscene_action?: "yes" | "no" | null;
   expected_scene_session_id?: string | null;
   newscene_callback_valid?: boolean | null;
@@ -155,6 +164,8 @@ export interface AccessContext {
   character_i: number | null;
   source: string | null;
   source_user_id: number | null;
+  language: "ru" | "en" | null;
+  language_confirmed_at: string | null;
   terms_accepted_at: string | null;
   subscription_sku: string | null;
   subscription_until: string | null;

@@ -21,7 +21,7 @@ test("Web is disabled by default while existing health/internal route protection
 
 test("injected Web routes mount in Gateway and delivery lifecycle starts/stops with the app", async () => {
   const lifecycle: string[] = [];
-  const profile: WebProfile = { user_id: "u0000001", display_name: null, language: null, age_confirmed_at: null, terms_accepted_at: null, subscription_sku: null, subscription_until: null, entitlements: {}, needs_language_selection: true };
+  const profile: WebProfile = { user_id: "u0000001", display_name: null, language: null, language_confirmed_at: null, age_confirmed_at: null, terms_accepted_at: null, subscription_sku: null, subscription_until: null, entitlements: {}, needs_language_selection: true };
   const app = buildApp({ logger: false, web: {
     authenticator: { async verify() { return { auth_user_id: "11111111-1111-4111-8111-111111111111", is_anonymous: true, display_name: null, locale: null }; } },
     // This test only invokes bootstrap; repository behavior is covered separately.

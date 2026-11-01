@@ -1,4 +1,15 @@
 export const testTelegramUxCopy = {
+  language: {
+    message: "Choose language",
+    ru_button: "RU",
+    en_button: "EN",
+    updated: "Language updated",
+  },
+  opening_replies: {
+    input_placeholder: "Write my own reply",
+    reminder_html: "<code>Choose a reply</code>",
+    followup_prompt: "Choose a reply",
+  },
   terms: {
     message: "text",
     open_button: "text",
@@ -19,6 +30,12 @@ export const testTelegramUxCopy = {
     message_html: "text",
     free_fast_scene_skips_line: "fast skips: {count}",
     free_scene_unlocks_line: "scene unlocks: {count}",
+  },
+  free_balances: {
+    heading: "Gifts:",
+    scene_unlock: { one: "{count} scene unlock", few: "{count} scene unlocks", many: "{count} scene unlocks" },
+    photo: { one: "{count} photo", few: "{count} photos", many: "{count} photos" },
+    fast_scene_skip: { one: "{count} scene skip", few: "{count} scene skips", many: "{count} scene skips" },
   },
   free_actions: {
     fast_scene_skip_button: "free skip {count}",
@@ -58,6 +75,8 @@ export const testTelegramUxCopy = {
     back_button: "back",
     vote_button: "vote",
     vote_url: "https://example.com/vote",
+    resume_with_name: "Continue with {name}",
+    resume_without_name: "Continue",
     characters: {
       "1": {
         gallery_title: "text",
@@ -81,6 +100,21 @@ export const testTelegramUxCopy = {
     scene_unlock_button: "text",
     prev_button: "text",
     next_button: "text",
+    video_unlock_button: "unlock video",
+    animate_photo_button: "animate photo",
+    video_pass_button: "all videos {amount}",
+  },
+  video: {
+    duplicate_payment_review: "duplicate payment review",
+    unavailable: "video unavailable",
+    panel_changed: "panel changed",
+    pass_scene_changed: "scene changed",
+    pass_activated: "video pass active",
+    subscription_valid_until: "valid until {date}",
+    subscription_benefits_preserved: "benefits preserved",
+    full_benefits: "full benefits",
+    base_benefits: "base benefits",
+    full_upgrade_description: "full upgrade: {description}",
   },
   callbacks: {
     newscene_yes: "text",
@@ -98,6 +132,21 @@ export const testTelegramUxCopy = {
     different_scene: "text",
     subscription_active: "text",
     scene_already_unlocked: "text",
+  },
+  fallbacks: {
+    audio_transcription_error: "send text",
+  },
+  web_continue: {
+    message: "Continue Web dialogue?",
+    button: "Continue",
+  },
+  maintenance: {
+    message: "Maintenance",
+  },
+  rewards: {
+    activated: "Reward activated",
+    already_activated: "Reward already activated",
+    unavailable: "Reward unavailable",
   },
 };
 

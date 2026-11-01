@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { loadExperimentConfigsFromEnv } from "./abTesting.js";
+import { telegramUxCopySchema } from "./telegramUxCopy.js";
+export type { TelegramUxCopy } from "./telegramUxCopy.js";
 
 const positiveIntegerSchema = z.number().int().positive();
 const telegramUserIdSchema = z.number().int().positive().safe();
@@ -96,8 +98,6 @@ const mediaPromotionsSchema = z.array(mediaPromotionSchema).superRefine((value, 
   }
 });
 
-const textSchema = z.string().min(1);
-
 const rewardDefinitionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.enum(["scene_unlock", "scene_skip", "photo_unlock"]),
@@ -132,119 +132,18 @@ const rewardSlotSchema = z.object({
   }
 });
 
-const telegramUxCopySchema = z.object({
-  terms: z.object({
-    message: textSchema,
-    open_button: textSchema,
-    accept_button: textSchema,
-  }),
-  scene_reset: z.object({
-    confirm: textSchema,
-    yes_button: textSchema,
-    no_button: textSchema,
-    processing: textSchema,
-    continue: textSchema,
-  }),
-  promo: z.object({
-    activated: textSchema,
-    effect_id: textSchema,
-  }),
-  paysupport: z.object({
-    message_html: textSchema,
-    free_fast_scene_skips_line: textSchema.optional(),
-    free_scene_unlocks_line: textSchema.optional(),
-  }),
-  free_actions: z.object({
-    fast_scene_skip_button: textSchema,
-  }),
-  payment_ui: z.object({
-    fast_scene_skip_hint: textSchema,
-    scene_unlock_hint: textSchema,
-    pay_with_stars_button: textSchema,
-    pay_with_sbp_button: textSchema,
-    stars_payment_button: textSchema,
-    sbp_payment_button: textSchema,
-    subscription_stars_plan_button: textSchema,
-    subscription_sbp_plan_button: textSchema,
-  }),
-  scene_mode: z.object({
-    choice: textSchema,
-    roleplay_button: textSchema,
-    fast_button: textSchema,
-    back_button: textSchema,
-    transition: z.object({
-      fast: z.object({
-        text: textSchema,
-        effect_id: textSchema,
-      }),
-      roleplay: z.object({
-        text: textSchema,
-        effect_id: textSchema,
-      }),
-    }),
-  }),
-  character_gallery: z.object({
-    heading: textSchema,
-    empty: textSchema,
-    order: z.array(positiveIntegerSchema).superRefine((value, ctx) => {
-      if (new Set(value).size !== value.length) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Character gallery order ids must be unique",
-        });
-      }
-    }),
-    next_first_button: textSchema,
-    next_button: textSchema,
-    back_button: textSchema,
-    vote_button: textSchema,
-    vote_url: z.string().url(),
-    characters: z.record(z.string().min(1), z.object({
-      gallery_title: textSchema,
-      gallery_body: textSchema,
-      mode_intro: textSchema,
-      roleplay_description_html: textSchema,
-      fast_description_html: textSchema,
-    })),
-  }),
-  subscription: z.object({
-    active: textSchema,
-    daily_limit_offer: textSchema,
-    command_offer: textSchema,
-  }),
-  media: z.object({
-    get_photo_button: textSchema,
-    more_photo_button: textSchema,
-    generating: textSchema,
-    pay_button: textSchema,
-    scene_unlock_button: textSchema,
-    prev_button: textSchema,
-    next_button: textSchema,
-  }),
-  callbacks: z.object({
-    newscene_yes: textSchema,
-    newscene_no: textSchema,
-    terms_accept: textSchema,
-    character_select: textSchema,
-    character_back: textSchema,
-    scene_mode_fast: textSchema,
-    scene_mode_roleplay: textSchema,
-    scene_access_activated: textSchema,
-  }),
-  payment_errors: z.object({
-    expired: textSchema,
-    stale: textSchema,
-    different_scene: textSchema,
-    subscription_active: textSchema,
-    scene_already_unlocked: textSchema,
-  }),
-});
-
 export type MediaSubscriptionPlan = z.infer<typeof mediaSubscriptionPlanSchema>;
 export type MediaPhotoPlan = z.infer<typeof mediaPhotoPlanSchema>;
 export type MediaActionPlan = z.infer<typeof mediaActionPlanSchema>;
 export type MediaPromotion = z.infer<typeof mediaPromotionSchema>;
-export type TelegramUxCopy = z.infer<typeof telegramUxCopySchema>;
+
+const legalUrlsSchema = z.record(
+  z.string().trim().min(1),
+  z.object({
+    terms: z.string().trim().url().optional(),
+    privacy: z.string().trim().url().optional(),
+  }).strict(),
+);
 
 function parseJsonEnv<T>(
   raw: string,
@@ -293,7 +192,12 @@ const rawEnvSchema = z.object({
   WEB_DELIVERY_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(15_000),
   WEB_DELIVERY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
   WEB_DELIVERY_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
+  LOCALIZATION_CACHE_TTL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
   PUBLIC_OFFER_URL: z.string().trim().url(),
+  LEGAL_URLS_JSON: z
+    .string()
+    .default("{}")
+    .transform((raw) => parseJsonEnv(raw, legalUrlsSchema)),
   GATEWAY_PUBLIC_URL: z.string().trim().optional(),
   RAILWAY_PUBLIC_DOMAIN: z.string().trim().optional(),
   TG_BOT_TOKEN: z.string().min(1),

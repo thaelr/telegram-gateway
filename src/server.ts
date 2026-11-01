@@ -18,6 +18,8 @@ import {
 import { mediaCommerceRequestSchema } from "./mediaCommerce/requestSchema.js";
 import { isInternalApiAuthorized } from "./internalApiAuth.js";
 import { runWithRequestContext } from "./requestContext.js";
+import { LocalizationService } from "./localization.js";
+import { LocalizationRepository } from "./localizationRepository.js";
 import { RewardRepository } from "./rewardRepository.js";
 import { RewardService, RewardUnavailableError } from "./rewardService.js";
 import { SupabaseAuthVerifier } from "./web/auth.js";
@@ -58,7 +60,8 @@ const routerRequestSchema = z.object({
 });
 
 type RouterDecisionEvaluator = Pick<AccessDecisionService, "evaluate">;
-type TelegramAccountLinker = Pick<ChatAccessRepository, "ensureTelegramAccountLink">;
+type TelegramAccountLinker = Pick<ChatAccessRepository, "ensureTelegramAccountLink">
+  & Partial<Pick<ChatAccessRepository, "resolveTelegramLanguage">>;
 type TelegramDeliveryResolver = Pick<ChatAccessRepository, "resolveTelegramChatId">;
 type MediaCommerceDecisionEvaluator = Pick<MediaCommerceDecisionService, "evaluate">;
 type SbpCheckoutResolver = Pick<MediaCommerceDecisionService, "resolveSbpCheckout">;
@@ -74,7 +77,8 @@ type BuildAppOptions = {
   mediaCommerceDecisionService?: MediaCommerceDecisionEvaluator;
   sbpCheckoutService?: SbpCheckoutResolver;
   rewardService?: RewardClaimer;
-  web?: WebRoutesOptions & { deliveryWorker?: Pick<WebDeliveryWorker, "start" | "stop">; commerce?: WebCommerceService };
+  localizationService?: LocalizationService;
+  web?: Omit<WebRoutesOptions, "localization"> & { localization?: LocalizationService; deliveryWorker?: Pick<WebDeliveryWorker, "start" | "stop">; commerce?: WebCommerceService };
   logger?: boolean;
 };
 
@@ -97,16 +101,30 @@ export function buildApp(options: BuildAppOptions = {}) {
     logger: options.logger ?? true,
   });
 
+  const localizationService = options.localizationService
+    ?? new LocalizationService(
+      new LocalizationRepository(),
+      config.TELEGRAM_UX_COPY_JSON,
+      config.LOCALIZATION_CACHE_TTL_MS,
+    );
+
   const defaultChatAccessRepository = new ChatAccessRepository();
   const accessDecisionService = options.accessDecisionService
-    ?? new AccessDecisionService(defaultChatAccessRepository);
+    ?? new AccessDecisionService(defaultChatAccessRepository, localizationService);
   const telegramAccountLinker = options.telegramAccountLinker
     ?? defaultChatAccessRepository;
   const telegramDeliveryResolver = options.telegramDeliveryResolver
     ?? defaultChatAccessRepository;
   const defaultMediaCommerceService =
     options.mediaCommerceDecisionService == null || options.sbpCheckoutService == null
-      ? new MediaCommerceDecisionService(new MediaCommerceRepository())
+      ? new MediaCommerceDecisionService(
+        new MediaCommerceRepository(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        localizationService,
+      )
       : null;
   const mediaCommerceDecisionService = options.mediaCommerceDecisionService
     ?? defaultMediaCommerceService!;
@@ -286,18 +304,24 @@ export function buildApp(options: BuildAppOptions = {}) {
       });
     }
 
+    let rewardCopy = (await localizationService.getTelegramCopy("ru")).rewards;
     try {
       if (parsed.data.source_user_id != null) {
         await telegramAccountLinker.ensureTelegramAccountLink(
           parsed.data.chat_id,
           parsed.data.source_user_id,
         );
+        const language = telegramAccountLinker.resolveTelegramLanguage
+          ? await telegramAccountLinker.resolveTelegramLanguage(parsed.data.source_user_id)
+          : null;
+        rewardCopy = (await localizationService.getTelegramCopy(language)).rewards;
       }
 
       const result = await rewardService.claimConfiguredSlot({
         chatId: parsed.data.chat_id,
         slot: parsed.data.reward_slot,
         telegramMessageId: parsed.data.inbound_message_id ?? null,
+        copy: rewardCopy,
       });
       return reply.send({
         ...parsed.data,
@@ -307,7 +331,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       if (error instanceof RewardUnavailableError) {
         return reply.send({
           status: "unavailable",
-          callback_answer_text: "Подарок недоступен",
+          callback_answer_text: rewardCopy?.unavailable ?? "",
           next_action: null,
           reward_slot: parsed.data.reward_slot,
           chat_id: parsed.data.chat_id,
@@ -427,12 +451,16 @@ export function buildApp(options: BuildAppOptions = {}) {
     web = {
       repository,
       authenticator: new SupabaseAuthVerifier(config.SUPABASE_URL!, config.SUPABASE_PUBLISHABLE_KEY!),
+      localization: localizationService,
       deliveryWorker: worker,
-      commerce: createWebCommerce(repository),
+      commerce: createWebCommerce(repository, localizationService),
     };
   }
   if (web) {
-    registerWebRoutes(app, web);
+    registerWebRoutes(app, {
+      ...web,
+      localization: web.localization ?? localizationService,
+    });
     if (web.commerce) {
       registerWebCommerceRoutes(app, { ...web, commerce: web.commerce });
       registerWebEngineRoutes(app,new WebEngineBridge(web.commerce));

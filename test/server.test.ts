@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { installTestEnv } from "./testEnv.js";
+import { installTestEnv, testTelegramUxCopy } from "./testEnv.js";
 
 process.env.NODE_ENV = "test";
 installTestEnv();
@@ -668,6 +668,11 @@ test("reward slot endpoint returns claim UI result", async (t) => {
   const links: Array<[number, number]> = [];
   const app = buildApp({
     logger: false,
+    localizationService: {
+      async getTelegramCopy() {
+        return testTelegramUxCopy;
+      },
+    } as never,
     telegramAccountLinker: {
       async ensureTelegramAccountLink(chatId, sourceUserId) {
         links.push([chatId, sourceUserId]);

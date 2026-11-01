@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { sql } from '../db.js';
 import { config } from '../config.js';
-import { languageFromLocale } from './auth.js';
 import type { WebDeliveryStore } from './delivery.js';
 import { WebError, type WebRepositoryContract, type WebIdentity, type WebProfile, type WebChat, type WebCharacter, type WebAction, type SceneMode, type WebOperation, type WebMessage, type WebEvent, type WebDeliveryEvent } from './types.js';
 
@@ -13,8 +12,6 @@ const chatSelect = `SELECT c.chat_id, c.chat_code, c.character_i, s.scene_mode, 
 function iso(value: unknown): string | null { return value == null ? null : value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }
 function publicChat(r: Row): WebChat { return {chat_code:r.chat_code,character_i:Number(r.character_i),scene_mode:r.scene_mode,scene_session_id:r.scene_session_id,turn_no:Number(r.turn_no),scene_turn_no:Number(r.scene_turn_no),updated_at:iso(r.updated_at)!}; }
 function operation(r: Row, code: string): WebOperation { return {operation_id:r.event_id,event_id:r.event_id,status:r.status,action:r.action,chat_code:code}; }
-export const initialLanguage = languageFromLocale;
-
 export class WebRepository implements WebRepositoryContract, WebDeliveryStore {
  constructor(private readonly query: typeof sql = sql) {}
  async resolveIdentity(authUserId: string) { const r=await rows(this.query,`SELECT user_id FROM public.user_identities WHERE provider='supabase' AND external_id=$1`,[authUserId]); return r[0]?.user_id??null; }
@@ -23,7 +20,7 @@ export class WebRepository implements WebRepositoryContract, WebDeliveryStore {
    await rows(tx,`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,['supabase:'+identity.auth_user_id]);
    const found=await rows(tx,`SELECT user_id FROM public.user_identities WHERE provider='supabase' AND external_id=$1`,[identity.auth_user_id]);
    if(found[0]) return found[0].user_id as string;
-   const created=await rows(tx,`INSERT INTO public.users(display_name,language) VALUES($1,$2) RETURNING user_id`,[identity.display_name,initialLanguage(identity.locale)]);
+   const created=await rows(tx,`INSERT INTO public.users(display_name) VALUES($1) RETURNING user_id`,[identity.display_name]);
    const id=created[0]!.user_id as string;
    await rows(tx,`INSERT INTO public.user_identities(user_id,provider,external_id) VALUES($1,'supabase',$2)`,[id,identity.auth_user_id]);
    return id;
@@ -31,19 +28,23 @@ export class WebRepository implements WebRepositoryContract, WebDeliveryStore {
   return this.getMe(userId);
  }
  async getMe(userId: string): Promise<WebProfile> {
-  const r=(await rows(this.query,`SELECT user_id,display_name,language,age_confirmed_at::text,terms_accepted_at::text,subscription_sku,subscription_until::text,entitlements_jsonb AS entitlements FROM public.users WHERE user_id=$1`,[userId]))[0];
+  const r=(await rows(this.query,`SELECT user_id,display_name,language,language_confirmed_at::text,age_confirmed_at::text,terms_accepted_at::text,subscription_sku,subscription_until::text,entitlements_jsonb AS entitlements FROM public.users WHERE user_id=$1`,[userId]))[0];
   if(!r) throw new WebError(401,'account_not_found');
-  return {...r,age_confirmed_at:iso(r.age_confirmed_at),terms_accepted_at:iso(r.terms_accepted_at),subscription_until:iso(r.subscription_until),needs_language_selection:r.language==null} as WebProfile;
+  return {...r,language_confirmed_at:iso(r.language_confirmed_at),age_confirmed_at:iso(r.age_confirmed_at),terms_accepted_at:iso(r.terms_accepted_at),subscription_until:iso(r.subscription_until),needs_language_selection:r.language_confirmed_at==null} as WebProfile;
  }
  async updateMe(userId: string, patch: {display_name?:string;language?:'ru'|'en'}) {
-  await rows(this.query,`UPDATE public.users SET display_name=CASE WHEN $2 THEN $3 ELSE display_name END,language=CASE WHEN $4 THEN $5 ELSE language END,updated_at=now() WHERE user_id=$1`,[userId,patch.display_name!==undefined,patch.display_name??null,patch.language!==undefined,patch.language??null]);
+  await rows(this.query,`UPDATE public.users SET display_name=CASE WHEN $2 THEN $3 ELSE display_name END,language=CASE WHEN $4 THEN $5 ELSE language END,language_confirmed_at=CASE WHEN $4 THEN now() ELSE language_confirmed_at END,updated_at=now() WHERE user_id=$1`,[userId,patch.display_name!==undefined,patch.display_name??null,patch.language!==undefined,patch.language??null]);
   return this.getMe(userId);
  }
  async confirmAge(userId: string) { await rows(this.query,`SELECT app_private.confirm_user_age($1::varchar)`,[userId]);return this.getMe(userId); }
- async acceptTerms(userId: string) { await rows(this.query,`UPDATE public.users SET terms_accepted_at=COALESCE(terms_accepted_at,now()),updated_at=now() WHERE user_id=$1`,[userId]);return this.getMe(userId); }
+ async acceptTerms(userId: string) {
+  const updated=await rows(this.query,`UPDATE public.users SET terms_accepted_at=COALESCE(terms_accepted_at,now()),updated_at=now() WHERE user_id=$1 AND (language_confirmed_at IS NOT NULL OR terms_accepted_at IS NOT NULL) RETURNING user_id`,[userId]);
+  if(!updated.length)throw new WebError(403,'language_selection_required');
+  return this.getMe(userId);
+ }
  async listCharacters(userId: string): Promise<WebCharacter[]> {
-  const r=await rows(this.query,`SELECT ch.character_i,ch.name,ch.description,COALESCE(ch.menu_photo_url,ch.gallery_photo_url) AS image_url,c.chat_code FROM public.characters ch LEFT JOIN public.chat_state c ON c.user_id=$1 AND c.character_i=ch.character_i AND c.is_active ORDER BY ch.character_i`,[userId]);
-  return r.map(x=>({...x,character_i:Number(x.character_i),modes:['fast','roleplay']}) as WebCharacter);
+  const r=await rows(this.query,`SELECT ch.character_i,ch.name,COALESCE(NULLIF(ch.description_translations_json->>COALESCE(u.language,'ru'),''),ch.description) AS description,COALESCE(NULLIF(ch.scene_start_exposition_translations_json->>COALESCE(u.language,'ru'),''),ch.scene_start_exposition_text) AS scene_start_exposition_text,COALESCE(NULLIF(ch.scene_start_greeting_translations_json->>COALESCE(u.language,'ru'),''),ch.scene_start_greeting_text) AS scene_start_greeting_text,COALESCE(NULLIF(ch.fast_mode_scene_start_exposition_translations_json->>COALESCE(u.language,'ru'),''),ch.fast_mode_scene_start_exposition_text) AS fast_mode_scene_start_exposition_text,COALESCE(NULLIF(ch.fast_mode_scene_start_greeting_translations_json->>COALESCE(u.language,'ru'),''),ch.fast_mode_scene_start_greeting_text) AS fast_mode_scene_start_greeting_text,COALESCE(NULLIF(ch.gallery_photo_urls_json->>COALESCE(u.language,'ru'),''),NULLIF(ch.gallery_photo_urls_json->>'en',''),NULLIF(ch.gallery_photo_url,''),(SELECT NULLIF(entry.value,'') FROM jsonb_each_text(ch.gallery_photo_urls_json) entry ORDER BY entry.key LIMIT 1)) AS gallery_photo_url,COALESCE(NULLIF(ch.menu_photo_urls_json->>COALESCE(u.language,'ru'),''),NULLIF(ch.menu_photo_urls_json->>'en',''),NULLIF(ch.menu_photo_url,''),(SELECT NULLIF(entry.value,'') FROM jsonb_each_text(ch.menu_photo_urls_json) entry ORDER BY entry.key LIMIT 1)) AS menu_photo_url,c.chat_code FROM public.characters ch CROSS JOIN public.users u LEFT JOIN public.chat_state c ON c.user_id=u.user_id AND c.character_i=ch.character_i AND c.is_active WHERE u.user_id=$1 ORDER BY ch.character_i`,[userId]);
+  return r.map(x=>({...x,image_url:x.menu_photo_url??x.gallery_photo_url,character_i:Number(x.character_i),modes:['fast','roleplay']}) as WebCharacter);
  }
  async getCharacter(userId: string, characterId: number) {const c=(await this.listCharacters(userId)).find(x=>x.character_i===characterId);if(!c)throw new WebError(404,'character_not_found');return c;}
  async listChats(userId: string) {return (await rows(this.query,chatSelect+` WHERE c.user_id=$1 AND c.character_i IS NOT NULL AND c.is_active ORDER BY c.updated_at DESC`,[userId])).map(publicChat);}
@@ -52,7 +53,7 @@ export class WebRepository implements WebRepositoryContract, WebDeliveryStore {
   if(!c)throw new WebError(404,'chat_not_found'); return c;
  }
  async getChat(userId:string,code:string){return publicChat(await this.owned(this.query,userId,code));}
- private async consents(db:DB,userId:string){const u=(await rows(db,`SELECT age_confirmed_at,terms_accepted_at FROM public.users WHERE user_id=$1`,[userId]))[0];if(!u?.age_confirmed_at||!u?.terms_accepted_at)throw new WebError(403,'consent_required');}
+ private async consents(db:DB,userId:string){const u=(await rows(db,`SELECT language_confirmed_at,age_confirmed_at,terms_accepted_at FROM public.users WHERE user_id=$1`,[userId]))[0];if(!u?.terms_accepted_at&&!u?.language_confirmed_at)throw new WebError(403,'language_selection_required');if(!u?.age_confirmed_at||!u?.terms_accepted_at)throw new WebError(403,'consent_required');}
  async createChat(userId:string,characterId:number,mode:SceneMode,clientId:string) {
   return this.query.begin(async tx=>{
    await this.consents(tx,userId);

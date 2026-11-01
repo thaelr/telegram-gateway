@@ -3,7 +3,9 @@ import { ChatAccessRepository } from "./chatAccessRepository.js";
 import { prependFreeBalances } from "./freeBalanceFormatter.js";
 import { isMaintenanceBlocked } from "./maintenance.js";
 import { normalizeNonNegativeInteger, normalizePositiveInteger } from "./numeric.js";
-import { extractTelegramLanguage } from "./telegramLanguage.js";
+import type { LocalizationService } from "./localization.js";
+import { parseTelegramLanguage, type TelegramLanguage } from "./telegramLanguage.js";
+import type { TelegramUxCopy } from "./config.js";
 import type {
   AccessContext,
   AccessDecisionRequest,
@@ -17,12 +19,16 @@ const START_COMMAND = "/start";
 const MENU_COMMAND = "/menu";
 const SUBSCRIPTION_COMMAND = "/subscription";
 const PAYSUPPORT_COMMAND = "/paysupport";
+const LANGUAGE_COMMAND = "/language";
 
 const ACCESS_CONTEXT_INTENTS = new Set<RouterIntent>([
   "scene_start",
   "menu",
   "subscription",
   "paysupport",
+  "language",
+  "language_select",
+  "terms_accept",
   "newscene_confirm",
   "character_select",
   "scene_mode",
@@ -41,14 +47,17 @@ type RouterClassification = {
   newscene_action?: "yes" | "no" | null;
   expected_scene_session_id?: string | null;
   newscene_callback_bound?: boolean;
+  selected_language?: TelegramLanguage | null;
 };
 
 type AccessRepository = Pick<
   ChatAccessRepository,
   | "ensureAndLoadAccessContext"
-  | "initializeExistingTelegramLanguage"
+  | "setTelegramLanguage"
   | "popActiveSubscriptionOffer"
->;
+> & Partial<Pick<ChatAccessRepository, "resolveTelegramLanguage">>;
+
+type LocalizationReader = Pick<LocalizationService, "getTelegramCopy">;
 
 function isAllowedClassification(classification: RouterClassification): boolean {
   switch (classification.intent) {
@@ -56,6 +65,8 @@ function isAllowedClassification(classification: RouterClassification): boolean 
     case "menu":
     case "subscription":
     case "paysupport":
+    case "language":
+    case "language_select":
     case "terms_accept":
     case "reward_claim":
     case "newscene_confirm":
@@ -114,7 +125,10 @@ function requiresAccessContext(classification: RouterClassification): boolean {
 }
 
 function requiresTermsGate(classification: RouterClassification): boolean {
-  return ACCESS_CONTEXT_INTENTS.has(classification.intent);
+  return ACCESS_CONTEXT_INTENTS.has(classification.intent)
+    && classification.intent !== "language"
+    && classification.intent !== "language_select"
+    && classification.intent !== "terms_accept";
 }
 
 function requiresSceneAccessCheck(classification: RouterClassification): boolean {
@@ -173,6 +187,17 @@ function parseStructuredCallback(
   const namespace = parts[0];
 
   switch (namespace) {
+    case "language_select": {
+      if (parts.length !== 2) return ignoreStructuredCallback();
+      const language = parseTelegramLanguage(parts[1]);
+      if (language == null) return ignoreStructuredCallback();
+      return {
+        domain: "interaction",
+        intent: "language_select",
+        action: "acknowledge_language_change",
+        selected_language: language,
+      };
+    }
     case "reward_claim": {
       if (parts.length !== 2) return ignoreStructuredCallback();
       const rewardSlot = normalizePositiveInteger(parts[1]);
@@ -352,6 +377,14 @@ function classifyRouterInput(input: AccessDecisionRequest): RouterClassification
     };
   }
 
+  if (command === LANGUAGE_COMMAND) {
+    return {
+      domain: "command",
+      intent: "language",
+      action: "show_language_selector",
+    };
+  }
+
   if (command) {
     return {
       domain: "command",
@@ -421,8 +454,11 @@ function classifyRouterInput(input: AccessDecisionRequest): RouterClassification
   };
 }
 
-function formatSubscriptionStatusText(context: AccessContext): string {
-  const text = config.TELEGRAM_UX_COPY_JSON.subscription.active
+function formatSubscriptionStatusText(
+  context: AccessContext,
+  copy: TelegramUxCopy,
+): string {
+  const text = copy.subscription.active
     .replaceAll("{subscription_sku}", String(context.subscription_sku ?? ""))
     .replaceAll("{subscription_until}", String(context.subscription_until ?? ""))
     .replaceAll(
@@ -433,15 +469,18 @@ function formatSubscriptionStatusText(context: AccessContext): string {
         )?.days ?? "",
       ),
     );
-  return prependFreeBalances(text, context) ?? text;
+  return prependFreeBalances(text, context, copy.free_balances) ?? text;
 }
 
 function replaceCount(template: string, count: number): string {
   return template.replaceAll("{count}", String(count));
 }
 
-function formatPaysupportText(context: AccessContext): string {
-  const copy = config.TELEGRAM_UX_COPY_JSON.paysupport;
+function formatPaysupportText(
+  context: AccessContext,
+  uxCopy: TelegramUxCopy,
+): string {
+  const copy = uxCopy.paysupport;
   const lines = [copy.message_html];
   const fastSkips = normalizeNonNegativeInteger(context.free_fast_scene_skips) ?? 0;
   const sceneUnlocks = normalizeNonNegativeInteger(context.free_scene_unlocks) ?? 0;
@@ -456,8 +495,20 @@ function formatPaysupportText(context: AccessContext): string {
   return lines.join("\n");
 }
 
+function legalUrl(
+  locale: TelegramLanguage,
+  kind: "terms" | "privacy",
+): string | null {
+  return config.LEGAL_URLS_JSON[locale]?.[kind]
+    ?? config.LEGAL_URLS_JSON.ru?.[kind]
+    ?? (kind === "terms" ? config.PUBLIC_OFFER_URL : null);
+}
+
 export class AccessDecisionService {
-  constructor(private readonly repository: AccessRepository) {}
+  constructor(
+    private readonly repository: AccessRepository,
+    private readonly localization: LocalizationReader,
+  ) {}
 
   async evaluate(
     input: AccessDecisionRequest,
@@ -465,9 +516,19 @@ export class AccessDecisionService {
     const classification = classifyRouterInput(input);
     const source = normalizeSource(input.source);
     const sourceUserId = normalizePositiveInteger(input.source_user_id);
-    const telegramLanguage = source === "telegram"
-      ? extractTelegramLanguage(input.raw_update, sourceUserId)
+    const shouldResolvePassthroughLanguage = !requiresAccessContext(classification)
+      || (
+        isMaintenanceUserAction(input, classification)
+        && isMaintenanceBlocked(input.source_user_id)
+      );
+    const passthroughLanguage = shouldResolvePassthroughLanguage
+      && sourceUserId != null
+      && this.repository.resolveTelegramLanguage
+      ? await this.repository.resolveTelegramLanguage(sourceUserId)
       : null;
+    const defaultUxCopy = await this.localization.getTelegramCopy(
+      passthroughLanguage === "en" ? "en" : "ru",
+    );
     const idempotencyKey = buildIdempotencyKey(source, input.update_id);
     const effectiveCharacterId =
       classification.character_i ?? input.character_i ?? null;
@@ -532,34 +593,25 @@ export class AccessDecisionService {
       newscene_action: classification.newscene_action ?? null,
       expected_scene_session_id:
         classification.expected_scene_session_id ?? null,
-      ux_copy: config.TELEGRAM_UX_COPY_JSON,
+      ux_copy: defaultUxCopy,
+      language: passthroughLanguage,
     } as const;
-
-    const initializeExistingTelegramLanguage = async (): Promise<void> => {
-      if (telegramLanguage == null || sourceUserId == null) return;
-      await this.repository.initializeExistingTelegramLanguage(
-        sourceUserId,
-        telegramLanguage,
-      );
-    };
 
     if (
       isMaintenanceUserAction(input, classification)
       && isMaintenanceBlocked(input.source_user_id)
     ) {
-      await initializeExistingTelegramLanguage();
       return {
         ...passthrough,
         decision: "noop",
         action: "show_maintenance",
         allowed: false,
-        text: config.MAINTENANCE_TEXT,
+        text: defaultUxCopy.maintenance?.message ?? config.MAINTENANCE_TEXT,
         reason: "maintenance_mode",
       };
     }
 
     if (!requiresAccessContext(classification)) {
-      await initializeExistingTelegramLanguage();
       return attachDismissedSubscriptionOffer({
         ...passthrough,
         decision: "noop",
@@ -577,18 +629,43 @@ export class AccessDecisionService {
       classification.intent === "character_select"
         || classification.intent === "scene_mode",
     );
-    await initializeExistingTelegramLanguage();
+
+    let language = accessContext.language;
+    let languageConfirmedAt = accessContext.language_confirmed_at;
+    if (classification.intent === "language_select") {
+      if (sourceUserId == null || classification.selected_language == null) {
+        return attachDismissedSubscriptionOffer({
+          ...passthrough,
+          decision: "noop",
+          action: "ignore",
+          allowed: false,
+          reason: "language_selection_invalid",
+        });
+      }
+      languageConfirmedAt = await this.repository.setTelegramLanguage(
+        sourceUserId,
+        classification.selected_language,
+      );
+      language = classification.selected_language;
+    }
+    const resolvedLanguage: TelegramLanguage = language === "en" ? "en" : "ru";
+    const uxCopy = await this.localization.getTelegramCopy(resolvedLanguage);
 
     const resolvedPassthrough = {
       ...passthrough,
       chat_id: accessContext.chat_id,
       telegram_chat_id: accessContext.telegram_chat_id,
       character_i: effectiveCharacterId ?? accessContext.character_i,
+      language,
+      language_confirmed_at: languageConfirmedAt,
+      ux_copy: uxCopy,
     } as const;
 
     const hasSceneSession = Boolean(accessContext.active_scene_session_id);
     const hasStartedScene = accessContext.active_scene_exists;
     const contextFields = {
+      language,
+      language_confirmed_at: languageConfirmedAt,
       terms_accepted_at: accessContext.terms_accepted_at,
       subscription_active: accessContext.subscription_active,
       subscription_sku: accessContext.subscription_sku,
@@ -622,6 +699,56 @@ export class AccessDecisionService {
         : null,
     } as const;
 
+    if (classification.intent === "language") {
+      return attachDismissedSubscriptionOffer({
+        ...resolvedPassthrough,
+        ...contextFields,
+        decision: "show_language_selector",
+        action: "show_language_selector",
+        allowed: true,
+        reason: "language_command",
+      });
+    }
+
+    if (classification.intent === "language_select") {
+      if (accessContext.terms_accepted_at == null) {
+        return attachDismissedSubscriptionOffer({
+          ...resolvedPassthrough,
+          ...contextFields,
+          decision: "show_terms_gate",
+          action: "show_terms_gate",
+          allowed: false,
+          post_accept_intent: "start",
+          terms_offer_url: legalUrl(resolvedLanguage, "terms"),
+          privacy_policy_url: legalUrl(resolvedLanguage, "privacy"),
+          reason: "language_selected_terms_required",
+        });
+      }
+      return attachDismissedSubscriptionOffer({
+        ...resolvedPassthrough,
+        ...contextFields,
+        decision: "noop",
+        action: "acknowledge_language_change",
+        allowed: true,
+        callback_answer_text: uxCopy.language?.updated ?? null,
+        reason: "language_updated",
+      });
+    }
+
+    if (
+      accessContext.terms_accepted_at == null
+      && languageConfirmedAt == null
+    ) {
+      return attachDismissedSubscriptionOffer({
+        ...resolvedPassthrough,
+        ...contextFields,
+        decision: "show_language_selector",
+        action: "show_language_selector",
+        allowed: false,
+        reason: "language_selection_required",
+      });
+    }
+
     if (
       requiresTermsGate(classification) &&
       accessContext.terms_accepted_at == null
@@ -633,7 +760,8 @@ export class AccessDecisionService {
         action: "show_terms_gate",
         allowed: false,
         post_accept_intent: resolvePostAcceptIntent(classification),
-        terms_offer_url: config.PUBLIC_OFFER_URL,
+        terms_offer_url: legalUrl(resolvedLanguage, "terms"),
+        privacy_policy_url: legalUrl(resolvedLanguage, "privacy"),
         reason: "terms_not_accepted",
       });
     }
@@ -668,7 +796,7 @@ export class AccessDecisionService {
           decision: "show_subscription_status",
           action: "show_subscription_status",
           allowed: true,
-          text: formatSubscriptionStatusText(accessContext),
+          text: formatSubscriptionStatusText(accessContext, uxCopy),
           parse_mode: null,
           disable_web_page_preview: true,
           reason: "subscription_active",
@@ -693,7 +821,7 @@ export class AccessDecisionService {
         decision: "noop",
         action: "send_paysupport_message",
         allowed: true,
-        text: formatPaysupportText(accessContext),
+        text: formatPaysupportText(accessContext, uxCopy),
         parse_mode: "HTML",
         disable_web_page_preview: true,
         reason: "paysupport",

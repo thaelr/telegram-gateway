@@ -21,6 +21,7 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
     async()=>{signed++;return 'https://example.invalid/signed';});
   const fixture=async()=>{
     const userId=(await accounts.bootstrap({auth_user_id:randomUUID(),is_anonymous:false,display_name:'Telegram video test',locale:'en'})).user_id;
+    await accounts.updateMe(userId,{language:'en'});
     await accounts.confirmAge(userId);await accounts.acceptTerms(userId);
     const created=await accounts.createChat(userId,1,'roleplay',randomUUID());
     const [c]=await db`SELECT chat_id FROM public.chat_state WHERE chat_code=${created.chat.chat_code}`;

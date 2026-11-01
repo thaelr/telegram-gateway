@@ -7,18 +7,32 @@ import { WebError } from './types.js';
 import { config } from '../config.js';
 import { calculateFullUpgrade } from '../mediaCommerce/plans.js';
 import type { WebProductPlan } from './commerceTypes.js';
+import type { LocalizationService } from '../localization.js';
 
 export type PurchaseInput = {client_message_id:string;chat_code:string;sku:string;provider:string;media_id?:string;subscription_change?:'upgrade'|'renew'};
 export class WebCommerceService {
  private timer:ReturnType<typeof setTimeout>|null=null;
  private recovering:Promise<void>|null=null;
  private stopped=true;
- constructor(readonly repository:WebCommerceRepository, readonly providers:PaymentProviderRegistry, readonly decisions:MediaCommerceDecisionService, readonly accounts:WebRepositoryContract) {}
+ constructor(readonly repository:WebCommerceRepository, readonly providers:PaymentProviderRegistry, readonly decisions:MediaCommerceDecisionService, readonly accounts:WebRepositoryContract, readonly localization:Pick<LocalizationService,'getNamespace'|'getTelegramCopy'>|null=null) {}
+ private async plans(userId:string,chatId:number|null){
+  const plans=await this.decisions.webProductPlans(chatId);
+  if(!this.localization)return plans;
+  const profile=await this.accounts.getMe(userId);
+  const dictionary=await this.localization.getNamespace(profile.language,'commerce');
+  const products=dictionary.products&&typeof dictionary.products==='object'&&!Array.isArray(dictionary.products)?dictionary.products as Record<string,unknown>:{};
+  return plans.map(plan=>{
+   const value=products[plan.sku];
+   if(!value||typeof value!=='object'||Array.isArray(value))return plan;
+   const copy=value as Record<string,unknown>;
+   return {...plan,title:typeof copy.title==='string'&&copy.title.trim()?copy.title:plan.title,description:typeof copy.description==='string'&&copy.description.trim()?copy.description:plan.description};
+  });
+ }
  private async consent(userId:string){const p=await this.accounts.getMe(userId);if(!p.age_confirmed_at||!p.terms_accepted_at)throw new WebError(403,'consent_required');}
  async catalog(userId:string,code?:string){
   let chatId:number|null=null;
   if(code) chatId=(await this.repository.getContext(userId,code)).chat_id;
-  const plans=await this.decisions.webProductPlans(chatId);
+  const plans=await this.plans(userId,chatId);
   const rights=await this.repository.getEntitlements(userId);
   return {products:plans.map(p=>{
    const upgrade=p.subscription_tier==='full'?this.upgrade(p,rights):null;
@@ -69,7 +83,7 @@ export class WebCommerceService {
  }
  private async quote(userId:string,input:{chat_code:string;sku:string;media_id?:string;subscription_change?:'upgrade'|'renew'}):Promise<WebCommerceQuote>{
   const context=await this.repository.getContext(userId,input.chat_code);
-  const plan=(await this.decisions.webProductPlans(context.chat_id)).find(x=>x.sku===input.sku);
+  const plan=(await this.plans(userId,context.chat_id)).find(x=>x.sku===input.sku);
   if(!plan)throw new WebError(404,'product_not_found');
   if(plan.kind==='feature'&&!['scene_unlock','fast_scene_skip','video_unlock','video_pass'].includes(plan.feature_key??''))throw new WebError(409,'unsupported_feature');
   const videoFeature=plan.feature_key==='video_unlock'||plan.feature_key==='video_pass';
@@ -174,7 +188,7 @@ export class WebCommerceService {
  /** Server-only producer. Existing Media Commerce decides eligibility and pricing first. */
  async prepareOffer(userId:string,code:string,input:{media_id:string;sku:string;media_signature:string;scene_session_id?:string;debounce_revision?:number}){
   const context=await this.repository.getContext(userId,code);
-  const plan=(await this.decisions.webProductPlans(context.chat_id)).find(x=>x.sku===input.sku&&x.kind==='photo');
+  const plan=(await this.plans(userId,context.chat_id)).find(x=>x.sku===input.sku&&x.kind==='photo');
   if(!plan)throw new WebError(404,'product_not_found');
   const decision=await this.decisions.evaluate({interaction_mode:'prepare_offer',source:'web',chat_id:context.chat_id,scene_session_id:context.scene_session_id,turn_no:Math.max(0,context.turn_no),scene_turn_no:Math.max(0,context.scene_turn_no??0),media_signature:input.media_signature,photo_sku:input.sku,base_price_xtr:plan.amount_xtr,should_offer:true});
   if(!decision.has_media_offer)return {offered:false};

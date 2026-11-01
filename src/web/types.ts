@@ -1,9 +1,9 @@
 export type SceneMode = 'fast' | 'roleplay';
 export type WebAction = 'scene_start' | 'message' | 'reset';
 export type WebIdentity = { auth_user_id: string; is_anonymous: boolean; display_name: string | null; locale: string | null };
-export type WebProfile = { user_id: string; display_name: string | null; language: string | null; age_confirmed_at: string | null; terms_accepted_at: string | null; subscription_sku: string | null; subscription_until: string | null; entitlements: Record<string, unknown>; needs_language_selection: boolean };
+export type WebProfile = { user_id: string; display_name: string | null; language: string | null; language_confirmed_at: string | null; age_confirmed_at: string | null; terms_accepted_at: string | null; subscription_sku: string | null; subscription_until: string | null; entitlements: Record<string, unknown>; needs_language_selection: boolean };
 export type WebChat = { chat_code: string; character_i: number; scene_mode: SceneMode | null; scene_session_id: string | null; turn_no: number; scene_turn_no: number; updated_at: string };
-export type WebCharacter = { character_i: number; name: string; description: string; image_url: string | null; modes: SceneMode[]; chat_code: string | null };
+export type WebCharacter = { character_i: number; name: string; description: string; image_url: string | null; gallery_photo_url: string | null; menu_photo_url: string | null; scene_start_exposition_text: string | null; scene_start_greeting_text: string | null; fast_mode_scene_start_exposition_text: string | null; fast_mode_scene_start_greeting_text: string | null; modes: SceneMode[]; chat_code: string | null };
 export type WebOperation = { operation_id: string; event_id: string; status: string; action: WebAction; chat_code: string };
 export type WebMessage = { id: string; role: 'user' | 'assistant'; text: string; source: string; scene_session_id: string | null; turn_no: number; created_at: string };
 export type WebEvent = { cursor: string; type: 'message' | 'scene' | 'operation_status' | 'quick_replies' | 'media_offer' | 'media_unlocked'; data: Record<string, unknown>; created_at: string };
