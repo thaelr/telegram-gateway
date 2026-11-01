@@ -105,13 +105,9 @@ export function buildApp(options: BuildAppOptions = {}) {
     ?? new LocalizationService(
       new LocalizationRepository(),
       {
-        promoEffectId: config.TELEGRAM_PROMO_EFFECT_ID,
-        fastSceneEffectId: config.TELEGRAM_FAST_SCENE_EFFECT_ID,
-        roleplaySceneEffectId: config.TELEGRAM_ROLEPLAY_SCENE_EFFECT_ID,
         characterGalleryOrder: config.TELEGRAM_CHARACTER_GALLERY_ORDER_JSON,
         characterVoteUrl: config.TELEGRAM_CHARACTER_VOTE_URL,
       },
-      config.LOCALIZATION_CACHE_TTL_MS,
     );
 
   const defaultChatAccessRepository = new ChatAccessRepository();

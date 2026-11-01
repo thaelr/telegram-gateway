@@ -192,10 +192,6 @@ const rawEnvSchema = z.object({
   WEB_DELIVERY_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(15_000),
   WEB_DELIVERY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
   WEB_DELIVERY_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
-  LOCALIZATION_CACHE_TTL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
-  TELEGRAM_PROMO_EFFECT_ID: z.string().trim().min(1),
-  TELEGRAM_FAST_SCENE_EFFECT_ID: z.string().trim().min(1),
-  TELEGRAM_ROLEPLAY_SCENE_EFFECT_ID: z.string().trim().min(1),
   TELEGRAM_CHARACTER_GALLERY_ORDER_JSON: z
     .string()
     .transform((raw) => parseJsonEnv(raw, characterGalleryOrderSchema)),

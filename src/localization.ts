@@ -15,9 +15,6 @@ export type LanguageOption = {
 };
 
 export type TelegramRuntimeSettings = {
-  promoEffectId: string;
-  fastSceneEffectId: string;
-  roleplaySceneEffectId: string;
   characterGalleryOrder: number[];
   characterVoteUrl: string;
 };
@@ -161,9 +158,6 @@ export class LocalizationService {
     // These values steer runtime behavior and are intentionally not translations.
     // Keep them owned by validated runtime config even if a malformed localization
     // import contains fields with the same shape.
-    localized.promo.effect_id = this.telegramRuntimeSettings.promoEffectId;
-    localized.scene_mode.transition.fast.effect_id = this.telegramRuntimeSettings.fastSceneEffectId;
-    localized.scene_mode.transition.roleplay.effect_id = this.telegramRuntimeSettings.roleplaySceneEffectId;
     localized.character_gallery.order = [...this.telegramRuntimeSettings.characterGalleryOrder];
     localized.character_gallery.vote_url = this.telegramRuntimeSettings.characterVoteUrl;
 

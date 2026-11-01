@@ -33,7 +33,7 @@ class MemoryStore implements LocalizationStore {
   }
 }
 
-test("selected locale falls back per key to Russian and runtime values stay outside translations", async () => {
+test("selected locale falls back per key to Russian and behavior settings stay outside translations", async () => {
   const store = new MemoryStore({
     "ru:telegram": {
       ...structuredClone(testTelegramUxCopy),
@@ -48,13 +48,6 @@ test("selected locale falls back per key to Russian and runtime values stay outs
     "en:telegram": {
       terms: { accept_button: "Accept" },
       language: { message: "Choose language" },
-      promo: { effect_id: "must-not-override-runtime-config" },
-      scene_mode: {
-        transition: {
-          fast: { effect_id: "must-not-override-fast-effect" },
-          roleplay: { effect_id: "must-not-override-roleplay-effect" },
-        },
-      },
       character_gallery: {
         order: [999],
         vote_url: "https://translations.example/incorrect",
@@ -70,15 +63,6 @@ test("selected locale falls back per key to Russian and runtime values stay outs
   assert.equal(copy.terms.open_button, testTelegramUxCopy.terms.open_button);
   assert.equal(copy.language?.message, "Choose language");
   assert.equal(copy.language?.updated, "Updated");
-  assert.equal(copy.promo.effect_id, testTelegramRuntimeSettings.promoEffectId);
-  assert.equal(
-    copy.scene_mode.transition.fast.effect_id,
-    testTelegramRuntimeSettings.fastSceneEffectId,
-  );
-  assert.equal(
-    copy.scene_mode.transition.roleplay.effect_id,
-    testTelegramRuntimeSettings.roleplaySceneEffectId,
-  );
   assert.deepEqual(copy.character_gallery.order, testTelegramRuntimeSettings.characterGalleryOrder);
   assert.equal(copy.character_gallery.vote_url, testTelegramRuntimeSettings.characterVoteUrl);
 });
@@ -92,7 +76,7 @@ test("localization cache refreshes after TTL without a process restart", async (
   const service = new LocalizationService(
     store,
     testTelegramRuntimeSettings,
-    60_000,
+    undefined,
     () => now,
   );
 

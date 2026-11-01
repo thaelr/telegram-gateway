@@ -151,9 +151,6 @@ export const testTelegramUxCopy = {
 };
 
 export const testTelegramRuntimeSettings = {
-  promoEffectId: "promo-effect",
-  fastSceneEffectId: "fast-scene-effect",
-  roleplaySceneEffectId: "roleplay-scene-effect",
   characterGalleryOrder: [1],
   characterVoteUrl: "https://example.com/vote",
 };
@@ -166,9 +163,6 @@ export function installTestEnv(): void {
   process.env.TG_BOT_TOKEN ??= "test-telegram-bot-token";
   process.env.MAINTENANCE_MODE ??= "false";
   process.env.MAINTENANCE_ALLOWED_USER_IDS_JSON ??= "[]";
-  process.env.TELEGRAM_PROMO_EFFECT_ID ??= testTelegramRuntimeSettings.promoEffectId;
-  process.env.TELEGRAM_FAST_SCENE_EFFECT_ID ??= testTelegramRuntimeSettings.fastSceneEffectId;
-  process.env.TELEGRAM_ROLEPLAY_SCENE_EFFECT_ID ??= testTelegramRuntimeSettings.roleplaySceneEffectId;
   process.env.TELEGRAM_CHARACTER_GALLERY_ORDER_JSON ??= JSON.stringify(
     testTelegramRuntimeSettings.characterGalleryOrder,
   );
