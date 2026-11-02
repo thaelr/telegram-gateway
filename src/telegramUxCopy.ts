@@ -86,6 +86,7 @@ export const telegramUxCopySchema = z.object({
     resume_with_name: textSchema.optional(),
     resume_without_name: textSchema.optional(),
     characters: z.record(z.string().min(1), z.object({
+      button_text: textSchema.optional(),
       gallery_title: textSchema,
       gallery_body: textSchema,
       mode_intro: textSchema,

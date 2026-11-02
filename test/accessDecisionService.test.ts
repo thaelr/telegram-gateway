@@ -310,7 +310,7 @@ test("language selection persists explicitly and continues to terms", async () =
   assert.equal(result.reason, "language_selected_terms_required");
 });
 
-test("language selection after onboarding only acknowledges the change", async () => {
+test("language selection after onboarding continues with start routing", async () => {
   const { service } = createService(buildAccessContext({
     language: "ru",
     language_confirmed_at: "2026-10-29T00:00:00.000Z",
@@ -323,9 +323,30 @@ test("language selection after onboarding only acknowledges the change", async (
     user_message: null,
   }));
 
-  assert.equal(result.action, "acknowledge_language_change");
+  assert.equal(result.action, "show_character_gallery");
   assert.equal(result.allowed, true);
   assert.equal(result.language, "en");
+  assert.equal(result.reason, "language_updated_start");
+});
+
+test("language selection with an active scene follows the start reset guard", async () => {
+  const { service } = createService(buildAccessContext({
+    language: "ru",
+    language_confirmed_at: "2026-10-29T00:00:00.000Z",
+    active_scene_exists: true,
+    active_scene_session_id: "scene-active",
+  }));
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_data: "language_select:en",
+    callback_query_id: "language-callback",
+    user_message: null,
+  }));
+
+  assert.equal(result.action, "show_newscene_confirm");
+  assert.equal(result.language, "en");
+  assert.equal(result.reason, "language_updated_start_requires_scene_reset");
 });
 
 test("syntactically valid old callbacks cannot select a disabled database language", async () => {

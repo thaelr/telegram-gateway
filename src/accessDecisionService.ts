@@ -744,10 +744,12 @@ export class AccessDecisionService {
         ...resolvedPassthrough,
         ...contextFields,
         decision: "noop",
-        action: "acknowledge_language_change",
+        action: hasStartedScene ? "show_newscene_confirm" : "show_character_gallery",
         allowed: true,
         callback_answer_text: uxCopy.language?.updated ?? null,
-        reason: "language_updated",
+        reason: hasStartedScene
+          ? "language_updated_start_requires_scene_reset"
+          : "language_updated_start",
       });
     }
 

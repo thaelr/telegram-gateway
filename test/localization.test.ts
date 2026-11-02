@@ -51,6 +51,9 @@ test("selected locale falls back per key to Russian and behavior settings stay o
       character_gallery: {
         order: [999],
         vote_url: "https://translations.example/incorrect",
+        characters: {
+          "1": { button_text: "English button" },
+        },
       },
     },
   });
@@ -63,6 +66,7 @@ test("selected locale falls back per key to Russian and behavior settings stay o
   assert.equal(copy.terms.open_button, testTelegramUxCopy.terms.open_button);
   assert.equal(copy.language?.message, "Choose language");
   assert.equal(copy.language?.updated, "Updated");
+  assert.equal(copy.character_gallery.characters["1"]?.button_text, "English button");
   assert.deepEqual(copy.character_gallery.order, testTelegramRuntimeSettings.characterGalleryOrder);
   assert.equal(copy.character_gallery.vote_url, testTelegramRuntimeSettings.characterVoteUrl);
 });

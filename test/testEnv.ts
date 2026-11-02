@@ -79,6 +79,7 @@ export const testTelegramUxCopy = {
     resume_without_name: "Continue",
     characters: {
       "1": {
+        button_text: "button",
         gallery_title: "text",
         gallery_body: "text",
         mode_intro: "text",
