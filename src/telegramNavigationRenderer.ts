@@ -202,16 +202,34 @@ export class TelegramNavigationRenderer {
       };
     }
 
-    const committed = await this.repository.commitRender({
-      chatId: input.telegram_chat_id,
-      navigationRevision: input.navigation_revision,
-      screen: input.screen,
-      menuMessageId,
-      mediaMessageIds,
-      selectedCharacterId: input.screen === "character_mode"
-        ? input.selected_character_i ?? null
-        : null,
-    });
+    let committed: boolean;
+    try {
+      committed = await this.repository.commitRender({
+        chatId: input.telegram_chat_id,
+        navigationRevision: input.navigation_revision,
+        screen: input.screen,
+        menuMessageId,
+        mediaMessageIds,
+        selectedCharacterId: input.screen === "character_mode"
+          ? input.selected_character_i ?? null
+          : null,
+      });
+    } catch (error) {
+      console.error("[telegram_navigation] commit_render_outcome_uncertain", {
+        chat_id: input.telegram_chat_id,
+        navigation_revision: input.navigation_revision,
+        screen: input.screen,
+        err: error,
+      });
+      return {
+        status: "uncertain",
+        screen: input.screen,
+        navigation_revision: input.navigation_revision,
+        menu_message_id: menuMessageId,
+        media_message_ids: mediaMessageIds,
+        reason: "navigation_render_commit_outcome_uncertain",
+      };
+    }
 
     if (!committed) {
       await this.cleanup(input.telegram_chat_id, sentMessageIds);

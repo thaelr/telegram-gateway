@@ -24,6 +24,7 @@ const { TelegramUxRequestError } = await import("../src/telegramBotClient.js");
 function createHarness(options: {
   begin?: boolean;
   commit?: boolean;
+  commitError?: Error;
   failMethod?: "sendPhoto" | "sendMediaGroup" | "sendMessage";
   failureOutcome?: "definitive_failure" | "uncertain";
 } = {}) {
@@ -42,6 +43,7 @@ function createHarness(options: {
     },
     async commitRender(input: { selectedCharacterId: number | null }) {
       calls.push(`commit:${input.selectedCharacterId ?? "none"}`);
+      if (options.commitError) throw options.commitError;
       return options.commit !== false;
     },
   };
@@ -160,6 +162,36 @@ test("a renderer that loses the commit race deletes only its own messages", asyn
     "delete:8002",
   ]);
   assert.equal(calls.includes("delete:7001"), false);
+});
+
+test("returns uncertain without cleanup or retry when commit outcome is unknown", async () => {
+  const originalConsoleError = console.error;
+  const logged: unknown[][] = [];
+  console.error = (...args: unknown[]) => logged.push(args);
+  try {
+    const { renderer, calls } = createHarness({
+      commitError: new Error("database connection lost after commit request"),
+    });
+    const result = await renderer.render(galleryInput);
+
+    assert.equal(result.status, "uncertain");
+    assert.equal(result.reason, "navigation_render_commit_outcome_uncertain");
+    assert.equal(result.menu_message_id, 8002);
+    assert.deepEqual(result.media_message_ids, [8000, 8001]);
+    assert.deepEqual(calls, [
+      "begin",
+      "sendMediaGroup",
+      "sendMessage",
+      "commit:none",
+    ]);
+    assert.equal(calls.some((value) => value.startsWith("delete:")), false);
+    assert.equal(calls.filter((value) => value === "sendMediaGroup").length, 1);
+    assert.equal(calls.filter((value) => value === "sendMessage").length, 1);
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0]?.[0], "[telegram_navigation] commit_render_outcome_uncertain");
+  } finally {
+    console.error = originalConsoleError;
+  }
 });
 
 test("character mode keeps the existing text fallback and commits selection last", async () => {
