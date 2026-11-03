@@ -7,6 +7,10 @@ import type { LocalizationService } from "./localization.js";
 import { parseTelegramLanguage, type TelegramLanguage } from "./telegramLanguage.js";
 import type { TelegramUxCopy } from "./config.js";
 import type {
+  NavigationRegistration,
+  TelegramNavigationScreen,
+} from "./telegramNavigationRepository.js";
+import type {
   AccessContext,
   AccessDecisionRequest,
   AccessDecisionResponse,
@@ -54,6 +58,9 @@ type AccessRepository = Pick<
   ChatAccessRepository,
   | "ensureAndLoadAccessContext"
   | "setTelegramLanguage"
+  | "registerTelegramNavigation"
+  | "resumeTelegramNavigation"
+  | "observeTelegramUpdate"
   | "popActiveSubscriptionOffer"
 > & Partial<Pick<ChatAccessRepository, "resolveTelegramLanguage">>;
 
@@ -125,6 +132,41 @@ function resolvePostAcceptIntent(
 
 function requiresAccessContext(classification: RouterClassification): boolean {
   return ACCESS_CONTEXT_INTENTS.has(classification.intent);
+}
+
+function shouldRegisterNavigation(
+  source: string,
+  input: AccessDecisionRequest,
+  classification: RouterClassification,
+): boolean {
+  if (source !== "telegram" || normalizePositiveInteger(input.update_id) == null) {
+    return false;
+  }
+
+  return ![
+    "commerce_callback",
+    "interaction_event",
+    "reachability_update",
+    "noop",
+  ].includes(classification.intent);
+}
+
+function expectedMenuScreen(
+  classification: RouterClassification,
+): TelegramNavigationScreen | null {
+  if (
+    classification.intent === "character_select"
+    || classification.intent === "character_page"
+  ) {
+    return "character_gallery";
+  }
+  if (
+    classification.intent === "character_back"
+    || classification.intent === "scene_mode"
+  ) {
+    return "character_mode";
+  }
+  return null;
 }
 
 function requiresTermsGate(classification: RouterClassification): boolean {
@@ -536,6 +578,32 @@ export class AccessDecisionService {
     const effectiveCharacterId =
       classification.character_i ?? input.character_i ?? null;
     const effectiveSceneMode = classification.scene_mode ?? input.scene_mode ?? null;
+    let navigation: NavigationRegistration | null = null;
+    const continuationRevision = normalizePositiveInteger(
+      input.continuation_navigation_revision,
+    );
+    if (
+      source === "telegram"
+      && continuationRevision != null
+      && normalizePositiveInteger(input.update_id) != null
+    ) {
+      navigation = await this.repository.resumeTelegramNavigation({
+        chatId: input.chat_id,
+        updateId: normalizePositiveInteger(input.update_id)!,
+        navigationRevision: continuationRevision,
+      });
+    } else if (shouldRegisterNavigation(source, input, classification)) {
+      navigation = await this.repository.registerTelegramNavigation({
+        chatId: input.chat_id,
+        updateId: normalizePositiveInteger(input.update_id)!,
+        source,
+        sourceUserId,
+        expectedMenuScreen: expectedMenuScreen(classification),
+        inboundMessageId: normalizePositiveInteger(input.inbound_message_id),
+      });
+    } else if (source === "telegram" && normalizePositiveInteger(input.update_id) != null) {
+      await this.repository.observeTelegramUpdate();
+    }
     const attachDismissedSubscriptionOffer = async <T extends AccessDecisionResponse>(
       response: T,
     ): Promise<T> => {
@@ -598,7 +666,19 @@ export class AccessDecisionService {
         classification.expected_scene_session_id ?? null,
       ux_copy: defaultUxCopy,
       language: passthroughLanguage,
+      navigation_revision: navigation?.navigation_revision ?? null,
+      navigation_status: navigation?.reason ?? null,
     } as const;
+
+    if (navigation && !navigation.accepted) {
+      return {
+        ...passthrough,
+        decision: "noop",
+        action: "ignore",
+        allowed: false,
+        reason: `navigation_${navigation.reason}`,
+      };
+    }
 
     if (
       isMaintenanceUserAction(input, classification)
@@ -629,8 +709,7 @@ export class AccessDecisionService {
       input.source_user_id ?? null,
       config.BUSINESS_TIME_ZONE,
       effectiveCharacterId,
-      classification.intent === "character_select"
-        || classification.intent === "scene_mode",
+      false,
     );
 
     let language = accessContext.language;
@@ -658,7 +737,18 @@ export class AccessDecisionService {
       languageConfirmedAt = await this.repository.setTelegramLanguage(
         sourceUserId,
         classification.selected_language,
+        input.chat_id,
+        navigation?.navigation_revision ?? null,
       );
+      if (languageConfirmedAt == null) {
+        return {
+          ...passthrough,
+          decision: "noop",
+          action: "ignore",
+          allowed: false,
+          reason: "navigation_stale_before_language_update",
+        };
+      }
       language = classification.selected_language;
     }
     const resolvedLanguage: TelegramLanguage = language ?? "ru";

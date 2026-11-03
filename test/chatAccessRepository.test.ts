@@ -276,13 +276,14 @@ test("stores only an explicit Telegram language selection", async () => {
 
   assert.equal(confirmedAt, "2026-10-30T00:00:00.000Z");
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0]?.values, ["ru", 777001]);
+  assert.deepEqual(calls[0]?.values, ["ru", 777001, null, null, null]);
   const statement = calls[0]?.strings.join(" ") ?? "";
   assert.match(statement, /UPDATE public\.users AS account/u);
   assert.match(statement, /FROM public\.user_identities AS identity/u);
   assert.match(statement, /identity\.provider = 'telegram'/u);
   assert.match(statement, /identity\.external_id =/u);
   assert.match(statement, /language_confirmed_at = clock_timestamp\(\)/u);
+  assert.match(statement, /navigation_state\.navigation_revision/u);
   assert.doesNotMatch(statement, /language_code/u);
   assert.doesNotMatch(statement, /INSERT INTO/u);
   assert.doesNotMatch(statement, /ensure_telegram_chat_account/u);
@@ -302,6 +303,52 @@ test("fails closed when an explicit Telegram language has no linked account", as
 
   assert.equal(calls.length, 1);
   assert.doesNotMatch(calls[0]?.strings.join(" ") ?? "", /INSERT INTO/u);
+});
+
+test("resumes only the currently registered Telegram navigation update", async () => {
+  const calls: QueryCall[] = [];
+  const query = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    calls.push({ strings: Array.from(strings), values });
+    return Promise.resolve([{
+      navigation_revision: "41",
+      active_menu_screen: "character_gallery",
+      active_menu_message_id: "91",
+      active_menu_media_message_ids_json: [88, "89", null],
+    }]);
+  }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
+
+  const result = await new ChatAccessRepository(query).resumeTelegramNavigation({
+    chatId: 777001,
+    updateId: 555,
+    navigationRevision: 41,
+  });
+
+  assert.deepEqual(calls[0]?.values, [777001, 41, 555]);
+  assert.match(calls[0]?.strings.join(" ") ?? "", /navigation_update_id/u);
+  assert.deepEqual(result, {
+    accepted: true,
+    reason: "accepted",
+    navigation_revision: 41,
+    active_menu_screen: "character_gallery",
+    active_menu_message_id: 91,
+    active_menu_media_message_ids: [88, 89],
+  });
+});
+
+test("rejects a stale internal continuation", async () => {
+  const query = (() => Promise.resolve([])) as unknown as ConstructorParameters<
+    typeof ChatAccessRepository
+  >[0];
+
+  const result = await new ChatAccessRepository(query).resumeTelegramNavigation({
+    chatId: 777001,
+    updateId: 555,
+    navigationRevision: 40,
+  });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, "stale_update");
+  assert.equal(result.navigation_revision, 40);
 });
 
 test("resolveTelegramChatId follows account identity from an internal dialogue", async () => {

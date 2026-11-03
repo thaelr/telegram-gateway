@@ -2,6 +2,11 @@ import { sql } from "./db.js";
 import { normalizePositiveInteger } from "./numeric.js";
 import type { TelegramLanguage } from "./telegramLanguage.js";
 import type { AccessContext } from "./types.js";
+import {
+  TelegramNavigationRepository,
+  type NavigationRegistration,
+  type TelegramNavigationScreen,
+} from "./telegramNavigationRepository.js";
 
 type AccessContextRow = {
   chat_id: number;
@@ -35,7 +40,9 @@ export class ChatAccessRepository {
   async setTelegramLanguage(
     sourceUserId: number,
     language: TelegramLanguage,
-  ): Promise<string> {
+    telegramChatId: number | null = null,
+    navigationRevision: number | null = null,
+  ): Promise<string | null> {
     const rows = await this.query<Array<{ language_confirmed_at: string }>>`
       UPDATE public.users AS account
       SET
@@ -45,16 +52,89 @@ export class ChatAccessRepository {
       WHERE identity.provider = 'telegram'
         AND identity.external_id = ${sourceUserId}::text
         AND account.user_id = identity.user_id
+        AND (
+          ${navigationRevision}::bigint IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM public.chat_state AS navigation_state
+            WHERE navigation_state.chat_id = ${telegramChatId}::bigint
+              AND navigation_state.navigation_revision = ${navigationRevision}::bigint
+          )
+        )
       RETURNING to_char(
         account.language_confirmed_at AT TIME ZONE 'UTC',
         'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
       ) AS language_confirmed_at
     `;
     const confirmedAt = rows[0]?.language_confirmed_at;
-    if (!confirmedAt) {
+    if (!confirmedAt && navigationRevision == null) {
       throw new Error(`Unable to save Telegram language for source_user_id=${sourceUserId}`);
     }
-    return confirmedAt;
+    return confirmedAt ?? null;
+  }
+
+  async registerTelegramNavigation(input: {
+    chatId: number;
+    updateId: number;
+    source: string;
+    sourceUserId: number | null;
+    expectedMenuScreen: TelegramNavigationScreen | null;
+    inboundMessageId: number | null;
+  }): Promise<NavigationRegistration> {
+    return new TelegramNavigationRepository(this.query).register(input);
+  }
+
+  async resumeTelegramNavigation(input: {
+    chatId: number;
+    updateId: number;
+    navigationRevision: number;
+  }): Promise<NavigationRegistration> {
+    const rows = await this.query<Array<{
+      navigation_revision: number | string;
+      active_menu_screen: TelegramNavigationScreen | null;
+      active_menu_message_id: number | string | null;
+      active_menu_media_message_ids_json: unknown;
+    }>>`
+      SELECT
+        state.navigation_revision,
+        state.active_menu_screen,
+        state.active_menu_message_id,
+        state.active_menu_media_message_ids_json
+      FROM public.chat_state AS state
+      WHERE state.chat_id = ${input.chatId}::bigint
+        AND state.navigation_revision = ${input.navigationRevision}::bigint
+        AND state.navigation_update_id = ${input.updateId}::bigint
+      LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) {
+      return {
+        accepted: false,
+        reason: "stale_update",
+        navigation_revision: input.navigationRevision,
+        active_menu_screen: null,
+        active_menu_message_id: null,
+        active_menu_media_message_ids: [],
+      };
+    }
+
+    const mediaIds = Array.isArray(row.active_menu_media_message_ids_json)
+      ? row.active_menu_media_message_ids_json
+          .map((value) => normalizePositiveInteger(value))
+          .filter((value): value is number => value != null)
+      : [];
+    return {
+      accepted: true,
+      reason: "accepted",
+      navigation_revision: Number(row.navigation_revision),
+      active_menu_screen: row.active_menu_screen,
+      active_menu_message_id: normalizePositiveInteger(row.active_menu_message_id),
+      active_menu_media_message_ids: mediaIds,
+    };
+  }
+
+  async observeTelegramUpdate(): Promise<number> {
+    return new TelegramNavigationRepository(this.query).observeTelegramUpdate();
   }
 
   async resolveTelegramLanguage(sourceUserId: number): Promise<TelegramLanguage | null> {
@@ -133,7 +213,7 @@ export class ChatAccessRepository {
     sourceUserId: number | null,
     timeZone: string,
     requestedCharacterId: number | null = null,
-    updateSelectedCharacter = true,
+    updateSelectedCharacter = false,
   ): Promise<AccessContext> {
     const routingRows = await this.query<Array<{
       user_id: string;
@@ -357,7 +437,7 @@ export class ChatAccessRepository {
         COALESCE(active_scene.scene_access_active, FALSE) AS scene_access_active,
         COALESCE(usage.turns_today, 0) AS turns_today,
         t.scene_turn_no,
-        ${selectedCharacterId}::smallint AS selected_character_i,
+        ${routing.selected_character_i}::smallint AS selected_character_i,
         ${routing.active_menu_screen}::text AS active_menu_screen,
         ${routing.active_menu_message_id}::bigint AS active_menu_message_id,
         COALESCE(

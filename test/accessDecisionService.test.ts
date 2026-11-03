@@ -74,6 +74,23 @@ type RepositoryCall = {
 type LanguageCall = {
   sourceUserId: number;
   language: TelegramLanguage;
+  telegramChatId: number | null;
+  navigationRevision: number | null;
+};
+
+type NavigationCall = {
+  chatId: number;
+  updateId: number;
+  source: string;
+  sourceUserId: number | null;
+  expectedMenuScreen: "character_gallery" | "character_mode" | null;
+  inboundMessageId: number | null;
+};
+
+type ResumeNavigationCall = {
+  chatId: number;
+  updateId: number;
+  navigationRevision: number;
 };
 
 type DismissCall = {
@@ -84,6 +101,7 @@ type DismissCall = {
 type MockRepository = {
   calls: RepositoryCall[];
   languageCalls: LanguageCall[];
+  navigationCalls: Array<NavigationCall | ResumeNavigationCall>;
   dismissCalls: DismissCall[];
   ensureAndLoadAccessContext: (
     chatId: number,
@@ -96,7 +114,30 @@ type MockRepository = {
   setTelegramLanguage: (
     sourceUserId: number,
     language: TelegramLanguage,
-  ) => Promise<string>;
+    telegramChatId?: number | null,
+    navigationRevision?: number | null,
+  ) => Promise<string | null>;
+  registerTelegramNavigation: (
+    input: NavigationCall,
+  ) => Promise<{
+    accepted: boolean;
+    reason: "accepted" | "duplicate" | "stale_update" | "stale_menu";
+    navigation_revision: number;
+    active_menu_screen: string | null;
+    active_menu_message_id: number | null;
+    active_menu_media_message_ids: number[];
+  }>;
+  resumeTelegramNavigation: (
+    input: ResumeNavigationCall,
+  ) => Promise<{
+    accepted: boolean;
+    reason: "accepted" | "duplicate" | "stale_update" | "stale_menu";
+    navigation_revision: number;
+    active_menu_screen: string | null;
+    active_menu_message_id: number | null;
+    active_menu_media_message_ids: number[];
+  }>;
+  observeTelegramUpdate: () => Promise<number>;
   popActiveSubscriptionOffer: (
     chatId: number,
     currentOfferId: string | null,
@@ -169,14 +210,22 @@ function createService(
   options: {
     throwOnCall?: boolean;
     dismissMessageId?: number | null;
+    navigationResult?: {
+      accepted: boolean;
+      reason: "accepted" | "duplicate" | "stale_update" | "stale_menu";
+      navigation_revision: number;
+    };
+    languageUpdateStale?: boolean;
   } = {},
 ) {
   const calls: RepositoryCall[] = [];
   const languageCalls: LanguageCall[] = [];
+  const navigationCalls: Array<NavigationCall | ResumeNavigationCall> = [];
   const dismissCalls: DismissCall[] = [];
   const repository: MockRepository = {
     calls,
     languageCalls,
+    navigationCalls,
     dismissCalls,
     async ensureAndLoadAccessContext(
       chatId,
@@ -184,7 +233,7 @@ function createService(
       sourceUserId,
       timeZone,
       requestedCharacterId = null,
-      updateSelectedCharacter = true,
+      updateSelectedCharacter = false,
     ) {
       calls.push({
         chatId,
@@ -199,12 +248,50 @@ function createService(
       }
       return context;
     },
-    async setTelegramLanguage(sourceUserId, language) {
-      languageCalls.push({ sourceUserId, language });
+    async setTelegramLanguage(
+      sourceUserId,
+      language,
+      telegramChatId = null,
+      navigationRevision = null,
+    ) {
+      languageCalls.push({
+        sourceUserId,
+        language,
+        telegramChatId,
+        navigationRevision,
+      });
       if (options.throwOnCall) {
         throw new Error("Repository should not be called");
       }
+      if (options.languageUpdateStale) return null;
       return "2026-10-30T00:00:00.000Z";
+    },
+    async registerTelegramNavigation(input) {
+      navigationCalls.push(input);
+      return {
+        accepted: options.navigationResult?.accepted ?? true,
+        reason: options.navigationResult?.reason ?? "accepted",
+        navigation_revision:
+          options.navigationResult?.navigation_revision ?? input.updateId,
+        active_menu_screen: null,
+        active_menu_message_id: null,
+        active_menu_media_message_ids: [],
+      };
+    },
+    async resumeTelegramNavigation(input) {
+      navigationCalls.push(input);
+      return {
+        accepted: options.navigationResult?.accepted ?? true,
+        reason: options.navigationResult?.reason ?? "accepted",
+        navigation_revision:
+          options.navigationResult?.navigation_revision ?? input.navigationRevision,
+        active_menu_screen: null,
+        active_menu_message_id: null,
+        active_menu_media_message_ids: [],
+      };
+    },
+    async observeTelegramUpdate() {
+      return 0;
     },
     async popActiveSubscriptionOffer(chatId, currentOfferId) {
       dismissCalls.push({ chatId, currentOfferId });
@@ -229,6 +316,7 @@ function createService(
     }),
     calls,
     languageCalls,
+    navigationCalls,
     dismissCalls,
   };
 }
@@ -303,7 +391,12 @@ test("language selection persists explicitly and continues to terms", async () =
     user_message: null,
   }));
 
-  assert.deepEqual(languageCalls, [{ sourceUserId: 202, language: "en" }]);
+  assert.deepEqual(languageCalls, [{
+    sourceUserId: 202,
+    language: "en",
+    telegramChatId: 101,
+    navigationRevision: 555,
+  }]);
   assert.equal(result.language, "en");
   assert.equal(result.language_confirmed_at, "2026-10-30T00:00:00.000Z");
   assert.equal(result.action, "show_terms_gate");
@@ -835,7 +928,7 @@ test("preserves reserved scene session on /start without treating it as started"
 });
 
 test("resolves the selected character dialogue for character_select callback", async () => {
-  const { service, calls } = createService(buildAccessContext({
+  const { service, calls, navigationCalls } = createService(buildAccessContext({
     chat_id: 202,
     telegram_chat_id: 101,
     character_i: 2,
@@ -861,7 +954,92 @@ test("resolves the selected character dialogue for character_select callback", a
   assert.equal(result.telegram_chat_id, 101);
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.requestedCharacterId, 2);
-  assert.equal(calls[0]?.updateSelectedCharacter, true);
+  assert.equal(calls[0]?.updateSelectedCharacter, false);
+  assert.deepEqual(navigationCalls[0], {
+    chatId: 101,
+    updateId: 555,
+    source: "telegram",
+    sourceUserId: 202,
+    expectedMenuScreen: "character_gallery",
+    inboundMessageId: 12,
+  });
+  assert.equal(result.navigation_revision, 555);
+  assert.equal(result.navigation_status, "accepted");
+});
+
+test("rejects an old-menu callback before loading or changing access state", async () => {
+  const { service, calls, navigationCalls } = createService(
+    buildAccessContext(),
+    {
+      throwOnCall: true,
+      navigationResult: {
+        accepted: false,
+        reason: "stale_menu",
+        navigation_revision: 12,
+      },
+    },
+  );
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_query_id: "old-callback",
+    callback_data: "character_select:2:1",
+    inbound_message_id: 70,
+    character_i: null,
+    scene_mode: null,
+  }));
+
+  assert.equal(result.action, "ignore");
+  assert.equal(result.reason, "navigation_stale_menu");
+  assert.equal(result.navigation_revision, 12);
+  assert.equal(calls.length, 0);
+  assert.equal(navigationCalls.length, 1);
+});
+
+test("continues an accepted Telegram update without registering the same update twice", async () => {
+  const { service, navigationCalls } = createService(buildAccessContext());
+
+  const result = await service.evaluate(buildRequest({
+    command: "/start",
+    event_type: "command.received",
+    route_target: "command",
+    callback_data: null,
+    callback_query_id: null,
+    continuation_navigation_revision: 41,
+  }));
+
+  assert.equal(result.action, "show_character_gallery");
+  assert.equal(result.navigation_revision, 41);
+  assert.equal(result.navigation_status, "accepted");
+  assert.deepEqual(navigationCalls, [{
+    chatId: 101,
+    updateId: 555,
+    navigationRevision: 41,
+  }]);
+});
+
+test("does not save language when a newer navigation revision wins first", async () => {
+  const { service, languageCalls } = createService(
+    buildAccessContext(),
+    { languageUpdateStale: true },
+  );
+
+  const result = await service.evaluate(buildRequest({
+    event_type: "callback_query.received",
+    callback_query_id: "language-callback",
+    callback_data: "language_select:en",
+    character_i: null,
+    scene_mode: null,
+  }));
+
+  assert.equal(result.action, "ignore");
+  assert.equal(result.reason, "navigation_stale_before_language_update");
+  assert.deepEqual(languageCalls[0], {
+    sourceUserId: 202,
+    language: "en",
+    telegramChatId: 101,
+    navigationRevision: 555,
+  });
 });
 
 test("returns the started scene when selecting an existing character dialogue", async () => {

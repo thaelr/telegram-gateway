@@ -60,6 +60,7 @@ export interface AccessDecisionRequest {
   chat_id: number;
   source?: string | null;
   update_id?: number | null;
+  continuation_navigation_revision?: number | null;
   source_user_id?: number | null;
   command?: string | null;
   event_type?: string | null;
@@ -154,6 +155,8 @@ export interface AccessDecisionResponse {
   selected_character_i?: number | null;
   active_menu_screen?: string | null;
   active_menu_message_id?: number | null;
+  navigation_revision?: number | null;
+  navigation_status?: "accepted" | "duplicate" | "stale_update" | "stale_menu" | null;
   dismiss_subscription_offer_message_id?: number | null;
   ux_copy?: unknown;
 }

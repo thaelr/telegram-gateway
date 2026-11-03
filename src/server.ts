@@ -30,11 +30,21 @@ import {
   nonNegativeIntegerInputSchema,
   positiveIntegerInputSchema,
 } from "./numericSchemas.js";
+import {
+  TelegramBotClient,
+  type TelegramNavigationTransport,
+} from "./telegramBotClient.js";
+import { TelegramNavigationRepository } from "./telegramNavigationRepository.js";
+import {
+  TelegramNavigationRenderer,
+  type TelegramNavigationRenderInput,
+} from "./telegramNavigationRenderer.js";
 
 const routerRequestSchema = z.object({
   chat_id: positiveIntegerInputSchema,
   source: z.string().trim().nullable().optional(),
   update_id: positiveIntegerInputSchema.nullable().optional(),
+  continuation_navigation_revision: positiveIntegerInputSchema.nullable().optional(),
   source_user_id: positiveIntegerInputSchema.nullable().optional(),
   command: z.string().trim().nullable().optional(),
   event_type: z.string().trim().nullable().optional(),
@@ -59,12 +69,37 @@ const routerRequestSchema = z.object({
   telegram_chat_status: z.string().trim().nullable().optional(),
 });
 
+const telegramNavigationRenderSchema = z.object({
+  telegram_chat_id: positiveIntegerInputSchema,
+  navigation_revision: positiveIntegerInputSchema,
+  screen: z.enum(["character_gallery", "character_mode"]),
+  text: z.string().min(1),
+  reply_markup: z.record(z.string(), z.unknown()),
+  parse_mode: z.literal("HTML").optional(),
+  disable_web_page_preview: z.boolean().optional(),
+  gallery_media: z.array(z.object({
+    type: z.literal("photo"),
+    media: z.string().trim().min(1),
+  }).strict()).max(10).optional(),
+  menu_photo_url: z.string().trim().min(1).nullable().optional(),
+  selected_character_i: positiveIntegerInputSchema.nullable().optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.screen === "character_mode" && value.selected_character_i == null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["selected_character_i"],
+      message: "character_mode requires selected_character_i",
+    });
+  }
+});
+
 type RouterDecisionEvaluator = Pick<AccessDecisionService, "evaluate">;
 type TelegramAccountLinker = Pick<ChatAccessRepository, "ensureTelegramAccountLink">
   & Partial<Pick<ChatAccessRepository, "resolveTelegramLanguage">>;
 type TelegramDeliveryResolver = Pick<ChatAccessRepository, "resolveTelegramChatId">;
 type MediaCommerceDecisionEvaluator = Pick<MediaCommerceDecisionService, "evaluate">;
 type SbpCheckoutResolver = Pick<MediaCommerceDecisionService, "resolveSbpCheckout">;
+type NavigationRenderer = Pick<TelegramNavigationRenderer, "render">;
 type RewardClaimer = Pick<
   RewardService,
   "claimReward" | "claimConfiguredSlot" | "assignConfiguredSlot" | "bindGrantMessage"
@@ -78,6 +113,8 @@ type BuildAppOptions = {
   sbpCheckoutService?: SbpCheckoutResolver;
   rewardService?: RewardClaimer;
   localizationService?: LocalizationService;
+  telegramTransport?: TelegramNavigationTransport;
+  telegramNavigationRenderer?: NavigationRenderer;
   web?: Omit<WebRoutesOptions, "localization"> & { localization?: LocalizationService; deliveryWorker?: Pick<WebDeliveryWorker, "start" | "stop">; commerce?: WebCommerceService };
   logger?: boolean;
 };
@@ -96,6 +133,14 @@ function extractPostgresCode(error: unknown): string | null {
   return null;
 }
 
+function isCharacterNavigationCallback(callbackData: string | null | undefined): boolean {
+  const value = callbackData?.trim() ?? "";
+  return value.startsWith("character_select:")
+    || value.startsWith("character_page:")
+    || value.startsWith("character_menu:")
+    || value.startsWith("scene_mode:");
+}
+
 export function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     logger: options.logger ?? true,
@@ -111,6 +156,12 @@ export function buildApp(options: BuildAppOptions = {}) {
     );
 
   const defaultChatAccessRepository = new ChatAccessRepository();
+  const telegramTransport = options.telegramTransport ?? new TelegramBotClient();
+  const telegramNavigationRenderer = options.telegramNavigationRenderer
+    ?? new TelegramNavigationRenderer(
+      new TelegramNavigationRepository(),
+      telegramTransport,
+    );
   const accessDecisionService = options.accessDecisionService
     ?? new AccessDecisionService(defaultChatAccessRepository, localizationService);
   const telegramAccountLinker = options.telegramAccountLinker
@@ -171,7 +222,36 @@ export function buildApp(options: BuildAppOptions = {}) {
       });
     }
 
+    const callbackAcknowledgement = parsed.data.callback_query_id
+      && isCharacterNavigationCallback(parsed.data.callback_data)
+      ? telegramTransport.answerCallbackQuery(parsed.data.callback_query_id).catch((error) => {
+        request.log.warn(
+          { err: error, callback_query_id: parsed.data.callback_query_id },
+          "Telegram callback acknowledgement failed",
+        );
+      })
+      : Promise.resolve();
     const result = await accessDecisionService.evaluate(parsed.data);
+    await callbackAcknowledgement;
+    return reply.send(result);
+  };
+
+  const handleTelegramNavigationRender = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ) => {
+    const parsed = telegramNavigationRenderSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: parsed.error.issues,
+      });
+    }
+    const result = await telegramNavigationRenderer.render(
+      parsed.data as TelegramNavigationRenderInput,
+    );
+    if (result.status === "failed") return reply.status(502).send(result);
+    if (result.status === "uncertain") return reply.status(504).send(result);
     return reply.send(result);
   };
 
@@ -240,6 +320,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   };
 
   app.post("/v1/router-decision", handleRouterDecision);
+  app.post("/v1/telegram/navigation/render", handleTelegramNavigationRender);
   app.post("/v1/media-commerce-decision", handleMediaCommerceDecision);
   app.get("/v1/pay/sbp/:token", async (request, reply) => {
     const parsed = z.object({

@@ -569,6 +569,104 @@ test("router endpoint is registered and uses the same auth and validation wiring
   assert.deepEqual(response.json().raw_update, { callback_query: { id: "cbq-1" } });
 });
 
+test("router starts callback acknowledgement before waiting for decision work", async (t) => {
+  const calls: string[] = [];
+  const app = buildApp({
+    logger: false,
+    telegramTransport: {
+      async answerCallbackQuery(callbackQueryId) {
+        calls.push(`ack:${callbackQueryId}`);
+      },
+      async sendMessage() { throw new Error("not used"); },
+      async sendPhoto() { throw new Error("not used"); },
+      async sendMediaGroup() { throw new Error("not used"); },
+      async deleteMessage() { throw new Error("not used"); },
+    },
+    accessDecisionService: {
+      async evaluate(input) {
+        calls.push("evaluate:start");
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        calls.push("evaluate:end");
+        return {
+          decision: "noop",
+          action: "ignore",
+          allowed: false,
+          domain: "interaction",
+          intent: "interaction_event",
+          chat_id: input.chat_id,
+          source: "telegram",
+          reason: "navigation_stale_menu",
+        };
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/router-decision",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: {
+      chat_id: 42,
+      update_id: 100,
+      callback_query_id: "cbq-old-menu",
+      callback_data: "character_select:2:1",
+      inbound_message_id: 7001,
+    },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(calls, [
+    "ack:cbq-old-menu",
+    "evaluate:start",
+    "evaluate:end",
+  ]);
+});
+
+test("navigation renderer endpoint validates and forwards the prepared screen", async (t) => {
+  let received: unknown = null;
+  const app = buildApp({
+    logger: false,
+    telegramNavigationRenderer: {
+      async render(input) {
+        received = input;
+        return {
+          status: "committed",
+          screen: input.screen,
+          navigation_revision: input.navigation_revision,
+          menu_message_id: 8001,
+          media_message_ids: [8000],
+        };
+      },
+    },
+  });
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/telegram/navigation/render",
+    headers: { "x-internal-api-key": "test-internal-key" },
+    payload: {
+      telegram_chat_id: "42",
+      navigation_revision: "3",
+      screen: "character_gallery",
+      text: "Choose",
+      reply_markup: { inline_keyboard: [] },
+      gallery_media: [{ type: "photo", media: "https://example.com/1.jpg" }],
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().status, "committed");
+  assert.deepEqual(received, {
+    telegram_chat_id: 42,
+    navigation_revision: 3,
+    screen: "character_gallery",
+    text: "Choose",
+    reply_markup: { inline_keyboard: [] },
+    gallery_media: [{ type: "photo", media: "https://example.com/1.jpg" }],
+  });
+});
+
 test("router endpoint rejects unsafe required chat_id values", async (t) => {
   let called = false;
   const app = buildApp({
