@@ -62,6 +62,27 @@ test('Web catalog preserves subscription descriptions and exposes an explicit up
  const f=fixture();const catalog=await f.service.catalog('u0000001',context.chat_code);const full=catalog.products.find(p=>p.sku==='full');
  assert.equal(full?.description,'Base and video');assert.equal(full?.upgrade?.base_sku,'base');assert.equal(full?.subscription_days,30);
 });
+
+test('free feature redemption accepts no fictitious payment provider and otherwise requests checkout',async()=>{
+ const f=fixture();
+ f.service.decisions.webProductPlans=async()=>[{sku:'unlock',kind:'feature',feature_key:'scene_unlock',title:'Scene',description:'Scene access',amount_rub:200,amount_xtr:20,original_amount_rub:200,promo_key:null}];
+ f.repo.redeemFreeFeature=async()=>({available:true,fulfilled:true,feature_key:'scene_unlock'} as any);
+ const input={client_message_id:'free',chat_code:context.chat_code,sku:'unlock'};
+ const result=await f.service.purchase('u0000001',input);assert.ok('available' in result&&result.available);assert.equal(f.snapshot(),undefined);
+ f.repo.redeemFreeFeature=async()=>({available:false});
+ await assert.rejects(f.service.purchase('u0000001',{...input,client_message_id:'paid'}),e=>e instanceof WebError&&e.code==='payment_required');
+});
+
+test('Web semantic translations use real plan duration and cannot be overridden by inherited Russian SKU copy',async()=>{
+ const f=fixture();
+ const copy={product_types:{full:{title:'Full · {days} days',description:'Base benefits and video'}},products:{full:{title:'Русский SKU',description:'Русское описание'}}};
+ const localization={getNamespace:async()=>copy,getExactNamespace:async()=>({product_types:copy.product_types}),getPaymentMethods:async()=>['test'],getTelegramCopy:async()=>({})} as any;
+ const service=new WebCommerceService(f.repo as unknown as WebCommerceRepository,f.service.providers,f.service.decisions,f.service.accounts,localization);
+ const product=(await service.catalog('u0000001',context.chat_code)).products.find(item=>item.sku==='full');
+ assert.equal(product?.title,'Full · 30 days');assert.equal(product?.price?.amount,'850');assert.equal(product?.sku,'full');
+ localization.getExactNamespace=async()=>({products:{full:{title:'Specific Full',description:'Specific English plan'}}});
+ assert.equal((await service.catalog('u0000001',context.chat_code)).products.find(item=>item.sku==='full')?.title,'Specific Full');
+});
 test('Web video routes authenticate and reject caller-controlled account, video and storage identities',async(t)=>{
  const app=Fastify();t.after(()=>app.close());const calls:string[]=[];
  registerWebCommerceRoutes(app,{authenticator:{async verify(header){if(header!=='Bearer valid')throw new WebError(401,'unauthorized');return {auth_user_id:'auth',is_anonymous:false,display_name:null,locale:null};}},repository:{resolveIdentity:async()=> 'u0000001'} as unknown as WebRepositoryContract,commerce:{requestVideo:async(user:string)=>{calls.push(user);return {delivery_id:deliveryId};}} as unknown as InstanceType<typeof WebCommerceService>});
@@ -69,6 +90,17 @@ test('Web video routes authenticate and reject caller-controlled account, video 
  assert.equal((await app.inject({method:'POST',url,payload:{client_message_id:'x'}})).statusCode,401);
  assert.equal((await app.inject({method:'POST',url,headers:{authorization:'Bearer valid'},payload:{client_message_id:'x',video_id:video}})).statusCode,400);
  const good=await app.inject({method:'POST',url,headers:{authorization:'Bearer valid'},payload:{client_message_id:'x'}});assert.equal(good.statusCode,202);assert.equal(good.headers['cache-control'],'no-store');assert.deepEqual(calls,['u0000001']);
+});
+test('Web photo panel routes enforce bearer, strict action DTO and server-owned panel identity',async(t)=>{
+ const app=Fastify();t.after(()=>app.close());const calls:unknown[]=[];
+ const auth={async verify(header:string|undefined){if(header!=='Bearer valid')throw new WebError(401,'unauthorized');return {auth_user_id:'auth',is_anonymous:false,display_name:null,locale:null};}};
+ registerWebCommerceRoutes(app,{authenticator:auth,repository:{resolveIdentity:async()=> 'u0000001'} as unknown as WebRepositoryContract,commerce:{photoPanel:async(...args:unknown[])=>{calls.push(args);return {media_id:photo};},photoPanelAction:async(...args:unknown[])=>{calls.push(args);return {media_id:photo};}} as unknown as InstanceType<typeof WebCommerceService>});
+ const url=`/web/chats/${context.chat_code}/media/${photo}/panel`,headers={authorization:'Bearer valid'};
+ assert.equal((await app.inject({url})).statusCode,401);
+ assert.equal((await app.inject({url,headers})).statusCode,200);
+ for(const extra of [{panel_id:123},{user_id:'foreign'},{photo_url:'https://example.invalid'},{action:'photo_unlock'}])assert.equal((await app.inject({method:'POST',url,headers,payload:{client_message_id:'id',action:'photo_next',...extra}})).statusCode,400);
+ assert.equal((await app.inject({method:'POST',url,headers,payload:{client_message_id:'id',action:'photo_next',current_media_id:photo}})).statusCode,200);
+ assert.deepEqual(calls,[['u0000001',context.chat_code,photo,undefined],['u0000001',context.chat_code,photo,{client_message_id:'id',action:'photo_next',current_media_id:photo}]]);
 });
 function deliveryFixture(){
  let now=Date.parse('2026-10-28T10:00:00Z');
@@ -85,12 +117,13 @@ function deliveryFixture(){
  const access=new WebVideoAccess(db as any,signer,()=>now);
  return {row,signed,access,advance:(ms:number)=>{now+=ms;},db,now:()=>now};
 }
-test('Web video delivery waits five seconds, checks ownership, claims once and limits response-loss recovery to the original window',async()=>{
+test('Web video delivery waits five seconds, checks ownership and allows repeat viewing after technical URL expiration',async()=>{
  const f=deliveryFixture();await assert.rejects(f.access.access('other',deliveryId),e=>e instanceof WebError&&e.code==='video_delivery_not_found');
  assert.equal((await f.access.access('u0000001',deliveryId)).status,'queued');assert.deepEqual(f.signed,[]);
  f.advance(5000);assert.equal((await f.access.access('u0000001',deliveryId)).status,'delivered');assert.deepEqual(f.signed,[120]);
- f.advance(20000);await f.access.access('u0000001',deliveryId);assert.deepEqual(f.signed,[120,100]);
- f.advance(100001);await assert.rejects(f.access.access('u0000001',deliveryId),e=>e instanceof WebError&&e.code==='video_delivery_expired');
+ f.advance(20000);await f.access.access('u0000001',deliveryId);assert.deepEqual(f.signed,[120,120]);
+ f.advance(100001);assert.equal((await f.access.access('u0000001',deliveryId)).status,'delivered');assert.deepEqual(f.signed,[120,120,120]);
+ f.advance(35*24*60*60*1000);assert.equal((await f.access.access('u0000001',deliveryId)).status,'delivered');assert.equal(f.row.status,'delivered');
 });
 test('Web storage signing failure keeps the same paid operation retryable',async()=>{
  const f=deliveryFixture();f.advance(5000);let attempts=0;

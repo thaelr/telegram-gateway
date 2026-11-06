@@ -9,6 +9,7 @@ export type ProviderCreateInput = {
   currency: string;
   description: string;
   chat_id?: number;
+  user_id?:string;
   telegram_invoice?: { title: string; label: string; payload: string };
 };
 export type ProviderCheckout = {
@@ -118,10 +119,10 @@ export class SbpProvider implements PaymentProvider {
   readonly platforms = ["telegram", "web"] as const;
   constructor(private readonly client: SbpPaymentClient) {}
   async create(input: ProviderCreateInput): Promise<ProviderCheckout> {
-    if (input.currency.toUpperCase() !== "RUB" || !Number.isSafeInteger(input.chat_id) || input.chat_id! <= 0) throw new ProviderError("invalid_sbp_context", "definite_failure", 400);
+    if (input.currency.toUpperCase() !== "RUB" || !(Number.isSafeInteger(input.chat_id)&&input.chat_id!>0)&&!(input.chat_id==null&&/^[a-z0-9]{8}$/u.test(input.user_id??''))) throw new ProviderError("invalid_sbp_context", "definite_failure", 400);
     const result = await this.client.createPayment({
-      token: input.attempt_id, chat_id: input.chat_id!, description: input.description,
-      amount_rub: positiveSafeInteger(input.amount), metadata: { order_id: input.order_id, attempt_id: input.attempt_id },
+      token: input.attempt_id, ...(input.chat_id==null?{}:{chat_id:input.chat_id}), description: input.description,
+      amount_rub: positiveSafeInteger(input.amount), metadata: { order_id: input.order_id, attempt_id: input.attempt_id,...(input.chat_id==null?{accountUserId:input.user_id}:{}) },
     });
     return { external_id: result.external_payment_id, external_kind: "payment", checkout_url: result.checkout_url, expires_at: result.provider_expires_at };
   }

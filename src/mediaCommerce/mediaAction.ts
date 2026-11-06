@@ -106,6 +106,14 @@ export function normalizeNextUnseen(
   };
 }
 
+/** Shared panel navigation for Telegram and Web; only already unlocked items. */
+export function selectNavigatedPhoto(items:MediaUnlockedItem[],currentUuid:string|null,action:'photo_prev'|'photo_next'):MediaUnlockedItem|null {
+  if(!items.length)return null;
+  let index=items.findIndex(item=>item.uuid===currentUuid);if(index<0)index=0;
+  index=action==='photo_prev'?(index<=0?items.length-1:index-1):(index>=items.length-1?0:index+1);
+  return items[index]??null;
+}
+
 export function buildCallbackTokenRow(input: {
   chat_id: number;
   scene_session_id: string | null;
@@ -274,15 +282,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
 
   if (actionKind === "photo_prev" || actionKind === "photo_next") {
     if (unlockedItems.length > 0) {
-      let index = unlockedItems.findIndex((item) => item.uuid === currentUuid);
-      if (index < 0) index = 0;
-      if (actionKind === "photo_prev") {
-        index = index <= 0 ? unlockedItems.length - 1 : index - 1;
-      }
-      if (actionKind === "photo_next") {
-        index = index >= unlockedItems.length - 1 ? 0 : index + 1;
-      }
-      selected = unlockedItems[index] ?? null;
+      selected = selectNavigatedPhoto(unlockedItems,currentUuid,actionKind);
       if (selected) {
         operation = "edit_photo";
         logEventType = "media.photo.viewed.nav";

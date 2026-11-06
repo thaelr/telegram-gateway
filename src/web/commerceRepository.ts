@@ -6,19 +6,22 @@ import { compareDecimals, normalizeDecimal, type ProviderCheckout, type Provider
 import { WebError, type SceneMode } from './types.js';
 import { WebVideoAccess } from './videoAccess.js';
 import { config } from '../config.js';
+import {WebPhotoPanels} from './photoPanels.js';
+import {MediaCatalogRepository} from '../mediaCommerceRepository/catalogRepository.js';
 
 export type WebCommerceContext = {
  chat_id:number; chat_code:string; character_i:number; scene_session_id:string|null;
  turn_no:number; scene_turn_no:number|null; scene_mode:SceneMode|null; debounce_revision?:number;
 };
-export type WebCommerceQuote = WebCommerceContext & {
+export type WebCommerceQuote = Omit<WebCommerceContext,'chat_id'|'chat_code'|'character_i'> & {
+ chat_id:number|null;chat_code:string|null;character_i:number|null;
  sku:string; title:string; description:string; kind:'subscription'|'photo'|'feature';
  amount:string; currency:string; amount_xtr:number|null; subscription_days?:number;
  feature_key?:string; media_id?:string; media_signature?:string; panel_id?:number; video_id?:string;
  price_required?:number; payload?:Record<string,unknown>;
 };
 export type WebPurchase = {
- purchase_id:string; user_id:string; chat_id:number; client_id:string; fingerprint:string;
+ purchase_id:string; user_id:string; chat_id:number|null; client_id:string; fingerprint:string;
  provider:string; payment_token:string; quote:WebCommerceQuote; status:string;
  external_id:string|null; external_kind:'invoice'|'payment'|null;
  external_invoice_id:string|null; external_payment_id:string|null; checkout_url:string|null;
@@ -34,7 +37,7 @@ type Row = Record<string,any>;
 const r = async (db:DB,text:string,params:any[]=[]):Promise<Row[]> => db.unsafe(text,params);
 const iso = (value:unknown) => value == null ? null : value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();
 const asPurchase = (row:Row):WebPurchase => ({
- ...row,chat_id:Number(row.chat_id),created_at:iso(row.created_at)!,updated_at:iso(row.updated_at)!,
+ ...row,chat_id:row.chat_id==null?null:Number(row.chat_id),created_at:iso(row.created_at)!,updated_at:iso(row.updated_at)!,
  expires_at:iso(row.expires_at),external_id:row.external_kind==='invoice'?row.external_invoice_id:row.external_payment_id,
 } as WebPurchase);
 const contextQuery="SELECT c.chat_id,c.chat_code,c.character_i,c.active_scene_session_id AS scene_session_id,c.current_turn_no AS turn_no,c.scene_turn_no,c.debounce_revision,s.scene_mode FROM public.chat_state c LEFT JOIN public.chat_scene_sessions s ON s.chat_id=c.chat_id AND s.scene_session_id=c.active_scene_session_id WHERE c.user_id=$1 AND c.chat_code=$2 AND c.character_i IS NOT NULL AND c.is_active";
@@ -42,10 +45,16 @@ const photoEvents=['media.photo.unlocked.free','media.photo.unlocked.paid','medi
 
 export class WebCommerceRepository {
  readonly videos: WebVideoAccess;
- constructor(private readonly query:typeof sql=sql,videos?:WebVideoAccess){this.videos=videos??new WebVideoAccess(query);}
- private async lockPurchaseChat(db:DB,id:string){await r(db,"SELECT c.chat_id FROM public.chat_state c JOIN app_private.web_purchases p ON p.chat_id=c.chat_id WHERE p.purchase_id=$1::uuid FOR UPDATE OF c",[id]);}
- private async recoverCreationLeases(){
-  const expired=await r(this.query,"SELECT purchase_id FROM app_private.web_purchases WHERE status='creating' AND creation_started_at<clock_timestamp()-interval '2 minutes' ORDER BY chat_id,purchase_id LIMIT 100");
+ readonly photoPanels:WebPhotoPanels;
+ constructor(private readonly query:typeof sql=sql,videos?:WebVideoAccess){this.videos=videos??new WebVideoAccess(query);this.photoPanels=new WebPhotoPanels(query);}
+ private async lockPurchaseChat(db:DB,id:string){
+  // Telegram's existing shared ledger locks chat first. Account-only invoices
+  // have no chat row; both paths serialize entitlement updates on their owner.
+  await r(db,"SELECT c.chat_id FROM public.chat_state c JOIN app_private.web_purchases p ON p.chat_id=c.chat_id WHERE p.purchase_id=$1::uuid FOR UPDATE OF c",[id]);
+  await r(db,"SELECT u.user_id FROM public.users u JOIN app_private.web_purchases p ON p.user_id=u.user_id WHERE p.purchase_id=$1::uuid FOR UPDATE OF u",[id]);
+ }
+ private async recoverCreationLeases(userId?:string,id?:string){
+  const expired=await r(this.query,"SELECT purchase_id FROM app_private.web_purchases WHERE status='creating' AND creation_started_at<clock_timestamp()-interval '2 minutes' AND ($1::text IS NULL OR user_id=$1) AND ($2::uuid IS NULL OR purchase_id=$2::uuid) ORDER BY chat_id,purchase_id LIMIT 100",[userId??null,id??null]);
   for(const p of expired)await this.query.begin(async tx=>{await this.lockPurchaseChat(tx,p.purchase_id);await r(tx,"UPDATE app_private.web_purchases SET status='creation_uncertain',error_code='creation_lease_expired',updated_at=clock_timestamp() WHERE purchase_id=$1::uuid AND status='creating' AND creation_started_at<clock_timestamp()-interval '2 minutes'",[p.purchase_id]);});
  }
  private async context(db:DB,userId:string,code:string,lock=false):Promise<WebCommerceContext>{
@@ -54,10 +63,10 @@ export class WebCommerceRepository {
   return {...row,chat_id:Number(row.chat_id),character_i:Number(row.character_i),turn_no:Number(row.turn_no),scene_turn_no:row.scene_turn_no==null?null:Number(row.scene_turn_no)} as WebCommerceContext;
  }
  async getContext(userId:string,code:string){return this.context(this.query,userId,code);}
- async getOwned(userId:string,id:string):Promise<WebPurchase>{await this.recoverCreationLeases();const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE user_id=$1 AND purchase_id=$2::uuid",[userId,id]))[0];if(!row)throw new WebError(404,'purchase_not_found');return asPurchase(row);}
+ async getOwned(userId:string,id:string):Promise<WebPurchase>{await this.recoverCreationLeases(userId,id);const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE user_id=$1 AND purchase_id=$2::uuid",[userId,id]))[0];if(!row)throw new WebError(404,'purchase_not_found');return asPurchase(row);}
  async getById(id:string):Promise<WebPurchase|null>{const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE purchase_id=$1::uuid",[id]))[0];return row?asPurchase(row):null;}
  async pendingFulfillments(limit=50):Promise<WebPurchase[]>{await this.recoverCreationLeases();return (await r(this.query,"SELECT * FROM app_private.web_purchases WHERE status IN ('paid','fulfillment_pending') AND error_code IS DISTINCT FROM 'duplicate_payment_requires_review' ORDER BY updated_at LIMIT $1",[Math.min(100,Math.max(1,limit))])).map(asPurchase);}
- async findByClient(userId:string,clientId:string):Promise<WebPurchase|null>{await this.recoverCreationLeases();const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE user_id=$1 AND client_id=$2",[userId,clientId]))[0];return row?asPurchase(row):null;}
+ async findByClient(userId:string,clientId:string):Promise<WebPurchase|null>{const row=(await r(this.query,"SELECT p.* FROM app_private.web_purchases p JOIN public.interaction_tokens t ON t.token=p.payment_token WHERE p.user_id=$1 AND (p.client_id=$2 OR t.payload_json->'web_client_ids' ? $2)",[userId,clientId]))[0];return row?(row.status==='creating'?this.getOwned(userId,row.purchase_id):asPurchase(row)):null;}
  async getByProviderExternal(provider:string,id:string):Promise<WebPurchase|null>{const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE provider=$1 AND (external_payment_id=$2 OR external_invoice_id=$2)",[provider,id]))[0];return row?asPurchase(row):null;}
  async getEntitlements(userId:string){const columns=config.MEDIA_VIDEO_ENABLED?',subscription_tier,subscription_tier_sku':'';const row=(await r(this.query,"SELECT subscription_sku,subscription_until,entitlements_jsonb AS balances"+columns+" FROM public.users WHERE user_id=$1",[userId]))[0];if(!row)throw new WebError(401,'account_not_found');const active=Boolean(row.subscription_until&&new Date(row.subscription_until).getTime()>Date.now());const full=active&&row.subscription_tier==='full'&&row.subscription_tier_sku===row.subscription_sku;return {subscription_sku:row.subscription_sku,subscription_until:iso(row.subscription_until),balances:row.balances,subscription_active:active,subscription_tier:full?'full':'base',full_active:full};}
 
@@ -66,11 +75,24 @@ export class WebCommerceRepository {
    await r(tx,"SELECT pg_advisory_xact_lock(hashtextextended($1,0))",['web-purchase:'+userId+':'+clientId]);
    const old=(await r(tx,"SELECT * FROM app_private.web_purchases WHERE user_id=$1 AND client_id=$2",[userId,clientId]))[0];
    if(old){if(old.fingerprint!==fingerprint||old.provider!==provider)throw new WebError(409,'idempotency_conflict');return {purchase:asPurchase(old),created:false};}
-   const current=await this.context(tx,userId,quote.chat_code,true);
-   if(current.chat_id!==quote.chat_id||((quote.kind!=='subscription')&&current.scene_session_id!==quote.scene_session_id))throw new WebError(409,'stale_scene');
+   const current=quote.chat_code?await this.context(tx,userId,quote.chat_code,true):null;
+   await r(tx,"SELECT user_id FROM public.users WHERE user_id=$1 FOR UPDATE",[userId]);
+   if(!(await r(tx,"SELECT 1 FROM public.user_identities WHERE user_id=$1 AND provider='supabase'",[userId])).length)throw new WebError(401,'account_not_found');
+   // Recheck durable aliases after the owner lock: another tab may have
+   // attached this client ID and fulfilled the checkout while this call waited.
+   const alias=(await r(tx,"SELECT p.* FROM app_private.web_purchases p JOIN public.interaction_tokens t ON t.token=p.payment_token WHERE p.user_id=$1 AND (p.client_id=$2 OR t.payload_json->'web_client_ids' ? $2)",[userId,clientId]))[0];
+   if(alias){if(alias.fingerprint!==fingerprint||alias.provider!==provider)throw new WebError(409,'idempotency_conflict');return {purchase:asPurchase(alias),created:false};}
+   // Another tab may have created the same checkout while this one waited.
+   const same=(await r(tx,"SELECT * FROM app_private.web_purchases WHERE user_id=$1 AND fingerprint=$2 AND provider=$3 AND status IN ('created','creating','creation_uncertain','pending','paid','fulfillment_pending') ORDER BY created_at LIMIT 1 FOR UPDATE",[userId,fingerprint,provider]))[0];
+   if(same){
+    await r(tx,"UPDATE public.interaction_tokens SET payload_json=jsonb_set(payload_json,'{web_client_ids}',COALESCE(payload_json->'web_client_ids',jsonb_build_array($2::text))||jsonb_build_array($3::text),true) WHERE token=$1 AND NOT COALESCE(payload_json->'web_client_ids' ? $3,false)",[same.payment_token,same.client_id,clientId]);
+    return {purchase:asPurchase(same),created:false};
+   }
+   if(quote.kind!=='subscription'&&!current)throw new WebError(400,'chat_required');
+   if(current&&(current.chat_id!==quote.chat_id||(quote.kind!=='subscription'&&current.scene_session_id!==quote.scene_session_id)))throw new WebError(409,'stale_scene');
    const [account]=await r(tx,"SELECT age_confirmed_at,terms_accepted_at FROM public.users WHERE user_id=$1",[userId]);
    if(!account?.age_confirmed_at||!account?.terms_accepted_at)throw new WebError(403,'consent_required');
-   if(quote.kind==='feature'){
+   if(quote.kind==='feature'&&current){
     const common=new MediaCommerceRepository(tx as unknown as typeof sql);
     const state=await common.loadSceneAccessStatus({chat_id:current.chat_id,scene_session_id:current.scene_session_id});
     const credits=await common.loadFreeCredits(current.chat_id);
@@ -89,16 +111,19 @@ export class WebCommerceRepository {
    if(amount.includes('.')||Number(amount)>2147483647||compareDecimals(amount,'0')<=0)throw new WebError(400,'invalid_order_amount');
    const id=randomUUID(),token='web_inv_'+randomUUID();
    const action=quote.kind==='subscription'?'subscription_payment':quote.kind==='photo'?'photo_payment':'feature_payment';
-   const payload={...(quote.payload??{}),source:'web',idempotency_key:id,chat_id:quote.chat_id,scene_session_id:quote.scene_session_id,turn_no:quote.turn_no,scene_turn_no:quote.scene_turn_no,character_i:quote.character_i,scene_mode:quote.scene_mode,subscription_days:quote.subscription_days??null,subscription_sku:quote.kind==='subscription'?quote.sku:null,feature_key:quote.feature_key??null,media_signature:quote.media_signature??null,target_message_id:quote.panel_id??null,photo_message_id:quote.panel_id??null,photo_uuid:quote.media_id??null,video_id:quote.video_id??null,photo_sku:quote.kind==='photo'?quote.sku:null};
-   await r(tx,"SELECT * FROM public.media_upsert_invoice_token($1,'invoice_payload',$2,$3,$4,$5::smallint,$6::text::jsonb,$7,$8,$9,$10::integer,$11,$12::integer,NULL,NULL,NULL,NULL,$13,$14,$13,$13)",[token,quote.chat_id,quote.scene_session_id,quote.turn_no,quote.scene_turn_no,JSON.stringify(payload),action,quote.sku,provider,amount,quote.currency.toUpperCase(),quote.amount_xtr,quote.title,quote.description]);
+   const payload={...(quote.payload??{}),source:'web',user_id:userId,purchase_id:id,web_client_ids:[clientId],idempotency_key:id,chat_id:quote.chat_id,scene_session_id:quote.scene_session_id,turn_no:quote.turn_no,scene_turn_no:quote.scene_turn_no,character_i:quote.character_i,scene_mode:quote.scene_mode,subscription_days:quote.subscription_days??null,subscription_sku:quote.kind==='subscription'?quote.sku:null,feature_key:quote.feature_key??null,media_signature:quote.media_signature??null,target_message_id:quote.panel_id??null,photo_message_id:quote.panel_id??null,photo_uuid:quote.media_id??null,video_id:quote.video_id??null,photo_sku:quote.kind==='photo'?quote.sku:null};
+   if(quote.chat_id==null){
+    if(quote.kind!=='subscription')throw new WebError(400,'chat_required');
+    await r(tx,"INSERT INTO public.interaction_tokens(token,kind,chat_id,payload_json,action_kind,sku,payment_source,amount,currency,amount_xtr,invoice_title,invoice_description,invoice_label,invoice_button_text) VALUES($1,'invoice_payload',NULL,$2::text::jsonb,'subscription_payment',$3,$4,$5::integer,$6,$7::integer,$8,$9,$8,$8)",[token,JSON.stringify(payload),quote.sku,provider,amount,quote.currency.toUpperCase(),quote.amount_xtr,quote.title,quote.description]);
+   }else await r(tx,"SELECT * FROM public.media_upsert_invoice_token($1,'invoice_payload',$2,$3,$4,$5::smallint,$6::text::jsonb,$7,$8,$9,$10::integer,$11,$12::integer,NULL,NULL,NULL,NULL,$13,$14,$13,$13)",[token,quote.chat_id,quote.scene_session_id,quote.turn_no,quote.scene_turn_no,JSON.stringify(payload),action,quote.sku,provider,amount,quote.currency.toUpperCase(),quote.amount_xtr,quote.title,quote.description]);
    const row=(await r(tx,"INSERT INTO app_private.web_purchases(purchase_id,user_id,chat_id,client_id,fingerprint,provider,payment_token,quote) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8::text::jsonb) RETURNING *",[id,userId,quote.chat_id,clientId,fingerprint,provider,token,JSON.stringify({...quote,amount,currency:quote.currency.toUpperCase()})]))[0]!;
    return {purchase:asPurchase(row),created:true};
   });
  }
  async redeemFreeFeature(userId:string,quote:WebCommerceQuote,clientId:string):Promise<{available:boolean;fulfilled:boolean;feature_key:string;operation_id?:string;reason?:string}>{
-  if(quote.kind!=='feature'||!quote.feature_key)return {available:false,fulfilled:false,feature_key:quote.feature_key??''};
+  if(quote.kind!=='feature'||!quote.feature_key||!quote.chat_code)return {available:false,fulfilled:false,feature_key:quote.feature_key??''};
   return this.query.begin(async tx=>{
-   const c=await this.context(tx,userId,quote.chat_code,true);
+   const c=await this.context(tx,userId,quote.chat_code!,true);
    const common=new MediaCommerceRepository(tx as unknown as typeof sql);
    const feature=quote.feature_key!;
    if(!['scene_unlock','fast_scene_skip'].includes(feature))return {available:false,fulfilled:false,feature_key:feature};
@@ -165,7 +190,10 @@ export class WebCommerceRepository {
    await r(tx,"UPDATE public.interaction_tokens SET external_payment_id=$2 WHERE token=$1 AND (external_payment_id IS NULL OR external_payment_id=$2)",[p.payment_token,payment.external_payment_id]);
    if(payment.status==='paid'){
     const action=quote.kind==='subscription'?'subscription_payment':quote.kind==='photo'?'photo_payment':'feature_payment';
-    await r(tx,"SELECT * FROM public.media_mark_invoice_paid($1,$2,'invoice_payload',$3,$4,NULL,NULL,$5,$6,$7::integer,NULL)",[p.payment_token,p.chat_id,action,p.provider,payment.external_payment_id,quote.currency,quote.amount]);
+    if(p.chat_id==null){
+     if(quote.kind!=='subscription')throw new WebError(409,'invalid_subscription_snapshot');
+     await r(tx,"UPDATE public.interaction_tokens SET status=CASE WHEN status='fulfilled' THEN status ELSE 'paid' END WHERE token=$1 AND kind='invoice_payload' AND action_kind='subscription_payment' AND payload_json->>'user_id'=$2 AND payload_json->>'purchase_id'=$3 AND payment_source=$4 AND amount=$5::integer AND currency=$6",[p.payment_token,p.user_id,id,p.provider,quote.amount,quote.currency]);
+    }else await r(tx,"SELECT * FROM public.media_mark_invoice_paid($1,$2,'invoice_payload',$3,$4,NULL,NULL,$5,$6,$7::integer,NULL)",[p.payment_token,p.chat_id,action,p.provider,payment.external_payment_id,quote.currency,quote.amount]);
     const token=(await r(tx,"SELECT status FROM public.interaction_tokens WHERE token=$1",[p.payment_token]))[0];
     if(!token||!['paid','fulfilled'].includes(token.status))throw new WebError(409,'payment_confirmation_conflict');
     await r(tx,"UPDATE app_private.web_purchases SET status=CASE WHEN status='fulfilled' THEN status ELSE 'paid' END,error_code=NULL WHERE purchase_id=$1::uuid",[id]);
@@ -188,9 +216,9 @@ export class WebCommerceRepository {
    await r(tx,"SELECT set_config('app_private.media_source','web',true)");
    if(q.kind==='subscription'){
     if(!q.subscription_days||q.subscription_days<=0)throw new WebError(409,'invalid_subscription_snapshot');
-    if(q.payload?.subscription_tier==='full'){
-     await r(tx,'SELECT public.media_activate_full_subscription($1,$2,$3,$4::integer,$5)',[p.payment_token,p.chat_id,q.sku,q.subscription_days,q.payload.subscription_change??'renew']);
-    }else await common.activateSubscription({payment_token:p.payment_token,chat_id:Number(p.chat_id),subscription_sku:q.sku,subscription_days:q.subscription_days});
+    if(q.payload?.account_subscription===true||p.chat_id==null){await r(tx,'SELECT app_private.web_activate_account_subscription($1::uuid)',[id]);}
+    else if(q.payload?.subscription_tier==='full')await r(tx,'SELECT public.media_activate_full_subscription($1,$2,$3,$4::integer,$5)',[p.payment_token,p.chat_id,q.sku,q.subscription_days,q.payload.subscription_change??'renew']);
+    else await common.activateSubscription({payment_token:p.payment_token,chat_id:Number(p.chat_id),subscription_sku:q.sku,subscription_days:q.subscription_days});
    }else if(q.kind==='feature'&&(q.feature_key==='video_unlock'||q.feature_key==='video_pass')){
     if(q.feature_key==='video_pass')await r(tx,'SELECT public.media_activate_video_pass($1,$2)',[p.payment_token,p.chat_id]);
     if(q.video_id){
@@ -237,6 +265,12 @@ export class WebCommerceRepository {
   const row=(await r(this.query,"SELECT * FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2 AND scene_session_id=$3 AND media_id=$4::uuid",[userId,context.chat_id,context.scene_session_id,mediaId]))[0];
   return row?{...context,...row,chat_id:Number(row.chat_id),turn_no:Number(row.turn_no),scene_turn_no:row.scene_turn_no==null?null:Number(row.scene_turn_no),panel_id:Number(row.panel_id),media_kind:'photo'} as WebMediaOffer:null;
  }
+ async getOffers(userId:string,code:string,mediaIds:string[]):Promise<WebMediaOffer[]>{
+  if(!mediaIds.length)return [];
+  const context=await this.context(this.query,userId,code);
+  const result=await this.query.unsafe<Row[]>("SELECT * FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2 AND scene_session_id=$3 AND media_id=ANY($4::uuid[])",[userId,context.chat_id,context.scene_session_id,mediaIds]);
+  return result.map(row=>({...context,...row,chat_id:Number(row.chat_id),turn_no:Number(row.turn_no),scene_turn_no:row.scene_turn_no==null?null:Number(row.scene_turn_no),panel_id:Number(row.panel_id),media_kind:'photo'}) as WebMediaOffer);
+ }
  private async isUnlocked(db:DB,userId:string,mediaId:string):Promise<boolean>{
   return (await r(db,"SELECT 1 FROM public.chat_messages m JOIN public.chat_state c USING(chat_id) WHERE c.user_id=$1 AND m.event_type=ANY($2::text[]) AND m.payload_json->>'uuid'=$3 LIMIT 1",[userId,photoEvents,mediaId])).length>0;
  }
@@ -272,11 +306,17 @@ export class WebCommerceRepository {
  }
  async gallery(userId:string,code:string){
   const c=await this.context(this.query,userId,code);
-  const owned=await r(this.query,"SELECT DISTINCT m.payload_json->>'uuid' AS media_id FROM public.chat_messages m JOIN public.chat_state s USING(chat_id) JOIN public.media_catalog mc ON mc.uuid::text=m.payload_json->>'uuid' WHERE s.user_id=$1 AND mc.character_i=$2 AND m.event_type=ANY($3::text[])",[userId,c.character_i,photoEvents]);
-  const common=new MediaCommerceRepository(this.query);
-  const unlocked=await Promise.all(owned.map(async item=>({media_id:item.media_id,media_kind:'photo',unlocked:true,photo_url:(await common.loadPhotoByUuid(item.media_id))?.photo_url??null})));
-  const offers=await r(this.query,"SELECT media_id::text,sku,scene_session_id,conditions FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2 AND scene_session_id=$3 ORDER BY created_at",[userId,c.chat_id,c.scene_session_id]);
+  const owned=await r(this.query,"SELECT DISTINCT ON (m.payload_json->>'uuid') m.payload_json->>'uuid' AS media_id,m.created_at::text,m.scene_session_id FROM public.chat_messages m JOIN public.chat_state s USING(chat_id) JOIN public.media_catalog mc ON mc.uuid::text=m.payload_json->>'uuid' WHERE s.user_id=$1 AND mc.character_i=$2 AND m.event_type=ANY($3::text[]) ORDER BY m.payload_json->>'uuid',m.created_at,m.id",[userId,c.character_i,photoEvents]);
+  const mediaById=await new MediaCatalogRepository(this.query).loadPhotosByUuid(owned.map(item=>String(item.media_id)));
+  const panelOffers=await r(this.query,"SELECT DISTINCT media_id::text FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2",[userId,c.chat_id]);
+  const panelIds=new Set(panelOffers.map(item=>item.media_id));
+  const unlocked=owned.map(item=>({media_id:item.media_id,...(panelIds.has(item.media_id)?{panel_media_id:item.media_id}:{}),media_kind:'photo',unlocked:true,created_at:iso(item.created_at),scene_session_id:item.scene_session_id,photo_url:mediaById.get(item.media_id)?.photo_url??null}));
+  const offers=await r(this.query,"SELECT media_id::text,sku,scene_session_id,created_at::text,conditions FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2 AND scene_session_id=$3 ORDER BY created_at",[userId,c.chat_id,c.scene_session_id]);
   const ownedIds=new Set(owned.map(item=>item.media_id));
-  return {media:[...unlocked,...offers.filter(item=>!ownedIds.has(item.media_id)).map(item=>({...item,media_id:String(item.media_id),media_kind:'photo',unlocked:false}))]};
+  // In-flight deliveries must survive leaving a scene and closing the browser.
+  // Reading their IDs does not claim or re-send them; the existing access route
+  // performs that operation with the original delivery's claim token.
+  const deliveries=await r(this.query,"SELECT * FROM app_private.video_deliveries WHERE user_id=$1 AND chat_id=$2 AND source='web' AND status<>'delivered' ORDER BY created_at,delivery_id",[userId,c.chat_id]);
+  return {media:[...unlocked,...offers.filter(item=>!ownedIds.has(item.media_id)).map(item=>({...item,media_id:String(item.media_id),panel_media_id:String(item.media_id),media_kind:'photo',unlocked:false}))],video_deliveries:deliveries.map(row=>this.videos.publicDelivery(row))};
  }
 }

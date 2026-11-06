@@ -104,6 +104,14 @@ export class MediaCatalogRepository {
     return this.hydrateCatalogRow({ ...row, uuid: row.uuid });
   }
 
+  /** Call only with IDs whose access has already been checked by the caller. */
+  async loadPhotosByUuid(uuids: string[]): Promise<Map<string, MediaCatalogPhoto>> {
+    if(!uuids.length)return new Map();
+    const result=await this.query<CatalogRow[]>`SELECT uuid::text AS uuid,bucket_name,storage_path,NULL::integer AS sort_order
+      FROM public.media_catalog WHERE uuid=ANY(${[...new Set(uuids.map(id=>id.toLowerCase()))]}::text[])`;
+    return new Map(result.filter(row=>row.uuid).map(row=>[row.uuid!,this.hydrateCatalogRow({...row,uuid:row.uuid!})]));
+  }
+
   async loadMediaContext(input: LoadMediaContextInput): Promise<MediaContext> {
     const rows = await this.query<MediaContext[]>`
       SELECT *

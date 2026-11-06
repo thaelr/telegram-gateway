@@ -8,6 +8,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { config } from "./config.js";
 import { sql } from "./db.js";
+import { safeErrorCode, safeLogSerializers } from './safeLogging.js';
 import { ChatAccessRepository } from "./chatAccessRepository.js";
 import { AccessDecisionService } from "./accessDecisionService.js";
 import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
@@ -26,6 +27,11 @@ import { SupabaseAuthVerifier } from "./web/auth.js";
 import { registerWebRoutes, type WebRoutesOptions } from "./web/routes.js";
 import { WebRepository } from "./web/repository.js";
 import { createWebDeliveryTransport, WebDeliveryWorker } from "./web/delivery.js";
+import { registerWebCors } from './web/cors.js';
+import { registerWebFeatures } from './web/features.js';
+import { WebFeaturesRepository } from './web/featuresRepository.js';
+import type { WebFeaturesRepositoryContract } from './web/featuresTypes.js';
+import { TelegramLoginVerifier, type TelegramProofVerifier } from './web/telegramLink.js';
 import {
   nonNegativeIntegerInputSchema,
   positiveIntegerInputSchema,
@@ -115,7 +121,7 @@ type BuildAppOptions = {
   localizationService?: LocalizationService;
   telegramTransport?: TelegramNavigationTransport;
   telegramNavigationRenderer?: NavigationRenderer;
-  web?: Omit<WebRoutesOptions, "localization"> & { localization?: LocalizationService; deliveryWorker?: Pick<WebDeliveryWorker, "start" | "stop">; commerce?: WebCommerceService };
+  web?: Omit<WebRoutesOptions, "localization"> & { localization?: LocalizationService; deliveryWorker?: Pick<WebDeliveryWorker, "start" | "stop">; commerce?: WebCommerceService; features?: WebFeaturesRepositoryContract; telegramVerifier?: TelegramProofVerifier };
   logger?: boolean;
 };
 
@@ -143,7 +149,14 @@ function isCharacterNavigationCallback(callbackData: string | null | undefined):
 
 export function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
-    logger: options.logger ?? true,
+    logger: options.logger === false ? false : { serializers: safeLogSerializers },
+  });
+  app.setErrorHandler((error, request, reply) => {
+    const candidate = error && typeof error === 'object' && 'statusCode' in error ? Number(error.statusCode) : 500;
+    const status = Number.isInteger(candidate) && candidate >= 400 && candidate < 500 ? candidate : 500;
+    request.log.error({ request_id: request.id, code: safeErrorCode(error) }, 'HTTP request failed');
+    return reply.status(status).send({ statusCode: status, error: status < 500 ? 'Bad Request' : 'Internal Server Error',
+      message: status < 500 ? 'Invalid request' : 'Request failed', request_id: request.id });
   });
 
   const localizationService = options.localizationService
@@ -226,7 +239,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       && isCharacterNavigationCallback(parsed.data.callback_data)
       ? telegramTransport.answerCallbackQuery(parsed.data.callback_query_id).catch((error) => {
         request.log.warn(
-          { err: error, callback_query_id: parsed.data.callback_query_id },
+          { request_id: request.id, code: safeErrorCode(error) },
           "Telegram callback acknowledgement failed",
         );
       })
@@ -303,7 +316,6 @@ export function buildApp(options: BuildAppOptions = {}) {
           request_id: request.id,
           operation,
           code,
-          err: error,
         },
         "MediaCommerce operation failed",
       );
@@ -533,16 +545,22 @@ export function buildApp(options: BuildAppOptions = {}) {
     });
     web = {
       repository,
-      authenticator: new SupabaseAuthVerifier(config.SUPABASE_URL!, config.SUPABASE_PUBLISHABLE_KEY!),
+      authenticator: new SupabaseAuthVerifier(config.SUPABASE_URL!, config.SUPABASE_PUBLISHABLE_KEY!, fetch, 10_000, config.SUPABASE_TELEGRAM_PROVIDER),
       localization: localizationService,
       deliveryWorker: worker,
       commerce: createWebCommerce(repository, localizationService),
+      features: new WebFeaturesRepository(repository),
     };
   }
   if (web) {
+    registerWebCors(app, config.WEB_ALLOWED_ORIGINS);
     registerWebRoutes(app, {
       ...web,
       localization: web.localization ?? localizationService,
+    });
+    if (web.features) registerWebFeatures(app, {
+      ...web, features: web.features, telegramClientId: config.TELEGRAM_LOGIN_CLIENT_ID,
+      telegramVerifier: web.telegramVerifier ?? new TelegramLoginVerifier(config.TELEGRAM_LOGIN_CLIENT_ID),
     });
     if (web.commerce) {
       registerWebCommerceRoutes(app, { ...web, commerce: web.commerce });
@@ -580,7 +598,7 @@ if (process.env.NODE_ENV !== "test") {
       port: config.PORT,
     })
     .catch((error) => {
-      app.log.error(error);
+      app.log.error({ code: safeErrorCode(error) }, 'Gateway startup failed');
       process.exit(1);
     });
 }

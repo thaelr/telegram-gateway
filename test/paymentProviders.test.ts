@@ -41,3 +41,9 @@ test("fourth test provider is registered and used without modifying product or f
   assert.equal((await adapter.getStatus!(checkout.external_id, input)).status, "paid");
   assert.throws(() => registry.register(testProvider), /duplicate/u);
 });
+
+test('SBP account checkout has real account metadata and no fake chat',async()=>{
+ let sent:unknown;const provider=new SbpProvider({async createPayment(value){sent=value;return {external_payment_id:'account-payment',checkout_url:'https://example.invalid/pay',provider_expires_at:null};},async getTransactionStatus(){return 'CONFIRMED';}});
+ await provider.create({...input,chat_id:undefined,user_id:'abcd1234'});assert.deepEqual(sent,{token:'attempt-1',description:input.description,amount_rub:123,metadata:{order_id:'order-1',attempt_id:'attempt-1',accountUserId:'abcd1234'}});
+ await assert.rejects(provider.create({...input,chat_id:undefined,user_id:undefined}),{code:'invalid_sbp_context'});
+});

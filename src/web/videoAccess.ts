@@ -19,6 +19,7 @@ export const WEB_VIDEO_ACCESS_SECONDS = 120;
 export type WebVideoContext = {
  video: { video_id: string; bucket_name: string; storage_path: string } | null;
  full_active: boolean; video_pass_active: boolean; panel_delivered: boolean; scene_active: boolean;
+ delivery?: Row | null;
 };
 export type VideoPhotoContext = {chat_id: number; scene_session_id: string | null; character_i: number; media_signature: string; panel_id: number};
 
@@ -28,6 +29,12 @@ export class WebVideoAccess {
  async context(photo: VideoPhotoContext, db: DB = this.db): Promise<WebVideoContext> {
   const [row] = await query(db, 'SELECT public.media_video_context($1,$2,$3::integer,$4,$5) AS result', [photo.chat_id, photo.scene_session_id, photo.character_i, photo.media_signature, photo.panel_id]);
   return row!.result as WebVideoContext;
+ }
+ async contexts(photos:Array<VideoPhotoContext&{media_id:string}>):Promise<Map<string,WebVideoContext>>{
+  if(!photos.length)return new Map();
+  const result=await query(this.db,`SELECT p.media_id,public.media_video_context(p.chat_id,p.scene_session_id,p.character_i,p.media_signature,p.panel_id) AS result
+    FROM jsonb_to_recordset($1::text::jsonb) AS p(media_id text,chat_id bigint,scene_session_id text,character_i integer,media_signature text,panel_id bigint)`,[JSON.stringify(photos)]);
+  return new Map(result.map(row=>[row.media_id,row.result as WebVideoContext]));
  }
  async prepare(request: Record<string, unknown>, db: DB = this.db): Promise<Row> {
   const [row] = await query(db, 'SELECT public.media_prepare_video_delivery($1::text::jsonb) AS result', [JSON.stringify({...request, source: 'web'})]);
@@ -42,7 +49,7 @@ export class WebVideoAccess {
   return (await query(this.db, "SELECT * FROM app_private.video_deliveries WHERE user_id=$1 AND request_key=$2 AND source='web'", [userId, key]))[0] ?? null;
  }
  async owned(userId: string, id: string): Promise<Row> {
-  const row = (await query(this.db, "SELECT * FROM app_private.video_deliveries WHERE user_id=$1 AND delivery_id=$2::uuid AND source='web'", [userId, id]))[0];
+  const row = (await query(this.db, "SELECT d.* FROM app_private.video_deliveries d JOIN public.chat_state c ON c.chat_id=d.chat_id AND c.user_id=$1 WHERE d.user_id=$1 AND d.delivery_id=$2::uuid AND (d.source='web' OR d.status='delivered')", [userId, id]))[0];
   if (!row) throw new WebError(404, 'video_delivery_not_found');
   return row;
  }
@@ -73,10 +80,10 @@ export class WebVideoAccess {
   return {...this.publicDelivery(delivery), video_url: url, expires_at: new Date(this.now() + WEB_VIDEO_ACCESS_SECONDS * 1000).toISOString()};
  }
  private async completedAccess(delivery: Row) {
-  // A lost HTTP response can be recovered inside the original short window only.
-  const expires = new Date(String(delivery.delivered_at)).getTime() + WEB_VIDEO_ACCESS_SECONDS * 1000;
-  const seconds = Math.floor((expires - this.now()) / 1000);
-  if (!Number.isFinite(seconds) || seconds <= 0) throw new WebError(410, 'video_delivery_expired');
+  // Delivery is permanent history; only its technical Storage URL expires.
+  // Ownership was verified above. No subscription check, claim or new purchase.
+  const seconds = WEB_VIDEO_ACCESS_SECONDS;
+  const expires = this.now() + seconds * 1000;
   let url:string;
   try {url = await this.signer(delivery.bucket_name, delivery.storage_path, seconds);}
   catch {throw new WebError(503,'video_delivery_retryable');}

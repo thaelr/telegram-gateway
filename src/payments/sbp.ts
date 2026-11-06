@@ -2,7 +2,7 @@ import { config } from "../config.js";
 
 export type CreateSbpPaymentInput = {
   token: string;
-  chat_id: number;
+  chat_id?: number;
   description: string;
   amount_rub: number;
   metadata?: Record<string, unknown>;
@@ -126,7 +126,7 @@ export class SbpPaymentAdapter implements SbpPaymentClient {
           failedUrl: config.SBP_FAILED_URL,
           payload: input.token,
           metadata: {
-            userId: input.chat_id,
+            ...(input.chat_id==null?{}:{userId:input.chat_id}),
             ...(input.metadata ?? {}),
           },
         }),

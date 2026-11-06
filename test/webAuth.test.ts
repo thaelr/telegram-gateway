@@ -52,3 +52,45 @@ test("web auth fails closed for missing, expired, malformed and unavailable auth
 test("web auth refuses non-HTTPS project endpoints", () => {
   assert.throws(() => new SupabaseAuthVerifier("http://project.supabase.co", "key"), /HTTPS/u);
 });
+
+const customProvider = 'custom:telegram-test';
+function telegramAuth(body: unknown, provider = customProvider) {
+  return new SupabaseAuthVerifier('https://project.supabase.co', 'public-test',
+    mockFetch(async () => response(body)), 10_000, provider);
+}
+const telegramUser = (claims: Record<string, unknown> = { id: 987654321 }) => ({
+  id, is_anonymous: false, app_metadata: { provider: customProvider },
+  identities: [{ provider: customProvider, user_id: id, identity_data: {
+    iss: 'https://oauth.telegram.org', sub: '1234123412341234123', custom_claims: claims,
+  } }],
+});
+
+test('Telegram PKCE uses the provider-owned numeric profile id, never the opaque subject', async () => {
+  for (const value of [987654321, '987654321']) {
+    const identity = await telegramAuth(telegramUser({ id: value })).verify('Bearer verified.session');
+    assert.equal(identity.auth_user_id, id);
+    assert.equal(identity.verified_telegram_id, '987654321');
+    assert.equal(identity.is_anonymous, false);
+  }
+});
+
+test('Telegram rejects forged metadata, mismatched issuer/user/provider and ambiguous linked identities', async () => {
+  const missing = telegramUser();
+  missing.identities = [];
+  await assert.rejects(telegramAuth({ ...missing, user_metadata: { telegram_id: 987654321, custom_claims: { id: 987654321 } } }).verify('Bearer session'), { code: 'telegram_identity_unavailable' });
+  const wrongIssuer = telegramUser(); wrongIssuer.identities[0]!.identity_data.iss = 'https://other.example';
+  await assert.rejects(telegramAuth(wrongIssuer).verify('Bearer session'), { code: 'invalid_telegram_identity' });
+  const wrongUser = telegramUser(); wrongUser.identities[0]!.user_id = '22222222-2222-4222-8222-222222222222';
+  await assert.rejects(telegramAuth(wrongUser).verify('Bearer session'), { code: 'invalid_telegram_identity' });
+  await assert.rejects(telegramAuth(telegramUser(), 'custom:other-provider').verify('Bearer session'), { code: 'auth_provider_not_supported' });
+  await assert.rejects(telegramAuth(telegramUser(), '').verify('Bearer session'), { code: 'auth_provider_not_supported' });
+  const ambiguous = telegramUser(); ambiguous.identities.push(telegramUser({ id: 123456789 }).identities[0]!);
+  await assert.rejects(telegramAuth(ambiguous).verify('Bearer session'), { code: 'invalid_telegram_identity' });
+});
+
+test('Telegram missing claim passthrough is recoverable and invalid numeric IDs fail closed', async () => {
+  await assert.rejects(telegramAuth(telegramUser({})).verify('Bearer session'), { code: 'telegram_identity_unavailable' });
+  for (const value of [0, -1, 1.5, 4503599627370496, '4503599627370496', Number.MAX_SAFE_INTEGER + 1, '00123', '1e8', '123abc', null, {}]) {
+    await assert.rejects(telegramAuth(telegramUser({ id: value })).verify('Bearer session'), { code: 'invalid_telegram_identity' });
+  }
+});

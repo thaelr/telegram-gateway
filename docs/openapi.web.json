@@ -2,12 +2,12 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Midnight Persona Web API",
-    "version": "2.1.0",
+    "version": "3.1",
     "description": "Supabase-authenticated Gateway and Web Commerce. Responses contain public account/chat data only. Browser sessions use standard Supabase Google OAuth/Anonymous Auth and refresh. Authenticated routes send Cache-Control: no-store. Protected n8n server delivery never includes bearer tokens. NOWPayments server callbacks use IPN signatures. Video commerce extends the same purchases and account subscriptions. Video URLs are short-lived and issued only through an owned delivery operation."
   },
   "servers": [
     {
-      "url": "https://gateway.example.com"
+      "url": "/"
     }
   ],
   "paths": {
@@ -52,7 +52,7 @@
             }
           },
           "403": {
-            "description": "Consent required or unsupported login provider",
+            "description": "Consent or provider rejection, including invalid_telegram_identity for inconsistent trusted Telegram claims",
             "content": {
               "application/json": {
                 "schema": {
@@ -72,7 +72,7 @@
             }
           },
           "409": {
-            "description": "Bootstrap required or conflicting client_message_id",
+            "description": "subscription_conflict, telegram_identity_conflict, telegram_account_conflict, identity_conflict, account_busy or bootstrap conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -102,7 +102,7 @@
             }
           },
           "503": {
-            "description": "Authentication unavailable",
+            "description": "Authentication unavailable or verified Telegram login missing trusted numeric ID (telegram_identity_unavailable)",
             "content": {
               "application/json": {
                 "schema": {
@@ -344,10 +344,12 @@
                   },
                   "language": {
                     "type": "string",
-                    "enum": [
-                      "ru",
-                      "en"
-                    ]
+                    "pattern": "^[a-z][a-z0-9-]*$",
+                    "description": "Must be enabled by the server language metadata. Explicit selection is persisted."
+                  },
+                  "profile_text": {
+                    "type": "string",
+                    "maxLength": 2000
                   }
                 },
                 "required": [],
@@ -1333,6 +1335,14 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128
+                  },
+                  "scene_mode": {
+                    "type": "string",
+                    "enum": [
+                      "fast",
+                      "roleplay"
+                    ],
+                    "description": "Omitted preserves the current mode. A client_message_id is bound to its original mode; a conflicting retry returns 409."
                   }
                 },
                 "required": [
@@ -1681,7 +1691,7 @@
             }
           },
           "409": {
-            "description": "Bootstrap required or conflicting client_message_id",
+            "description": "event_cursor_gap (retained journal no longer covers cursor), bootstrap_required, or identity conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -1737,7 +1747,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "pattern": "^\\d{1,20}$"
+              "pattern": "^\\d{1,19}$"
             },
             "description": "Durable event cursor, not a turn number or timestamp"
           },
@@ -1750,9 +1760,18 @@
               "minimum": 1,
               "maximum": 100
             }
+          },
+          {
+            "name": "operation_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of up to 50 operation UUIDs already known to this client; recovery is scoped to the authenticated owner and chat."
           }
         ],
-        "description": "Reuse the returned cursor for the next poll. A result persisted late receives a later event cursor, even if its logical turn is older."
+        "description": "Reuse the returned cursor for the next poll. A result persisted late receives a later event cursor, even if its logical turn is older. On 409 event_cursor_gap, refresh messages and media, take history.event_cursor, then poll with operation_ids to recover final statuses without re-submitting successful actions."
       }
     },
     "/web/chats/{chat_code}/continuation": {
@@ -1982,7 +2001,7 @@
             }
           }
         ],
-        "description": "Without chat_code, pricing_requires_chat is true. Pass an owned chat to resolve its account experiment overrides before displaying a final price. Products without a configured RUB price have no payable Web provider. Stars is unavailable on Web."
+        "description": "Account subscription prices and entitlement are available without a chat. requires_chat identifies scene/media products which need a real owned chat for final pricing. Stars remains Telegram-only."
       }
     },
     "/web/commerce/entitlements": {
@@ -2139,7 +2158,7 @@
             }
           },
           "402": {
-            "description": "Payment required; select a configured Web provider",
+            "description": "Payment required: no free right was available and no payment provider was supplied",
             "content": {
               "application/json": {
                 "schema": {
@@ -2242,7 +2261,8 @@
                   },
                   "provider": {
                     "type": "string",
-                    "pattern": "^[a-z][a-z0-9_]{0,31}$"
+                    "pattern": "^[a-z][a-z0-9_]{0,31}$",
+                    "description": "Optional for redemption of an existing free right. Required for paid checkout; valid options come from the server catalog. No Telegram Stars on Web."
                   },
                   "media_id": {
                     "type": "string",
@@ -2259,11 +2279,10 @@
                 },
                 "required": [
                   "client_message_id",
-                  "chat_code",
-                  "sku",
-                  "provider"
+                  "sku"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "description": "chat_code is optional only for account subscriptions. Scene/media features require a real owned chat. Reuse client_message_id after uncertain outcomes. Concurrent equivalent active checkouts are reused server-side."
               }
             }
           }
@@ -3127,7 +3146,7 @@
     "/web/commerce/video-deliveries/{delivery_id}": {
       "get": {
         "operationId": "getVideoDeliveryAccess",
-        "summary": "Claim or recover short-lived access to an owned delivery",
+        "summary": "Read or refresh access to the authenticated account’s original video delivery",
         "security": [
           {
             "supabaseBearer": []
@@ -3151,6 +3170,1210 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/VideoDelivery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Video payment required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Consent or access required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Scene, panel, or operation conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retryable delivery failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/localizations": {
+      "get": {
+        "operationId": "listWebLanguages",
+        "summary": "Public enabled language metadata (60-second cache)",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Enabled languages in server order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "languages": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/LanguageOption"
+                      }
+                    }
+                  },
+                  "required": [
+                    "languages"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/localizations/{locale}/{namespace}": {
+      "get": {
+        "operationId": "getWebLocalization",
+        "summary": "Public localization dictionary with existing server fallback (60-second cache)",
+        "security": [],
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "telegram",
+                "web",
+                "commerce"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dictionary without internal runtime metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "locale": {
+                      "type": "string"
+                    },
+                    "namespace": {
+                      "type": "string"
+                    },
+                    "copy": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "required": [
+                    "locale",
+                    "namespace",
+                    "copy"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Disabled locale or internal namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/publications": {
+      "get": {
+        "operationId": "listPublications",
+        "summary": "Read actual published administration posts; empty until a real publication exists",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required consent missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bootstrap required, conflicting account, stale campaign or replay conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ]
+      }
+    },
+    "/web/voting": {
+      "get": {
+        "operationId": "getVotingCampaign",
+        "summary": "Read the current campaign and the authenticated account’s vote; null when inactive",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VotingState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required consent missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bootstrap required, conflicting account, stale campaign or replay conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/voting/{campaign_id}/vote": {
+      "post": {
+        "operationId": "castCharacterVote",
+        "summary": "Persist a vote using existing campaign candidates and constraints",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VotingState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required consent missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bootstrap required, conflicting account, stale campaign or replay conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "candidate_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "candidate_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/chat-summaries": {
+      "get": {
+        "operationId": "getChatSummaries",
+        "summary": "Read canonical last messages and persisted account-level unread counts",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "chats": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ChatSummary"
+                      }
+                    }
+                  },
+                  "required": [
+                    "chats"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required consent missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bootstrap required, conflicting account, stale campaign or replay conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/chats/{chat_code}/read": {
+      "post": {
+        "operationId": "markChatRead",
+        "summary": "Advance the read marker to a message owned by this account; older markers cannot move it backwards",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "last_read_message_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "last_read_message_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required consent missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bootstrap required, conflicting account, stale campaign or replay conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "chat_code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^c[a-z0-9]{7}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "message_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/me/telegram-link": {
+      "get": {
+        "operationId": "getTelegramLink",
+        "summary": "Read existing Telegram identity and configuration availability",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelegramLinkStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required consent missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bootstrap required, conflicting account, stale campaign or replay conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "beginTelegramLink",
+        "summary": "Issue a short-lived nonce bound to the authenticated Supabase identity",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelegramLinkChallenge"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required consent missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bootstrap required, conflicting account, stale campaign or replay conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telegram Login client is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/me/telegram-link/complete": {
+      "post": {
+        "operationId": "completeTelegramLink",
+        "summary": "Verify the Telegram Login RS256 proof and consume the bound nonce once; retain the existing account-link conflict rules",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelegramLinkResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or expired bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Required consent missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Identity/account conflict, subscription_conflict or account_busy; no partial account transfer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Telegram Login verification unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "challenge": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  },
+                  "id_token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16384
+                  }
+                },
+                "required": [
+                  "challenge",
+                  "id_token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/web/chats/{chat_code}/media/{media_id}/panel": {
+      "get": {
+        "operationId": "getPhotoPanel",
+        "summary": "Read existing owned photopanel actions and selection",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_code",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^c[a-z0-9]{7}$"
+            }
+          },
+          {
+            "in": "path",
+            "name": "media_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "current_media_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owned panel selection. URLs exist only for already unlocked photos.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhotoPanel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Video payment required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Consent or access required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Owned resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Scene, panel, or operation conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Short delivery access window expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retryable delivery failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "actPhotoPanel",
+        "summary": "Navigate unlocked panel photos or request the next existing photo offer",
+        "description": "Reuses native Media Commerce panel order and five-photo cap. Previous/next are free and expose only unlocked photos. photo_regen returns a locked offer without its URL; use existing media unlock/purchase flow for free rights, credits or payment. Original panel/scene are retained. Same client ID with different action data is rejected. Old scenes allow navigation but cannot offer new photos.",
+        "security": [
+          {
+            "supabaseBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_code",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^c[a-z0-9]{7}$"
+            }
+          },
+          {
+            "in": "path",
+            "name": "media_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "client_message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "photo_prev",
+                      "photo_next",
+                      "photo_regen"
+                    ]
+                  },
+                  "current_media_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                },
+                "required": [
+                  "client_message_id",
+                  "action"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Owned panel selection. URLs exist only for already unlocked photos.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhotoPanel"
                 }
               }
             }
@@ -3336,6 +4559,19 @@
           },
           "needs_language_selection": {
             "type": "boolean"
+          },
+          "profile_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language_confirmed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         },
         "required": [
@@ -3347,7 +4583,9 @@
           "subscription_sku",
           "subscription_until",
           "entitlements",
-          "needs_language_selection"
+          "needs_language_selection",
+          "profile_text",
+          "language_confirmed_at"
         ],
         "additionalProperties": false
       },
@@ -3384,6 +4622,49 @@
               "string",
               "null"
             ]
+          },
+          "gallery_photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "menu_photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scene_start_exposition_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scene_start_greeting_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fast_mode_scene_start_exposition_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fast_mode_scene_start_greeting_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gallery_photos": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            }
           }
         },
         "required": [
@@ -3432,6 +4713,33 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "web",
+              "telegram"
+            ]
+          },
+          "last_message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Message"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unread_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_read_message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3441,7 +4749,8 @@
           "scene_session_id",
           "turn_no",
           "scene_turn_no",
-          "updated_at"
+          "updated_at",
+          "origin"
         ],
         "additionalProperties": false
       },
@@ -3468,6 +4777,12 @@
           "chat_code": {
             "type": "string",
             "pattern": "^c[a-z0-9]{7}$"
+          },
+          "client_message_id": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
           }
         },
         "required": [
@@ -3510,6 +4825,30 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "media_kind": {
+            "type": "string",
+            "enum": [
+              "photo",
+              "video"
+            ]
+          },
+          "media_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "video_delivery_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_message_id": {
+            "type": "string"
           }
         },
         "required": [
@@ -3686,9 +5025,36 @@
               "created_at"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "cursor": {
+                "type": "string",
+                "pattern": "^\\d+$"
+              },
+              "type": {
+                "type": "string",
+                "const": "video_delivered"
+              },
+              "data": {
+                "$ref": "#/components/schemas/VideoDeliveredData"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "cursor",
+              "type",
+              "data",
+              "created_at"
+            ],
+            "additionalProperties": false
           }
         ],
-        "description": "Append-only persisted event. No events are synthesized merely because a contract type exists; dependent media/reply producers are wired in later integration stages."
+        "description": "Durable event snapshots refresh canonical history. A completed delivery event carries a stable video message ID; repeated access never creates another event."
       },
       "History": {
         "type": "object",
@@ -3704,13 +5070,30 @@
               "string",
               "null"
             ]
+          },
+          "event_cursor": {
+            "type": "string",
+            "pattern": "^\\d+$"
+          },
+          "quick_replies": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuickRepliesData"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "messages",
-          "next_before"
+          "next_before",
+          "event_cursor",
+          "quick_replies"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "description": "Chronological shared text/photo/video history projected from existing message and successful delivery journals. Stable IDs deduplicate event refreshes; opaque versioned cursors preserve database timestamp precision. Pending delivery recovery is exposed by the existing media endpoint. event_cursor and quick_replies are read in the same repeatable-read snapshot. After a cursor gap, rebase to this high-water mark and reconcile saved operations."
       },
       "EventPage": {
         "type": "object",
@@ -3724,11 +5107,19 @@
           "cursor": {
             "type": "string",
             "pattern": "^\\d+$"
+          },
+          "operations": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/Operation"
+            }
           }
         },
         "required": [
           "events",
-          "cursor"
+          "cursor",
+          "operations"
         ],
         "additionalProperties": false
       },
@@ -4270,6 +5661,9 @@
                 }
               }
             ]
+          },
+          "requires_chat": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -4280,7 +5674,8 @@
           "price",
           "original_price",
           "promo_key",
-          "providers"
+          "providers",
+          "requires_chat"
         ],
         "additionalProperties": false
       },
@@ -4492,6 +5887,44 @@
               "video_pass",
               null
             ]
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "scene_session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "video_delivery_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "video_delivery_status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "sending",
+              "failed",
+              "uncertain",
+              "delivered"
+            ]
+          },
+          "ready_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "panel_media_id": {
+            "type": "string",
+            "format": "uuid"
           }
         },
         "required": [
@@ -4530,7 +5963,10 @@
                       "type": "string"
                     },
                     "scene_session_id": {
-                      "type": "string"
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     },
                     "conditions": {
                       "type": "object",
@@ -4571,6 +6007,38 @@
                         "video_pass",
                         null
                       ]
+                    },
+                    "created_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "video_delivery_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "video_delivery_status": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "sending",
+                        "failed",
+                        "uncertain",
+                        "delivered"
+                      ]
+                    },
+                    "ready_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "panel_media_id": {
+                      "type": "string",
+                      "format": "uuid"
                     }
                   },
                   "required": [
@@ -4585,6 +6053,13 @@
                 }
               ]
             }
+          },
+          "video_deliveries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VideoDelivery"
+            },
+            "description": "Unfinished Web deliveries in this chat, including previous scenes. Recover their existing IDs through the access endpoint; never create replacement purchases."
           }
         },
         "required": [
@@ -4669,6 +6144,9 @@
               "string",
               "null"
             ]
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/VideoDelivery"
           }
         }
       },
@@ -4720,7 +6198,396 @@
             "format": "date-time"
           }
         },
-        "description": "One delivery operation, not permanent video ownership. GET waits until ready_at and returns a signed URL with a 120-second fixed access window. A lost response can be recovered only within that original window; expired operations return 410. Uncertain delivery is never automatically sent again."
+        "description": "An owned delivery journal entry. Initial delivery becomes eligible at ready_at. Successful deliveries remain playable in chat history indefinitely, including after subscription/scene changes. Each access issues a fresh signed Storage URL valid for 120 seconds; its expiry does not expire the delivered message. An uncertain initial delivery is not automatically repeated."
+      },
+      "VideoDeliveredData": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "delivery_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "video_delivery_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "video_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "media_kind": {
+            "type": "string",
+            "const": "video"
+          },
+          "source": {
+            "type": "string"
+          },
+          "scene_session_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "delivery_id",
+          "video_delivery_id",
+          "video_id",
+          "media_kind",
+          "source",
+          "scene_session_id",
+          "created_at"
+        ],
+        "additionalProperties": false
+      },
+      "LanguageOption": {
+        "type": "object",
+        "properties": {
+          "locale": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "locale",
+          "display_name"
+        ],
+        "additionalProperties": false
+      },
+      "Publication": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "body",
+          "published_at"
+        ],
+        "additionalProperties": false
+      },
+      "PublicationPage": {
+        "type": "object",
+        "properties": {
+          "posts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Publication"
+            }
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "posts",
+          "next_before"
+        ],
+        "additionalProperties": false
+      },
+      "VotingCandidate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "image_url"
+        ],
+        "additionalProperties": false
+      },
+      "VotingCampaign": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "selected_candidate_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VotingCandidate"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "selected_candidate_id",
+          "candidates"
+        ],
+        "additionalProperties": false
+      },
+      "VotingState": {
+        "type": "object",
+        "properties": {
+          "campaign": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VotingCampaign"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "campaign"
+        ],
+        "additionalProperties": false
+      },
+      "ChatSummary": {
+        "type": "object",
+        "properties": {
+          "chat_code": {
+            "type": "string"
+          },
+          "last_message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Message"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unread_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_read_message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "chat_code",
+          "last_message",
+          "unread_count",
+          "last_read_message_id"
+        ],
+        "additionalProperties": false
+      },
+      "TelegramLinkStatus": {
+        "type": "object",
+        "properties": {
+          "linked": {
+            "type": "boolean"
+          },
+          "telegram_user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "available": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "linked",
+          "telegram_user_id",
+          "available"
+        ],
+        "additionalProperties": false
+      },
+      "TelegramLinkChallenge": {
+        "type": "object",
+        "properties": {
+          "challenge": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "challenge",
+          "client_id",
+          "expires_at"
+        ],
+        "additionalProperties": false
+      },
+      "TelegramLinkResult": {
+        "type": "object",
+        "properties": {
+          "linked": {
+            "type": "boolean",
+            "const": true
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "linked",
+          "user_id"
+        ],
+        "additionalProperties": false
+      },
+      "PhotoPanel": {
+        "type": "object",
+        "properties": {
+          "media_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri"
+          },
+          "unlocked": {
+            "type": "boolean"
+          },
+          "scene_session_id": {
+            "type": "string"
+          },
+          "actions": {
+            "type": "object",
+            "properties": {
+              "previous": {
+                "type": "boolean"
+              },
+              "next": {
+                "type": "boolean"
+              },
+              "more": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "previous",
+              "next",
+              "more"
+            ],
+            "additionalProperties": false
+          },
+          "offer": {
+            "type": "object",
+            "properties": {
+              "media_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "sku": {
+                "type": "string"
+              },
+              "conditions": {
+                "type": "object",
+                "properties": {
+                  "price": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Money"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "price_required": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "price",
+                  "price_required"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "media_id",
+              "sku",
+              "conditions"
+            ],
+            "additionalProperties": false
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "media_id",
+          "photo_url",
+          "unlocked",
+          "scene_session_id",
+          "actions",
+          "position",
+          "count"
+        ],
+        "additionalProperties": false
       }
     }
   }

@@ -181,6 +181,17 @@ const rawEnvSchema = z.object({
   INTERNAL_API_KEY: z.string().min(1),
   INTERNAL_API_KEY_HEADER: z.string().min(1).default("x-internal-api-key"),
   WEB_ENABLED: z.string().default("false").pipe(z.enum(["true", "false"])).transform((value) => value === "true"),
+  WEB_ALLOWED_ORIGINS: z.string().default('').transform(value => value.split(',').map(origin => origin.trim()).filter(Boolean))
+    .refine(origins => origins.every(origin => {
+      try { const url = new URL(origin); return url.origin === origin && !url.username && !url.password
+        && (url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))); }
+      catch { return false; }
+    }), 'WEB_ALLOWED_ORIGINS requires exact HTTPS origins or local HTTP origins'),
+  TELEGRAM_LOGIN_CLIENT_ID: z.string().trim().default('').refine(value => value === '' || (/^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value))), 'Invalid Telegram Login client ID'),
+  SUPABASE_TELEGRAM_PROVIDER: z.string().trim().default('').refine(value => value === '' || /^custom:[a-z0-9][a-z0-9:-]{0,42}$/.test(value), 'Invalid Supabase Telegram provider identifier'),
+  WEB_CHARACTER_GALLERY_JSON: z.string().default('{}').transform(raw => parseJsonEnv(raw,
+    z.record(z.string().regex(/^[1-9]\d*$/), z.record(z.string().regex(/^[a-z][a-z0-9-]*$/),
+      z.array(z.string().url().refine(value => new URL(value).protocol === 'https:', 'Gallery photos require HTTPS')))))),
   SUPABASE_URL: z.string().trim().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().trim().optional(),
   MEDIA_VIDEO_ENABLED: z.enum(['true', 'false']).default('false').transform(value => value === 'true'),

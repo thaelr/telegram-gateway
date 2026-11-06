@@ -388,6 +388,11 @@ export class ChatAccessRepository {
           cs.active_menu_message_id
         FROM public.chat_state cs
         WHERE cs.chat_id = ${dialogueChatId}::bigint
+          AND (cs.user_id = ${routing.user_id}::varchar(8) OR (
+            cs.chat_id = ${telegramChatId}::bigint
+            AND cs.telegram_account_user_id = ${routing.user_id}::varchar(8)
+            AND NOT cs.is_active AND cs.active_scene_session_id IS NULL
+          ))
         LIMIT 1
       ),
       active_scene AS (
@@ -410,8 +415,8 @@ export class ChatAccessRepository {
       SELECT
         t.chat_id,
         ${telegramChatId}::bigint AS telegram_chat_id,
-        t.user_id,
-        t.character_i,
+        account.user_id,
+        CASE WHEN t.user_id = account.user_id THEN t.character_i ELSE NULL END AS character_i,
         t.source,
         t.source_user_id,
         account.language,
@@ -432,11 +437,11 @@ export class ChatAccessRepository {
           account.subscription_until IS NOT NULL
           AND account.subscription_until > now()
         ) AS subscription_active,
-        t.active_scene_session_id,
-        (active_scene.scene_session_id IS NOT NULL) AS active_scene_exists,
-        COALESCE(active_scene.scene_access_active, FALSE) AS scene_access_active,
-        COALESCE(usage.turns_today, 0) AS turns_today,
-        t.scene_turn_no,
+        CASE WHEN t.user_id = account.user_id THEN t.active_scene_session_id ELSE NULL END AS active_scene_session_id,
+        (t.user_id = account.user_id AND active_scene.scene_session_id IS NOT NULL) AS active_scene_exists,
+        (t.user_id = account.user_id AND COALESCE(active_scene.scene_access_active, FALSE)) AS scene_access_active,
+        CASE WHEN t.user_id = account.user_id THEN COALESCE(usage.turns_today, 0) ELSE 0 END AS turns_today,
+        CASE WHEN t.user_id = account.user_id THEN t.scene_turn_no ELSE -1 END AS scene_turn_no,
         ${routing.selected_character_i}::smallint AS selected_character_i,
         ${routing.active_menu_screen}::text AS active_menu_screen,
         ${routing.active_menu_message_id}::bigint AS active_menu_message_id,
@@ -454,7 +459,7 @@ export class ChatAccessRepository {
         ) AS free_photo_unlocks
       FROM target t
       LEFT JOIN public.users account
-        ON account.user_id = t.user_id
+        ON account.user_id = ${routing.user_id}::varchar(8)
       LEFT JOIN active_scene ON TRUE
       LEFT JOIN usage ON TRUE
     `;

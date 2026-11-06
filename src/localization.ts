@@ -20,7 +20,7 @@ export type TelegramRuntimeSettings = {
 };
 
 export type PaymentChannel = "telegram" | "web";
-export type ConfiguredPaymentMethod = "stars" | "sbp";
+export type ConfiguredPaymentMethod = "stars" | "sbp" | "nowpayments";
 
 const languageMetadataSchema = z.object({
   display_name: z.string().trim().min(1).max(80),
@@ -63,6 +63,8 @@ type CacheEntry = {
 
 export class LocalizationService {
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly inflight = new Map<string, Promise<LocalizationDictionary|null>>();
+  private epoch=0;
   private languageCache: { expiresAt: number; value: LanguageOption[] } | null = null;
 
   constructor(
@@ -79,7 +81,17 @@ export class LocalizationService {
     const currentTime = this.now();
     if (cached && cached.expiresAt > currentTime) return cached.value;
 
-    const value = await this.store.load(locale, namespace);
+    const pending=this.inflight.get(key);if(pending)return pending;
+    const epoch=this.epoch;
+    const work=this.loadFresh(locale,namespace,key,epoch);
+    if(this.inflight.size<this.maxCacheEntries)this.inflight.set(key,work);
+    try{return await work;}finally{if(this.inflight.get(key)===work)this.inflight.delete(key);}
+  }
+
+  private async loadFresh(locale:string,namespace:string,key:string,epoch:number):Promise<LocalizationDictionary|null>{
+    const value=await this.store.load(locale,namespace);
+    if(epoch!==this.epoch)return value;
+    const currentTime=this.now();
     if (this.cache.size >= this.maxCacheEntries) {
       for (const [cacheKey, entry] of this.cache) {
         if (entry.expiresAt <= currentTime) this.cache.delete(cacheKey);
@@ -137,6 +149,9 @@ export class LocalizationService {
     return normalized == null ? null : this.load(normalized, namespace);
   }
 
+  getPaymentMethods(locale: string | null | undefined, channel: "telegram"): Promise<Array<"stars" | "sbp">>;
+  getPaymentMethods(locale: string | null | undefined, channel: "web"): Promise<Array<"sbp" | "nowpayments">>;
+  getPaymentMethods(locale: string | null | undefined, channel: PaymentChannel): Promise<ConfiguredPaymentMethod[]>;
   async getPaymentMethods(
     locale: string | null | undefined,
     channel: PaymentChannel,
@@ -144,7 +159,7 @@ export class LocalizationService {
     const dictionary = await this.getExactNamespace(locale, "payment_methods");
     const configured = dictionary?.[channel];
     const methods = Array.isArray(configured)
-      ? configured.filter((value): value is ConfiguredPaymentMethod => value === "stars" || value === "sbp")
+      ? configured.filter((value): value is ConfiguredPaymentMethod => value === "stars" || value === "sbp" || (channel === "web" && value === "nowpayments"))
       : [];
     const unique = [...new Set(methods)];
     if (channel === "telegram" && !unique.includes("stars")) unique.push("stars");
@@ -185,6 +200,7 @@ export class LocalizationService {
   }
 
   clear(): void {
+    this.epoch++;this.inflight.clear();
     this.cache.clear();
     this.languageCache = null;
   }

@@ -129,7 +129,7 @@ export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOption
     });
     scope.get("/web/me", async (request) => repository.getMe(user(request)));
     scope.patch("/web/me", async (request) => {
-      const patch = z.object({ display_name: z.string().trim().min(1).max(120).optional(), language: localeParam.optional() })
+      const patch = z.object({ display_name: z.string().trim().min(1).max(120).optional(), profile_text: z.string().trim().max(2000).optional(), language: localeParam.optional() })
         .strict().refine((value) => Object.keys(value).length > 0).parse(request.body);
       if (patch.language && !await options.localization.isEnabledLanguage(patch.language)) {
         throw new WebError(400, "unsupported_language");
@@ -161,8 +161,8 @@ export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOption
     });
     scope.post("/web/chats/:chat_code/reset", async (request, reply) => {
       const params = codeParams.parse(request.params);
-      const input = z.object({ client_message_id: clientId }).strict().parse(request.body);
-      const operation = await repository.enqueue(await consent(request), params.chat_code, "reset", input.client_message_id);
+      const input = z.object({ client_message_id: clientId, scene_mode: sceneMode.optional() }).strict().parse(request.body);
+      const operation = await repository.enqueue(await consent(request), params.chat_code, "reset", input.client_message_id, undefined, input.scene_mode);
       return reply.status(202).send(operation);
     });
     scope.get("/web/chats/:chat_code/messages", async (request) => {
@@ -178,8 +178,9 @@ export function registerWebRoutes(app: FastifyInstance, options: WebRoutesOption
     });
     scope.get("/web/chats/:chat_code/events", async (request) => {
       const params = codeParams.parse(request.params);
-      const query = z.object({ after: z.string().regex(/^\d{1,20}$/u).optional(), limit: pageLimit }).strict().parse(request.query);
-      return repository.events(user(request), params.chat_code, query.after, query.limit);
+      const query = z.object({ after: z.string().regex(/^\d{1,20}$/u).optional(), limit: pageLimit,
+        operation_ids:z.string().max(1849).transform(value=>value.split(',')).pipe(z.array(z.string().uuid()).min(1).max(50)).optional() }).strict().parse(request.query);
+      return repository.events(user(request), params.chat_code, query.after, query.limit,query.operation_ids);
     });
     scope.get("/web/chats/:chat_code/continuation", async (request) => {
       const params = codeParams.parse(request.params);

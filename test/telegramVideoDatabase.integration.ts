@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import postgres from 'postgres';
-import {installTestEnv} from './testEnv.js';
+import {installTestEnv,testTelegramUxCopy} from './testEnv.js';
 
 test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol',async t=>{
   const url=process.env.TEST_DATABASE_URL;if(!url)throw Error('TEST_DATABASE_URL required');
@@ -18,7 +18,7 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
   const accounts=new WebRepository(db),videos=new VideoCommerceRepository(db),repo=new MediaCommerceRepository(db);
   let signed=0;
   const service=new MediaCommerceDecisionService(repo,{async createStarsInvoice(input){return {invoice_link:`https://example.invalid/pay/${encodeURIComponent(input.payload)}`};}},null,videos,
-    async()=>{signed++;return 'https://example.invalid/signed';});
+    async()=>{signed++;return 'https://example.invalid/signed';},{async getTelegramCopy(){return testTelegramUxCopy;}});
   const fixture=async()=>{
     const userId=(await accounts.bootstrap({auth_user_id:randomUUID(),is_anonymous:false,display_name:'Telegram video test',locale:'en'})).user_id;
     await accounts.updateMe(userId,{language:'en'});

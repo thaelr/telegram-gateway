@@ -154,3 +154,15 @@ test("profile patches cannot set entitlements or consents; manual language is ex
     assert.equal((await app.inject({ method: "PATCH", url: "/web/me", headers: bearer, payload })).statusCode, 400);
   }
 });
+
+test("profile saves name and note together and reset forwards only an explicit valid scene mode", async (t) => {
+  let reset: unknown[] = [];
+  const { app } = createApp({ async enqueue(...args) { reset = args; return { operation_id: "reset", event_id: "reset", status: "accepted", action: "reset", chat_code: chat.chat_code }; } });
+  t.after(() => app.close());
+  const response = await app.inject({ method: "PATCH", url: "/web/me", headers: bearer, payload: { display_name: "Updated", profile_text: "A quiet conversation" } });
+  assert.equal(response.statusCode, 200); assert.equal(response.json().profile_text, "A quiet conversation");
+  assert.equal((await app.inject({ method: "PATCH", url: "/web/me", headers: bearer, payload: { profile_text: "x".repeat(2001) } })).statusCode, 400);
+  const result = await app.inject({ method: "POST", url: "/web/chats/c0000001/reset", headers: bearer, payload: { client_message_id: "mode-reset", scene_mode: "fast" } });
+  assert.equal(result.statusCode, 202); assert.equal(reset[5], "fast");
+  assert.equal((await app.inject({ method: "POST", url: "/web/chats/c0000001/reset", headers: bearer, payload: { client_message_id: "mode-reset", scene_mode: "unknown" } })).statusCode, 400);
+});

@@ -164,10 +164,25 @@ test("bounded localization cache evicts old arbitrary namespaces", async () => {
   assert.deepEqual(store.calls, ["ru:one", "ru:two", "ru:one"]);
 });
 
+test("NOWPayments is admitted by the EN Web policy while Telegram keeps its existing providers", async () => {
+  const service = new LocalizationService(new MemoryStore({
+    "en:payment_methods": { telegram: ["nowpayments", "stars"], web: ["stars", "nowpayments", "nowpayments"] },
+    "ru:payment_methods": { telegram: ["sbp", "stars"], web: ["sbp"] },
+  }), testTelegramRuntimeSettings);
+  assert.deepEqual(await service.getPaymentMethods("en", "web"), ["nowpayments"]);
+  assert.deepEqual(await service.getPaymentMethods("en", "telegram"), ["stars"]);
+  assert.deepEqual(await service.getPaymentMethods("ru", "web"), ["sbp"]);
+});
+
 test("missing required Russian text is an explicit configuration error", async () => {
   const service = new LocalizationService(
     new MemoryStore({ "ru:telegram": {} }),
     testTelegramRuntimeSettings,
   );
   await assert.rejects(() => service.getTelegramCopy("en"), { name: "ZodError" });
+});
+
+test('concurrent locale loads share one bounded lookup and invalidation cannot repopulate stale cache',async()=>{
+ let resolve!:(v:Record<string,unknown>)=>void,calls=0;const service=new LocalizationService({async load(){calls++;return new Promise(r=>{resolve=r;});}},testTelegramRuntimeSettings,60000,Date.now,2);
+ const readers=Array.from({length:100},()=>service.getExactNamespace('en','commerce'));assert.equal(calls,1);service.clear();resolve({old:true});await Promise.all(readers);const fresh=service.getExactNamespace('en','commerce');assert.equal(calls,2);resolve({old:false});assert.deepEqual(await fresh,{old:false});
 });
