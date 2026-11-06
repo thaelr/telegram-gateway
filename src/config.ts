@@ -26,6 +26,15 @@ const mediaPhotoPlanSchema = invoicePlanSchema;
 
 const mediaActionPlanSchema = invoicePlanSchema.extend({
   feature_key: z.string().min(1),
+  scene_unlock_upgrade: z.object({
+    amount_xtr: positiveIntegerSchema,
+    amount_rub: positiveIntegerSchema.nullable(),
+    discount_percent: z.number().int().min(0).max(99),
+  }).strict().optional(),
+}).superRefine((plan, ctx) => {
+  if (plan.scene_unlock_upgrade && plan.feature_key !== "video_pass") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["scene_unlock_upgrade"], message: "Only video_pass supports scene_unlock_upgrade" });
+  }
 });
 
 const mediaPromotionItemSchema = z.object({
@@ -309,6 +318,13 @@ const rawEnvSchema = z.object({
 });
 
 const parsedEnv = rawEnvSchema.parse(process.env);
+
+if (parsedEnv.SBP_ENABLED || parsedEnv.NOWPAYMENTS_ENABLED) {
+  const pass = parsedEnv.MEDIA_ACTION_PLANS_JSON.find(plan => plan.feature_key === "video_pass");
+  if (pass?.scene_unlock_upgrade?.amount_rub === null) {
+    throw new Error("MEDIA_ACTION_PLANS_JSON video_pass.scene_unlock_upgrade.amount_rub must be positive with RUB payments enabled");
+  }
+}
 
 if (parsedEnv.NOWPAYMENTS_ENABLED) {
   for (const key of ["NOWPAYMENTS_API_KEY", "NOWPAYMENTS_IPN_SECRET", "NOWPAYMENTS_IPN_URL", "NOWPAYMENTS_SUCCESS_URL", "NOWPAYMENTS_CANCEL_URL"] as const) {

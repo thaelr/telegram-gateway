@@ -14,9 +14,10 @@ import {
 } from "./abTesting.js";
 import { config } from "./config.js";
 import type { LocalizationService } from "./localization.js";
-import { getMediaPaymentMethods, getMediaUxCopy, runWithMediaLocalization } from "./mediaLocalization.js";
+import { getMediaCommerceCopy, getMediaPaymentMethods, getMediaUxCopy, runWithMediaLocalization } from "./mediaLocalization.js";
 import { isMaintenanceBlocked } from "./maintenance.js";
 import {
+  normalizeUnlockedItems,
   buildCallbackTokenRow,
   buildMediaAction,
   buildPhotoInvoiceInput,
@@ -48,6 +49,7 @@ import {
   resolveActionPlanByFeatureKey,
   resolvePhotoPlanBySku,
   calculateFullUpgrade,
+  resolveVideoPassPlan,
 } from "./mediaCommerce/plans.js";
 import {
   INVOICE_TTL_MS,
@@ -742,6 +744,8 @@ export function buildPaymentOption(row: StoredInvoiceToken): MediaPaymentOption 
       paymentSource === "sbp"
         ? normalizePositiveInteger(payload.original_amount_rub)
         : normalizePositiveInteger(payload.original_amount_xtr),
+    ...(payload.purchase_variant === 'scene_unlock_upgrade'
+      ? {discount_percent: normalizeNonNegativeInteger(payload.discount_percent) ?? 0} : {}),
     promo_key:
       normalizeString(
         typeof payload.promo_key === "string"
@@ -1012,8 +1016,16 @@ export class MediaCommerceDecisionService {
     const selection = chatId == null ? null : await this.resolveAbTestSelection(chatId, 'subscription_offer');
     const params = selection?.params ?? {};
     const subscriptions = applySubscriptionPlanOverrides(resolveSubscriptionPlans(), params);
+    const offer = config.MEDIA_VIDEO_ENABLED && chatId != null
+      ? await this.videos.passOfferContext(chatId, null, 'web') : null;
+    const pass = offer?.available && !offer.full_active && !offer.video_pass_active
+      ? resolveVideoPassPlan(offer.paid_scene_unlock_token) : null;
     const actions = config.MEDIA_ACTION_PLANS_JSON.flatMap(item => {
       if (!config.MEDIA_VIDEO_ENABLED && ['video_unlock','video_pass'].includes(item.feature_key)) return [];
+      if (item.feature_key === 'scene_unlock' && (offer?.scene_access_active || offer?.subscription_active)) return [];
+      if (item.feature_key === 'video_pass') {
+        return pass ? [pass] : [];
+      }
       const promoted = resolveActionPlanByFeatureKey(item.feature_key);
       const effective = item.feature_key === 'scene_unlock' ? applySceneUnlockOverride(promoted, params) : promoted;
       return effective ? [effective] : [];
@@ -1027,7 +1039,13 @@ export class MediaCommerceDecisionService {
     return [
       ...subscriptions.map(p => ({...base(p),kind:'subscription' as const,subscription_days:p.days,subscription_tier:p.tier ?? 'base'})),
       ...photos.map(p => ({...base(p),kind:'photo' as const})),
-      ...actions.map(p => ({...base(p),kind:'feature' as const,feature_key:p.feature_key})),
+      ...actions.map(p => ({...base(p),kind:'feature' as const,feature_key:p.feature_key,
+        ...(p.feature_key === 'video_pass' && pass ? {
+          purchase_variant: pass.purchase_variant,
+          scene_session_id: offer?.scene_session_id ?? undefined,
+          discount_percent: pass.discount_percent,
+          paid_scene_unlock_token: pass.paid_scene_unlock_token,
+        } : {})})),
     ];
   }
   private readonly uncertainSbpCheckouts = new Map<
@@ -1871,23 +1889,49 @@ export class MediaCommerceDecisionService {
     const response = await this.evaluateCore(input);
     if (!config.MEDIA_VIDEO_ENABLED || !response.chat_id) return response;
     if (['finalize_offer','finalize_photo_event'].includes(input.interaction_mode ?? '') && input.current_reply_markup != null) {
-      const panel = response.panel_message_id ?? input.panel_message_id ?? input.target_message_id;
+      const panel = normalizePositiveInteger(response.panel_message_id ?? input.panel_message_id ?? input.target_message_id);
       if (panel) {
         const state = parseJsonObject(await this.videos.storePanel(response.chat_id,panel,input.current_reply_markup,
           response.media_signature ?? input.media_signature ?? null,input.selected_uuid ?? input.current_uuid ?? null));
         if (state?.panel_delivered === true) {
           const context = await this.videos.context({chat_id:response.chat_id,scene_session_id:response.scene_session_id ?? null,panel_message_id:panel});
-          return {...response,target_message_id:panel,video_panel_reconcile:true,video:{available:false,consumed:true},
+          const selected = input.selected_uuid ?? input.current_uuid;
+          const delivery = context.delivery;
+          const nav = delivery?.status === 'delivered' && selected
+            ? await this.videoPanelTokens(response, delivery, selected === delivery.requested_photo_uuid ? 'video_panel_requested_photo' : 'photo_next', selected)
+            : null;
+          return {...response,...nav,target_message_id:panel,video_panel_reconcile:true,video:{available:false,consumed:true},
             current_reply_markup:context.current_reply_markup,reply_markup:context.current_reply_markup,
             video_control_tokens:context.video_control_tokens ?? context.delivery?.video_control_tokens ?? [],
             video_payment_urls:context.video_payment_urls ?? context.delivery?.video_payment_urls ?? []};
+        }
+        if (input.interaction_mode === 'finalize_photo_event' && input.selected_uuid && response.media_signature) {
+          // A first-time photo becomes a valid selector input only after its receipt.
+          const photo = {...response, current_uuid:input.selected_uuid, target_message_id:panel};
+          const context = await this.loadVideoContext(photo);
+          const keyboard = parseJsonObject(input.current_reply_markup)?.inline_keyboard;
+          const controls = new Set(context.video_control_tokens ?? []);
+          const alreadyDecorated = Array.isArray(keyboard) && keyboard.flat().some(button => {
+            const token = parseJsonObject(button)?.callback_data;
+            return typeof token === 'string' && controls.has(token);
+          });
+          if (context.video && context.scene_active && !context.panel_delivered && !context.delivery && !alreadyDecorated) {
+            const decorated = await this.decoratePhotoVideo(photo,context);
+            return {...decorated,video_panel_reconcile:true,reply_markup:input.current_reply_markup,
+              current_reply_markup:input.current_reply_markup};
+          }
         }
       }
     }
     if (response.operation === 'edit_photo' && response.media_signature) {
       return this.decoratePhotoVideo(response);
     }
-    if (response.operation === 'scene_access_activated') return this.decorateChatVideoOffer(response);
+    if (response.operation === 'scene_access_activated'
+      || (response.operation === 'subscription_offer_ready' && response.scene_session_id &&
+        (response.subscription_offer_reason === 'subscription_command' || response.subscription_offer_reason === 'daily_turn_limit' ||
+         response.reason === 'subscription_payment_source_toggled'))) {
+      return this.decorateChatVideoOffer(response);
+    }
     return response;
   }
 
@@ -1934,16 +1978,18 @@ export class MediaCommerceDecisionService {
       requested_photo_uuid:base.current_uuid ?? base.selected_uuid ?? null});
   }
 
-  private async decoratePhotoVideo(base: MediaCommerceDecisionResponse): Promise<MediaCommerceDecisionResponse> {
-    const context = await this.loadVideoContext(base);
+  private async decoratePhotoVideo(base: MediaCommerceDecisionResponse, stored?: VideoContext): Promise<MediaCommerceDecisionResponse> {
+    const context = stored ?? await this.loadVideoContext(base);
     const video: VideoUi = {available:!!context.video && context.scene_active,consumed:context.panel_delivered,
       full_active:context.full_active,video_pass_active:context.video_pass_active};
-    const pass = resolveActionPlanByFeatureKey('video_pass');
-    if (context.scene_active && !context.full_active && !context.video_pass_active && pass && !video.consumed) {
-      const chatOffer = this.videoToken(base,'video_pass_options',{pass_only:true});
-      await this.repository.upsertCallbackTokens([chatOffer]);
-      video.chat_offer_callback_data = chatOffer.token;
-      video.pass_price_rub = pass.amount_rub ?? null;
+    if (video.available && !video.consumed && !context.delivery && !context.full_active && !context.video_pass_active) {
+      const offer = await this.videos.passOfferContext(base.chat_id!,base.scene_session_id ?? null,'telegram');
+      const pass = resolveVideoPassPlan(offer.paid_scene_unlock_token);
+      if (pass && offer.scene_session_id === base.scene_session_id) {
+        const chatOffer = this.videoToken(base,'video_pass_options',{pass_only:true});
+        await this.repository.upsertCallbackTokens([chatOffer]);
+        Object.assign(video,this.videoPassUi(pass),{chat_offer_callback_data:chatOffer.token});
+      }
     }
     if (!video.available || video.consumed) return {...base,video};
     const row = this.videoToken(base,'video_request',{video_id:context.video!.video_id,character_i:context.character_i ?? base.character_i,
@@ -1954,12 +2000,33 @@ export class MediaCommerceDecisionService {
   }
 
   private async decorateChatVideoOffer(base: MediaCommerceDecisionResponse): Promise<MediaCommerceDecisionResponse> {
-    const context = await this.loadVideoContext(base);
-    const plan = resolveActionPlanByFeatureKey('video_pass');
-    if (!plan || !context.scene_active || context.full_active || context.video_pass_active) return base;
-    const row = this.videoToken({...base,target_message_id:null,panel_message_id:null},'video_pass_options',{pass_only:true});
+    if (!base.scene_session_id) return base;
+    const offer = await this.videos.passOfferContext(base.chat_id!,base.scene_session_id,'telegram');
+    if (!offer.available || offer.scene_session_id !== base.scene_session_id || offer.full_active || offer.video_pass_active) return base;
+    const plan = resolveVideoPassPlan(offer.paid_scene_unlock_token);
+    if (!plan) return base;
+    const row = this.videoToken({...base,target_message_id:null,panel_message_id:null},'video_pass_options',{pass_only:true,pass_menu:true});
     await this.repository.upsertCallbackTokens([row]);
-    return {...base,video:{available:false,consumed:false,chat_offer_callback_data:row.token,pass_reveal_callback_data:row.token,pass_price_rub:plan.amount_rub ?? null}};
+    return {...base,video:{available:false,consumed:false,chat_offer_callback_data:row.token,
+      pass_reveal_callback_data:row.token,pass_menu:true,...this.videoPassUi(plan)}};
+  }
+
+  private videoPassUi(plan: NonNullable<ReturnType<typeof resolveVideoPassPlan>>) {
+    const types = parseJsonObject(getMediaCommerceCopy().product_types);
+    const copy = parseJsonObject(types?.[plan.purchase_variant === 'scene_unlock_upgrade' ? 'scene_unlock_upgrade' : 'video_pass']);
+    const title = typeof copy?.title === 'string' && copy.title.trim() ? copy.title : plan.title;
+    const description = typeof copy?.description === 'string' && copy.description.trim() ? copy.description : plan.description;
+    const price = (amount: number, original: number, unit: string) => {
+      const final = `${amount} ${unit}`;
+      if (plan.discount_percent === 0) return final;
+      return String(copy?.discount_format ?? '{original} → {final} (−{percent}%)')
+        .replaceAll('{original}', `${original} ${unit}`).replaceAll('{final}', final)
+        .replaceAll('{percent}', String(plan.discount_percent));
+    };
+    const lines = getMediaPaymentMethods().flatMap(method => method === 'stars'
+      ? [price(plan.amount_xtr,plan.original_amount_xtr,'⭐')]
+      : config.SBP_ENABLED && plan.amount_rub != null ? [price(plan.amount_rub,plan.original_amount_rub!,'₽')] : []);
+    return {pass_button_text:[title,...lines].join(' · '),pass_offer_text:description,pass_price_rub:plan.amount_rub ?? null};
   }
 
   private deliveryResponse(base: MediaCommerceDecisionResponse, delivery: VideoDelivery | null): MediaCommerceDecisionResponse {
@@ -1977,43 +2044,103 @@ export class MediaCommerceDecisionService {
       same_photo:delivery.same_photo,reason:`video_delivery_${delivery.status}`};
   }
 
-  private async videoPanelTokens(base:MediaCommerceDecisionResponse,delivery:VideoDelivery) {
-    if(!delivery.requested_photo_uuid||!delivery.source_photo_uuid||!delivery.photo_message_id)return null;
-    const make=(action:string,current:string)=>{const row=this.videoToken({...base,chat_id:delivery.chat_id??base.chat_id,
-      target_message_id:delivery.photo_message_id,current_uuid:current,caption_text:delivery.panel_caption,
-      caption_entities_json:delivery.panel_caption_entities},action,{delivery_id:delivery.delivery_id,
-      requested_photo_uuid:delivery.requested_photo_uuid,source_photo_uuid:delivery.source_photo_uuid});
-      row.token='btn_'+createHash('sha256').update([action,delivery.delivery_id].join(':')).digest('hex').slice(0,32);return row;};
-    const requested=make('video_panel_requested_photo',delivery.requested_photo_uuid);
-    const source=delivery.source_photo_uuid===delivery.requested_photo_uuid?requested:make('video_panel_source_photo',delivery.source_photo_uuid);
-    const video=make('video_panel_video',delivery.source_photo_uuid);
-    const callbacks={video_panel_requested_callback_data:requested.token,video_panel_source_callback_data:source.token,video_panel_video_callback_data:video.token};
-    const rows=[...new Map([requested,source,video].map(item=>[item.token,item])).values()];
-    for(const row of rows)Object.assign(row.payload_json,callbacks);
+  private async videoPanelTokens(base: MediaCommerceDecisionResponse, delivery: VideoDelivery,
+    currentAction = 'video_panel_video', ordinaryUuid?: string) {
+    const { chat_id: chat, requested_photo_uuid: requested, source_photo_uuid: source, photo_message_id: panel } = delivery;
+    if (!chat || !requested || !source || !panel) return null;
+    if (delivery.status === 'delivered' && delivery.telegram_message_id !== panel) return null;
+    const scope = await this.videos.context({chat_id: chat, scene_session_id: delivery.scene_session_id ?? null, panel_message_id: panel});
+    const context = await this.repository.loadMediaContext({
+      chat_id: chat, scene_session_id: delivery.scene_session_id ?? null, turn_no: null, scene_turn_no: null,
+      media_signature: scope.panel_media_signature ?? null, current_uuid: requested, target_message_id: panel,
+      base_price_xtr: 0, action_kind: 'photo_next', requested_action: null, invoice_token: null,
+      force_deliver_after_payment: false, paid_access_mode: null, callback_valid: true, panel_text: null, panel_entities_json: []
+    });
+    const photos = normalizeUnlockedItems(context.unlocked_items_json);
+    const make = (action: string, uuid: string) => {
+      const row = this.videoToken({...base, chat_id: chat, scene_session_id: delivery.scene_session_id,
+        telegram_chat_id: delivery.telegram_chat_id, target_message_id: panel, current_uuid: uuid}, action, {
+          delivery_id: delivery.delivery_id, requested_photo_uuid: requested, source_photo_uuid: source
+        });
+      const identity = action === 'photo_next' ? [action, delivery.delivery_id, uuid] : [action, delivery.delivery_id];
+      row.token = 'btn_' + createHash('sha256').update(identity.join(':')).digest('hex').slice(0,32);
+      if (delivery.status === 'delivered' && action !== 'photo_next') row.expires_at = null;
+      return row;
+    };
+    const requestedRow = make('video_panel_requested_photo', requested);
+    const sourceRow = requested === source ? requestedRow : make('video_panel_source_photo', source);
+    const videoRow = make('video_panel_video', source);
+    const rows = photos.map(photo => photo.uuid === requested ? requestedRow : make('photo_next', photo.uuid));
+    // An older paid snapshot can outlive its panel's ordinary-photo event.
+    if (!rows.includes(requestedRow)) rows.push(requestedRow);
+    rows.splice(rows.indexOf(requestedRow) + 1, 0, ...(source === requested ? [videoRow] : [sourceRow, videoRow]));
+    const index = rows.findIndex(row => row.action_kind === currentAction &&
+      (currentAction !== 'photo_next' || row.payload_json.current_uuid === ordinaryUuid));
+    if (index < 0) return null;
+    const callbacks = {
+      video_panel_requested_callback_data: requestedRow.token,
+      video_panel_source_callback_data: sourceRow.token, video_panel_video_callback_data: videoRow.token
+    };
+    for (const row of rows) Object.assign(row.payload_json, callbacks);
     await this.repository.upsertCallbackTokens(rows);
-    return callbacks;
+    // Remove the original photo arrows by token type, independent of locale or label.
+    const markup = parseJsonObject(delivery.current_reply_markup);
+    const previous = (Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard : [])
+      .flat().map(button => parseJsonObject(button)?.callback_data).filter((value): value is string => typeof value === 'string');
+    const oldNav = await Promise.all(previous.map(async token => {
+      const saved = await this.repository.loadCallbackToken(token, chat);
+      return saved?.action_kind === 'photo_prev' || saved?.action_kind === 'photo_next' ? token : null;
+    }));
+    const button = (text: string, offset: number) => ({text, callback_data: rows[(index + offset + rows.length) % rows.length]!.token});
+    const ordinaryPhoto = currentAction === 'photo_next' ? photos.find(photo => photo.uuid === ordinaryUuid) : null;
+    return {...callbacks, ordinaryPhoto,
+      panel_navigation_row: [button('‹', -1), button(String(index + 1) + '/' + rows.length, 0), button('›', 1)],
+      panel_navigation_tokens: [...rows.map(row => row.token), ...oldNav.filter((token): token is string => token !== null)]};
   }
 
-  private async evaluateVideoPanelCallback(base:MediaCommerceDecisionResponse,payload:Record<string,unknown>,action:string):Promise<MediaCommerceDecisionResponse>{
-    const id=typeof payload.delivery_id==='string'?payload.delivery_id:null;
-    if(!id)return {...base,operation:'noop',reason:'video_delivery_required'};
-    const delivery=await this.videos.getDelivery(id);
-    if(!delivery||delivery.chat_id!==base.chat_id||delivery.photo_message_id!==base.target_message_id||!delivery.requested_photo_uuid||!delivery.source_photo_uuid)return {...base,operation:'noop',reason:'video_panel_changed'};
-    const callbacks=await this.videoPanelTokens(base,delivery);
-    if(!callbacks)return {...base,operation:'noop',reason:'video_panel_changed'};
-    let mediaUrl:string|null=null;let mediaUuid:string|null=null;let kind:'photo'|'video'='photo';
-    if(action==='video_panel_video'){
-      if(delivery.status!=='delivered')return {...base,operation:'noop',reason:'video_delivery_not_ready'};
-      mediaUrl=await this.videoSigner(delivery.bucket_name,delivery.storage_path);kind='video';
-    }else if(action==='video_panel_source_photo'){mediaUrl=sourcePhotoUrl(delivery.source_photo_bucket_name,delivery.source_photo_storage_path);mediaUuid=delivery.source_photo_uuid;}
-    else {const photo=await this.repository.loadPhotoByUuid(delivery.requested_photo_uuid);mediaUrl=photo?.photo_url??null;mediaUuid=delivery.requested_photo_uuid;}
-    if(!mediaUrl)return {...base,operation:'noop',reason:'video_panel_media_unavailable'};
-    return {...base,...callbacks,operation:'video_panel_media_ready',delivery_id:delivery.delivery_id,
-      target_message_id:delivery.photo_message_id,telegram_chat_id:delivery.telegram_chat_id,panel_media_kind:kind,panel_media_url:mediaUrl,panel_media_uuid:mediaUuid,
-      requested_photo_uuid:delivery.requested_photo_uuid,source_photo_uuid:delivery.source_photo_uuid,
-      panel_caption:delivery.panel_caption,panel_caption_entities:delivery.panel_caption_entities,
-      video_control_tokens:delivery.video_control_tokens ?? [],video_payment_urls:delivery.video_payment_urls ?? [],
-      current_reply_markup:delivery.current_reply_markup,reply_markup:delivery.current_reply_markup,reason:'video_panel_media_ready'};
+  private async evaluateVideoPanelCallback(base: MediaCommerceDecisionResponse, payload: Record<string,unknown>,
+    action: string, input: MediaCommerceDecisionRequest): Promise<MediaCommerceDecisionResponse> {
+    const id = typeof payload.delivery_id === 'string' ? payload.delivery_id : null;
+    if (!id) return {...base, operation:'noop', reason:'video_delivery_required'};
+    const delivery = await this.videos.getDelivery(id);
+    const callback = parseJsonObject(parseJsonObject(input.raw_update)?.callback_query);
+    const message = parseJsonObject(callback?.message);
+    const sender = normalizePositiveInteger(parseJsonObject(callback?.from)?.id ?? input.source_user_id ?? input.telegram_chat_id);
+    const panel = normalizePositiveInteger(message?.message_id ?? input.inbound_message_id);
+    const transport = normalizePositiveInteger(parseJsonObject(message?.chat)?.id ?? input.telegram_chat_id);
+    if (!delivery || delivery.source !== 'telegram' || delivery.status !== 'delivered' ||
+      delivery.telegram_message_id !== delivery.photo_message_id ||
+      delivery.chat_id !== base.chat_id || (input.chat_id != null && delivery.chat_id !== input.chat_id) ||
+      delivery.telegram_chat_id !== sender || delivery.telegram_chat_id !== transport ||
+      delivery.photo_message_id !== panel || delivery.photo_message_id !== base.target_message_id ||
+      !delivery.requested_photo_uuid || !delivery.source_photo_uuid) {
+      return {...base, operation:'noop', reason:'video_panel_changed'};
+    }
+    const nav = await this.videoPanelTokens(base, delivery, action, base.current_uuid ?? undefined);
+    if (!nav) return {...base, operation:'noop', reason:'video_panel_changed'};
+    const {ordinaryPhoto, ...callbacks} = nav;
+    let mediaUrl: string | null;
+    let uuid: string | null = null;
+    if (action === 'video_panel_video') {
+      mediaUrl = await this.videoSigner(delivery.bucket_name, delivery.storage_path);
+    } else if (action === 'video_panel_source_photo') {
+      uuid = delivery.source_photo_uuid;
+      mediaUrl = sourcePhotoUrl(delivery.source_photo_bucket_name, delivery.source_photo_storage_path);
+    } else if (action === 'photo_next') {
+      uuid = ordinaryPhoto?.uuid ?? null;
+      mediaUrl = ordinaryPhoto?.photo_url ?? null;
+    } else {
+      uuid = delivery.requested_photo_uuid;
+      mediaUrl = (await this.repository.loadPhotoByUuid(uuid))?.photo_url ?? null;
+    }
+    if (!mediaUrl) return {...base, operation:'noop', reason:'video_panel_media_unavailable'};
+    return {...base,...callbacks, operation:'video_panel_media_ready', delivery_id:delivery.delivery_id,
+      target_message_id:panel, telegram_chat_id:transport, panel_media_kind:uuid ? 'photo' : 'video',
+      panel_media_url:mediaUrl, panel_media_uuid:uuid, requested_photo_uuid:delivery.requested_photo_uuid,
+      source_photo_uuid:delivery.source_photo_uuid, panel_caption:delivery.panel_caption,
+      panel_caption_entities:delivery.panel_caption_entities, video_control_tokens:delivery.video_control_tokens ?? [],
+      video_payment_urls:delivery.video_payment_urls ?? [], reply_markup:delivery.current_reply_markup,
+      current_reply_markup:delivery.current_reply_markup, reason:'video_panel_media_ready'};
   }
 
   private async evaluateVideoCallback(base: MediaCommerceDecisionResponse, payload: Record<string,unknown>, action: string): Promise<MediaCommerceDecisionResponse> {
@@ -2023,11 +2150,14 @@ export class MediaCommerceDecisionService {
     const context = await this.loadVideoContext(frozen);
     const passOnly = payload.pass_only === true;
     if (!passOnly && context.delivery) return this.deliveryResponse(frozen,context.delivery);
-    if (!context.scene_active || (!passOnly && (!context.video || context.panel_delivered))) {
+    const menu = passOnly && payload.pass_menu === true;
+    const offer = await this.videos.passOfferContext(frozen.chat_id!, frozen.scene_session_id ?? null, 'telegram');
+    if (!context.scene_active || offer.scene_session_id !== frozen.scene_session_id ||
+      (menu ? !offer.available : !context.video || context.panel_delivered || !!context.delivery)) {
       return {...frozen,operation:'noop',reason:'video_unavailable',callback_answer_text:renderUx(getMediaUxCopy().video?.unavailable)};
     }
     // The callback belongs to the displayed photo, never to a photo visited earlier.
-    if (!passOnly && ((context.panel_media_signature && context.panel_media_signature !== frozen.media_signature)
+    if (!menu && ((context.panel_media_signature && context.panel_media_signature !== frozen.media_signature)
       || (context.panel_photo_uuid && frozen.current_uuid && context.panel_photo_uuid !== frozen.current_uuid))) {
       return {...frozen,operation:'noop',reason:'video_panel_changed',callback_answer_text:renderUx(getMediaUxCopy().video?.panel_changed)};
     }
@@ -2041,7 +2171,8 @@ export class MediaCommerceDecisionService {
         panel_caption_entities:(frozen.caption_entities_json ?? frozen.panel_entities_json ?? []) as unknown[]}));
     }
     const unlock = resolveActionPlanByFeatureKey('video_unlock');
-    const pass = resolveActionPlanByFeatureKey('video_pass');
+    const pass = resolveVideoPassPlan(offer.paid_scene_unlock_token);
+    if (passOnly && !pass) return {...frozen,operation:'noop',reason:'video_pass_unavailable'};
     const passToken = this.videoToken(frozen,'video_pass_options',{...payload,pass_only:passOnly});
     const purchaseRoot = typeof payload.video_purchase_key === 'string' ? payload.video_purchase_key
       : createHash('sha256').update([frozen.chat_id,frozen.scene_session_id,targetMessageId,context.video?.video_id ?? 'pass'].join(':')).digest('hex').slice(0,24);
@@ -2056,11 +2187,22 @@ export class MediaCommerceDecisionService {
       panel_entities_json:frozen.caption_entities_json ?? frozen.panel_entities_json ?? [],
       requested_action:'video_request',base_reply_markup:base.current_reply_markup};
     const plans = [!passOnly ? unlock : null,pass].filter((plan): plan is NonNullable<typeof plan> => plan != null);
-    const inputs = plans.flatMap(plan => buildPaymentInputs({base_token:`pay_v_${purchaseRoot}_${plan.feature_key === 'video_pass' ? 'p' : 'u'}`,
-      chat_id:frozen.chat_id!,scene_session_id:frozen.scene_session_id ?? null,turn_no:frozen.turn_no ?? null,scene_turn_no:frozen.scene_turn_no ?? null,
-      action_kind:'feature_payment',plan,payload_json:{...snapshot,action_kind:'feature_payment',feature_key:plan.feature_key,
-        idempotency_key:`video:${purchaseRoot}:${plan.feature_key}`,original_amount_xtr:plan.original_amount_xtr,
-        original_amount_rub:plan.original_amount_rub,promo_key:plan.promo_key}}));
+    const inputs = plans.flatMap(plan => {
+      const variant = plan.feature_key === 'video_pass' ? pass : null;
+      const suffix = variant ? (variant.purchase_variant === 'scene_unlock_upgrade' ? 'pg' : 'p') + (passOnly ? 'o' : '') : 'u';
+      const rows = buildPaymentInputs({base_token:`pay_v_${purchaseRoot}_${suffix}`,
+        chat_id:frozen.chat_id!,scene_session_id:frozen.scene_session_id ?? null,turn_no:frozen.turn_no ?? null,scene_turn_no:frozen.scene_turn_no ?? null,
+        action_kind:'feature_payment',plan,payload_json:{...snapshot,action_kind:'feature_payment',feature_key:plan.feature_key,
+          idempotency_key:`video:${purchaseRoot}:${plan.feature_key}${variant ? ':' + variant.purchase_variant + (passOnly ? ':pass_only' : ':video') : ''}`,
+          original_amount_xtr:plan.original_amount_xtr,original_amount_rub:plan.original_amount_rub,promo_key:plan.promo_key,
+          ...(variant ? {purchase_variant:variant.purchase_variant,paid_scene_unlock_token:variant.paid_scene_unlock_token,
+            user_id:offer.user_id,pass_only:passOnly,pass_menu:menu,discount_percent:variant.discount_percent} : {})}});
+      if (variant) for (const row of rows) Object.assign(row.payload_json, {
+        original_amount:row.currency === 'XTR' ? variant.original_amount_xtr : variant.original_amount_rub,
+        final_amount:row.amount,currency:row.currency,
+      });
+      return rows;
+    });
     const stored = await this.upsertCurrentPaymentAttempts(inputs,'video');
     const rendered = await this.prepareRenderablePaymentRows(stored,'video');
     const options = rendered.map(buildPaymentOption);
@@ -2077,7 +2219,7 @@ export class MediaCommerceDecisionService {
     const knownTokens = [...new Set([base.callback_data,passToken.token,...videoTokens].filter((value):value is string=>!!value))];
     return {...frozen,operation:'video_ui_ready',video:{available:!passOnly,consumed:false,
       unlock_payment_options:options.filter(option=>option.feature_key === 'video_unlock'),
-      pass_reveal_callback_data:passToken.token,pass_price_rub:pass?.amount_rub ?? null,
+      pass_reveal_callback_data:pass ? passToken.token : null,pass_menu:menu,...(pass ? this.videoPassUi(pass) : {}),
       pass_payment_options:action === 'video_pass_options' ? options.filter(option=>option.feature_key === 'video_pass') : []},
       current_reply_markup:base.current_reply_markup,video_control_tokens:knownTokens,
       video_keep_tokens:keepTokens,
@@ -2092,14 +2234,20 @@ export class MediaCommerceDecisionService {
       telegram_chat_id:normalizePositiveInteger(payload.telegram_chat_id),payment_token:paid.token,feature_key:feature};
     if (!videoId || !panelId) {
       const target=normalizePositiveInteger(payload.target_message_id);
-      const context=feature==='video_pass' && target ? await this.videos.context({chat_id:paid.chat_id,scene_session_id:paid.scene_session_id,panel_message_id:target}) : null;
-      const controls=await Promise.all((context?.video_control_tokens ?? []).map(async token=>{
+      const menu = payload.pass_menu === true;
+      const context=feature==='video_pass' && target && !menu ? await this.videos.context({chat_id:paid.chat_id,scene_session_id:paid.scene_session_id,panel_message_id:target}) : null;
+      const originalMenu = menu ? parseJsonObject(payload.base_reply_markup) : null;
+      const originalRows = Array.isArray(originalMenu?.inline_keyboard) ? originalMenu.inline_keyboard.flat() : [];
+      const menuTokens = originalRows.map(button=>parseJsonObject(button)?.callback_data)
+        .filter((token):token is string=>typeof token==='string');
+      const controls=await Promise.all((menu ? menuTokens : context?.video_control_tokens ?? []).map(async token=>{
         const row=await this.repository.loadCallbackToken(token,paid.chat_id);
-        return row?.action_kind === 'video_pass_options' ? token : null;
+        return row?.action_kind === 'video_pass_options' || (menu && row?.action_kind === 'free_scene_unlock') ? token : null;
       }));
       return {...frozen,operation:feature === 'video_pass' ? 'video_pass_activated' : 'noop',target_message_id:target,
-        current_reply_markup:context?.current_reply_markup,reply_markup:context?.current_reply_markup,
+        current_reply_markup:originalMenu ?? context?.current_reply_markup,reply_markup:originalMenu ?? context?.current_reply_markup,
         video_control_tokens:controls.filter((token):token is string=>token!==null),video_payment_urls:context?.video_payment_urls ?? [],
+        ...(menu ? {video:{available:false,consumed:true,pass_menu:true}} : {}),
         text:context?.scene_active === false ? renderUx(getMediaUxCopy().video?.pass_scene_changed)
           : renderUx(getMediaUxCopy().video?.pass_activated),reason:feature === 'video_pass' ? 'video_pass_activated' : 'video_snapshot_invalid'};
     }
@@ -2787,8 +2935,8 @@ export class MediaCommerceDecisionService {
       };
     }
 
-    if(config.MEDIA_VIDEO_ENABLED&&['video_panel_requested_photo','video_panel_source_photo','video_panel_video'].includes(actionKind??'')){
-      return this.evaluateVideoPanelCallback(callbackBase,payload,actionKind!);
+    if (config.MEDIA_VIDEO_ENABLED && (['video_panel_requested_photo','video_panel_source_photo','video_panel_video'].includes(actionKind ?? '') || (actionKind === 'photo_next' && payload.delivery_id))) {
+      return this.evaluateVideoPanelCallback(callbackBase, payload, actionKind!, input);
     }
     if (config.MEDIA_VIDEO_ENABLED && (actionKind === 'video_request' || actionKind === 'video_pass_options')) {
       return this.evaluateVideoCallback(callbackBase, payload, actionKind);

@@ -34,10 +34,11 @@ export class WebCommerceService {
   const products=exact?.products&&typeof exact.products==='object'&&!Array.isArray(exact.products)?exact.products as Record<string,unknown>:{};
   const productTypes=dictionary.product_types&&typeof dictionary.product_types==='object'&&!Array.isArray(dictionary.product_types)?dictionary.product_types as Record<string,unknown>:{};
   return plans.map(plan=>{
-   const semantic=productTypes[plan.kind==='subscription'?(plan.subscription_tier??'base'):plan.kind==='photo'?'photo':plan.feature_key??''];
+   const variant=plan.purchase_variant==='scene_unlock_upgrade';
+   const semantic=variant ? productTypes.scene_unlock_upgrade : productTypes[plan.kind==='subscription'?(plan.subscription_tier??'base'):plan.kind==='photo'?'photo':plan.feature_key??''];
    const specific=products[plan.sku];
    const object=(value:unknown):Record<string,unknown>=>value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:{};
-   const copy={...object(semantic),...object(specific)};
+   const copy=plan.feature_key==='video_pass' ? object(semantic) : {...object(semantic),...object(specific)};
    const localized=(value:unknown,fallback:string)=>typeof value==='string'&&value.trim()?value.replaceAll('{days}',String(plan.subscription_days??'')):fallback;
    return {...plan,title:localized(copy.title,plan.title),description:localized(copy.description,plan.description)};
   });
@@ -51,7 +52,7 @@ export class WebCommerceService {
   const providers=await this.allowedProviders(userId);
   return {products:plans.map(p=>{
    const upgrade=p.subscription_tier==='full'?this.upgrade(p,rights):null;
-   return {sku:p.sku,kind:p.kind,title:p.title,description:p.description,price:p.amount_rub==null?null:{amount:String(p.amount_rub),currency:'RUB'},original_price:p.original_amount_rub==null?null:{amount:String(p.original_amount_rub),currency:'RUB'},promo_key:p.promo_key,subscription_days:p.subscription_days,subscription_tier:p.subscription_tier,feature_key:p.feature_key,requires_chat:p.kind!=='subscription',upgrade:upgrade&&upgrade.amount_rub!=null&&upgrade.amount_rub>0?{subscription_change:'upgrade',base_sku:upgrade.base_sku,price:{amount:String(upgrade.amount_rub),currency:'RUB'},days:30}:null,providers:p.amount_rub==null?[]:providers};
+   return {sku:p.sku,kind:p.kind,title:p.title,description:p.description,price:p.amount_rub==null?null:{amount:String(p.amount_rub),currency:'RUB'},original_price:p.original_amount_rub==null?null:{amount:String(p.original_amount_rub),currency:'RUB'},promo_key:p.promo_key,subscription_days:p.subscription_days,subscription_tier:p.subscription_tier,feature_key:p.feature_key,purchase_variant:p.purchase_variant,scene_session_id:p.scene_session_id,discount_percent:p.discount_percent,requires_chat:p.kind!=='subscription',upgrade:upgrade&&upgrade.amount_rub!=null&&upgrade.amount_rub>0?{subscription_change:'upgrade',base_sku:upgrade.base_sku,price:{amount:String(upgrade.amount_rub),currency:'RUB'},days:30}:null,providers:p.amount_rub==null?[]:providers};
   }),providers,pricing_requires_chat:chatId==null};
  }
  entitlements(userId:string){return this.repository.getEntitlements(userId);}
@@ -72,7 +73,7 @@ export class WebCommerceService {
    const state=states.get(media.media_id);
    if(!state)return {...media,animation_available:false};
    const delivery=state.delivery?.source==='web'?state.delivery:null;
-   return {...media,animation_available:Boolean(state.video&&state.scene_active&&!state.panel_delivered),video_access:state.full_active?'full':state.video_pass_active?'video_pass':null,...(delivery?{video_delivery_id:delivery.delivery_id,video_delivery_status:delivery.status,ready_at:this.repository.videos.publicDelivery(delivery).ready_at}:{})};
+   return {...media,animation_available:Boolean(state.video&&state.scene_active&&!state.panel_delivered&&!state.delivery),video_access:state.full_active?'full':state.video_pass_active?'video_pass':null,...(delivery?{video_delivery_id:delivery.delivery_id,video_delivery_status:delivery.status,ready_at:this.repository.videos.publicDelivery(delivery).ready_at}:{})};
   })};
  }
  async videoAvailability(userId:string,code:string,mediaId:string){
@@ -80,7 +81,7 @@ export class WebCommerceService {
   const offer=await this.repository.getOffer(userId,code,mediaId);
   if(!offer)throw new WebError(404,'media_offer_not_found');
   const state=await this.repository.videos.context(offer);
-  return {media_id:mediaId,animation_available:Boolean(state.video&&state.scene_active&&!state.panel_delivered),video_id:state.video?.video_id??null,full_active:state.full_active,video_pass_active:state.video_pass_active,panel_delivered:state.panel_delivered,scene_session_id:offer.scene_session_id,...(state.delivery?.source==='web'?{delivery:this.repository.videos.publicDelivery(state.delivery)}:{})};
+  return {media_id:mediaId,animation_available:Boolean(state.video&&state.scene_active&&!state.panel_delivered&&!state.delivery),video_id:state.video?.video_id??null,full_active:state.full_active,video_pass_active:state.video_pass_active,panel_delivered:state.panel_delivered,scene_session_id:offer.scene_session_id,...(state.delivery?.source==='web'?{delivery:this.repository.videos.publicDelivery(state.delivery)}:{})};
  }
  async requestVideo(userId:string,code:string,mediaId:string,clientId:string){
   await this.consent(userId);
@@ -108,6 +109,7 @@ export class WebCommerceService {
  }
  private async quote(userId:string,input:{chat_code?:string;sku:string;media_id?:string;subscription_change?:'upgrade'|'renew'}):Promise<WebCommerceQuote>{
   const context=input.chat_code?await this.repository.getContext(userId,input.chat_code):{chat_id:null,chat_code:null,character_i:null,scene_session_id:null,turn_no:0,scene_turn_no:null,scene_mode:null};
+  if (!input.chat_code && config.MEDIA_ACTION_PLANS_JSON.some(item=>item.sku===input.sku && item.feature_key==='video_pass')) throw new WebError(400,'chat_required');
   const plan=(await this.plans(userId,context.chat_id)).find(x=>x.sku===input.sku);
   if(!plan)throw new WebError(404,'product_not_found');
   if(plan.kind!=='subscription'&&!input.chat_code)throw new WebError(400,'chat_required');
@@ -133,12 +135,17 @@ export class WebCommerceService {
    if(!offer||offer.sku!==plan.sku||offer.scene_session_id!==context.scene_session_id)throw new WebError(404,'media_offer_not_found');
    Object.assign(quote,{media_id:offer.media_id,media_signature:offer.media_signature,panel_id:offer.panel_id,turn_no:offer.turn_no,scene_turn_no:offer.scene_turn_no});
   } else if(videoFeature){
+   if (plan.feature_key==='video_pass') {
+    quote.payload={...quote.payload,user_id:userId,purchase_variant:plan.purchase_variant,paid_scene_unlock_token:plan.paid_scene_unlock_token ?? null,
+      original_amount:plan.original_amount_rub,discount_percent:plan.discount_percent ?? 0,
+      final_amount:plan.amount_rub,currency:'RUB',pass_only:!input.media_id};
+   }
    if(plan.feature_key==='video_unlock'&&!input.media_id)throw new WebError(400,'media_id_required');
    if(input.media_id){
     const offer=await this.repository.getOffer(userId,input.chat_code!,input.media_id);
     if(!offer)throw new WebError(404,'media_offer_not_found');
     const access=await this.repository.videos.context(offer);
-    if(!access.video||access.panel_delivered||!access.scene_active)throw new WebError(409,'video_unavailable');
+    if(!access.video||access.panel_delivered||access.delivery||!access.scene_active)throw new WebError(409,'video_unavailable');
     if(access.full_active||access.video_pass_active)throw new WebError(409,'video_already_available');
     Object.assign(quote,{video_id:access.video.video_id,media_id:offer.media_id,requested_photo_uuid:access.video.requested_photo_uuid,
      source_photo_uuid:access.video.source_photo_uuid,media_signature:offer.media_signature,panel_id:offer.panel_id,turn_no:offer.turn_no,scene_turn_no:offer.scene_turn_no});
@@ -146,20 +153,25 @@ export class WebCommerceService {
   } else if(input.media_id) throw new WebError(400,'unexpected_media_id');
   return quote;
  }
- private fingerprint(input:PurchaseInput){return createHash('sha256').update(JSON.stringify({chat_code:input.chat_code,sku:input.sku,provider:input.provider,media_id:input.media_id??null,...(input.subscription_change==='upgrade'?{subscription_change:'upgrade'}:{})})).digest('hex');}
+ private fingerprint(input:PurchaseInput,quote?:WebCommerceQuote){return createHash('sha256').update(JSON.stringify({chat_code:input.chat_code,sku:input.sku,provider:input.provider,media_id:input.media_id??null,
+  ...(quote?.payload?.purchase_variant ? {purchase_variant:quote.payload.purchase_variant,scene_session_id:quote.scene_session_id} : {}),
+  ...(input.subscription_change==='upgrade'?{subscription_change:'upgrade'}:{})})).digest('hex');}
  private providerInput(p:WebPurchase):ProviderCreateInput{return {order_id:p.purchase_id,attempt_id:p.payment_token,amount:p.quote.amount,currency:p.quote.currency,description:p.quote.description,...(p.chat_id==null?{user_id:p.user_id}:{chat_id:p.chat_id})};}
  private async createCheckout(p:WebPurchase):Promise<void>{
   if(!await this.repository.claimCreation(p.purchase_id))return;
   try{const checkout=await this.providers.get(p.provider,'web').create(this.providerInput(p));await this.repository.bindCheckout(p.purchase_id,checkout);}
   catch(error){await this.repository.markCreationFailure(p.purchase_id,!(error instanceof ProviderError)||error.outcome==='ambiguous',error instanceof ProviderError?error.code:'provider_creation_uncertain');}
  }
- publicPurchase(p:WebPurchase){return {purchase_id:p.purchase_id,status:p.status,sku:p.quote.sku,kind:p.quote.kind,provider:p.provider,price:{amount:p.quote.amount,currency:p.quote.currency},checkout_url:p.checkout_url,media_id:p.quote.media_id??null,video_id:p.quote.video_id??null,video_delivery_id:p.quote.payload?.video_delivery_id??null,review_required:p.error_code==='duplicate_payment_requires_review',subscription_tier:p.quote.payload?.subscription_tier,subscription_change:p.quote.payload?.subscription_change,created_at:p.created_at,updated_at:p.updated_at};}
+ publicPurchase(p:WebPurchase){return {purchase_id:p.purchase_id,status:p.status,sku:p.quote.sku,kind:p.quote.kind,provider:p.provider,price:{amount:p.quote.amount,currency:p.quote.currency},...(p.quote.feature_key==='video_pass' && p.quote.payload?.purchase_variant ? {
+  purchase_variant:p.quote.payload.purchase_variant,discount_percent:p.quote.payload.discount_percent,
+  original_price:{amount:String(p.quote.payload.original_amount),currency:p.quote.currency}
+ } : {}),checkout_url:p.checkout_url,media_id:p.quote.media_id??null,video_id:p.quote.video_id??null,video_delivery_id:p.quote.payload?.video_delivery_id??null,review_required:p.error_code==='duplicate_payment_requires_review',subscription_tier:p.quote.payload?.subscription_tier,subscription_change:p.quote.payload?.subscription_change,created_at:p.created_at,updated_at:p.updated_at};}
  async purchase(userId:string,input:PurchaseInput){
   await this.consent(userId);
-  const fingerprint=this.fingerprint(input);
   const old=await this.repository.findByClient(userId,input.client_message_id);
-  if(old){if(old.fingerprint!==fingerprint)throw new WebError(409,'idempotency_conflict');if(old.status==='created')await this.createCheckout(old);return this.publicPurchase(await this.recover(await this.repository.getOwned(userId,old.purchase_id)));}
+  if(old){if(old.fingerprint!==this.fingerprint(input,old.quote))throw new WebError(409,'idempotency_conflict');if(old.status==='created')await this.createCheckout(old);return this.publicPurchase(await this.recover(await this.repository.getOwned(userId,old.purchase_id)));}
   const quote=await this.quote(userId,input);
+  const fingerprint=this.fingerprint(input,quote);
   if(quote.kind==='photo'&&quote.media_id){const free=await this.repository.unlockFree(userId,input.chat_code!,quote.media_id,quote);if(free.unlocked)return free;}
   if(quote.kind==='feature'){const free=await this.repository.redeemFreeFeature(userId,quote,input.client_message_id);if(free.available)return free;}
   if(!input.provider)throw new WebError(402,'payment_required');

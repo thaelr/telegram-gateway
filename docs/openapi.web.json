@@ -5664,6 +5664,24 @@
           },
           "requires_chat": {
             "type": "boolean"
+          },
+          "purchase_variant": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "scene_unlock_upgrade"
+            ]
+          },
+          "discount_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 99
+          },
+          "scene_session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5837,6 +5855,28 @@
           "review_required": {
             "type": "boolean",
             "description": "A second separately paid checkout for a consumed panel requires operator payment reconciliation; no duplicate delivery."
+          },
+          "purchase_variant": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "scene_unlock_upgrade"
+            ]
+          },
+          "discount_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 99
+          },
+          "original_price": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Money"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -5925,6 +5965,10 @@
           "panel_media_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "panel_id": {
+            "type": "string",
+            "description": "Stable ID of this photo panel in the owned chat and scene."
           }
         },
         "required": [
@@ -6039,6 +6083,10 @@
                     "panel_media_id": {
                       "type": "string",
                       "format": "uuid"
+                    },
+                    "panel_id": {
+                      "type": "string",
+                      "description": "Stable ID of this photo panel in the owned chat and scene."
                     }
                   },
                   "required": [
@@ -6198,26 +6246,50 @@
             "format": "date-time"
           },
           "requested_photo_uuid": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
           },
           "source_photo_uuid": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
           },
           "source_photo_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uri"
           },
           "source_photo_reveal_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "same_photo": {
-            "type": ["boolean", "null"]
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "panel_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scene_session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "description": "An owned delivery journal entry. Paired deliveries stay in their existing photo panel; legacy unpaired deliveries remain playable in chat history. Each access issues a fresh signed Storage URL valid for 120 seconds, including after subscription or scene changes. An uncertain initial delivery is not automatically repeated."
@@ -6255,14 +6327,23 @@
             "format": "date-time"
           },
           "panel_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "requested_photo_uuid": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
           },
           "source_photo_uuid": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
           }
         },

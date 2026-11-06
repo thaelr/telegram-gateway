@@ -84,6 +84,21 @@ test('Web semantic translations use real plan duration and cannot be overridden 
  localization.getExactNamespace=async()=>({products:{full:{title:'Specific Full',description:'Specific English plan'}}});
  assert.equal((await service.catalog('u0000001',context.chat_code)).products.find(item=>item.sku==='full')?.title,'Specific Full');
 });
+test('VideoPass and its upgrade use changed semantic copy even when an older SKU translation exists',async()=>{
+ const f=fixture();
+ const strings={products:{pass:{title:'Legacy SKU',description:'Only videos'}},product_types:{
+  video_pass:{title:'VideoPass · full scene + video',description:"Unlimited messages, free photos, and unlimited videos in this chat's current scene."},
+  scene_unlock_upgrade:{title:'Upgrade to VideoPass',description:'Your scene is already unlocked. Add unlimited videos at a special price.'},
+ }};
+ const localization={getNamespace:async()=>strings,getExactNamespace:async()=>strings,getPaymentMethods:async()=>['test']} as any;
+ for (const variant of ['standard','scene_unlock_upgrade'] as const) {
+  const decisions={webProductPlans:async()=>plans.map(p=>p.feature_key==='video_pass'?{...p,purchase_variant:variant}:p)} as unknown as MediaCommerceDecisionService;
+  const svc=new WebCommerceService(f.repo as unknown as WebCommerceRepository,f.service.providers,decisions,f.service.accounts,localization);
+  const offer=(await svc.catalog('u0000001',context.chat_code)).products.find(p=>p.sku==='pass')!;
+  const expected=strings.product_types[variant==='standard'?'video_pass':'scene_unlock_upgrade'];
+  assert.equal(offer.title,expected.title);assert.equal(offer.description,expected.description);
+ }
+});
 test('Web video routes authenticate and reject caller-controlled account, video and storage identities',async(t)=>{
  const app=Fastify();t.after(()=>app.close());const calls:string[]=[];
  registerWebCommerceRoutes(app,{authenticator:{async verify(header){if(header!=='Bearer valid')throw new WebError(401,'unauthorized');return {auth_user_id:'auth',is_anonymous:false,display_name:null,locale:null};}},repository:{resolveIdentity:async()=> 'u0000001'} as unknown as WebRepositoryContract,commerce:{requestVideo:async(user:string)=>{calls.push(user);return {delivery_id:deliveryId};}} as unknown as InstanceType<typeof WebCommerceService>});

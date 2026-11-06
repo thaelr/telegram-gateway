@@ -63,7 +63,7 @@ export class WebVideoAccess {
    source_photo_reveal_at:iso(row.source_photo_reveal_at),requested_photo_uuid:row.requested_photo_uuid??null,
    source_photo_uuid:row.source_photo_uuid??null,source_photo_url:sourcePhotoUrl,
    same_photo:row.requested_photo_uuid==null?null:String(row.requested_photo_uuid)===String(row.source_photo_uuid),
-   panel_id:row.photo_message_id==null?null:String(row.photo_message_id),access_path: '/web/commerce/video-deliveries/' + row.delivery_id};
+   panel_id:row.photo_message_id==null?null:String(row.photo_message_id),scene_session_id:row.scene_session_id??null,access_path: '/web/commerce/video-deliveries/' + row.delivery_id};
  }
  async access(userId: string, id: string) {
   let delivery = await this.owned(userId, id);

@@ -5,6 +5,8 @@ import { calculateMediaPriceRequired } from '../mediaCommerce/mediaAction.js';
 import { compareDecimals, normalizeDecimal, type ProviderCheckout, type ProviderPayment } from '../payments/providers.js';
 import { WebError, type SceneMode } from './types.js';
 import { WebVideoAccess } from './videoAccess.js';
+import { VideoCommerceRepository } from '../videoCommerce.js';
+import { resolveVideoPassPlan } from '../mediaCommerce/plans.js';
 import { config } from '../config.js';
 import {WebPhotoPanels} from './photoPanels.js';
 import {MediaCatalogRepository} from '../mediaCommerceRepository/catalogRepository.js';
@@ -104,7 +106,16 @@ export class WebCommerceRepository {
      const ctx=await this.videos.context({...current,media_signature:quote.media_signature??'',panel_id:quote.panel_id??0,media_id:quote.requested_photo_uuid??quote.media_id??''},tx);
      if(!ctx.scene_active)throw new WebError(409,'stale_scene');
      if(ctx.full_active||ctx.video_pass_active)throw new WebError(409,'video_already_available');
-     if(quote.video_id&&(!ctx.video||ctx.video.video_id!==quote.video_id||ctx.panel_delivered))throw new WebError(409,'stale_video_offer');
+     if(quote.video_id&&(!ctx.video||ctx.video.video_id!==quote.video_id||ctx.panel_delivered||ctx.delivery))throw new WebError(409,'stale_video_offer');
+     if(quote.feature_key==='video_pass'){
+      const offer=await new VideoCommerceRepository(tx as unknown as typeof sql).passOfferContext(current.chat_id,current.scene_session_id,'web');
+      if(offer.user_id!==userId || offer.scene_session_id!==quote.scene_session_id || (!quote.video_id&&!offer.available) ||
+        offer.video_pass_active || offer.full_active)throw new WebError(409,'stale_video_offer');
+      const prices=resolveVideoPassPlan(offer.paid_scene_unlock_token);
+      if(!prices || prices.purchase_variant!==quote.payload?.purchase_variant || prices.paid_scene_unlock_token!==quote.payload?.paid_scene_unlock_token ||
+        prices.amount_rub!==Number(quote.amount) || prices.amount_xtr!==quote.amount_xtr ||
+        prices.original_amount_rub!==quote.payload?.original_amount || prices.discount_percent!==quote.payload?.discount_percent)throw new WebError(409,'stale_video_offer');
+     }
     }
    }
    if(quote.kind==='photo'&&quote.media_id&&await this.isUnlocked(tx,userId,quote.media_id))throw new WebError(409,'media_already_unlocked');
@@ -223,7 +234,13 @@ export class WebCommerceRepository {
    }else if(q.kind==='feature'&&(q.feature_key==='video_unlock'||q.feature_key==='video_pass')){
     if(q.feature_key==='video_pass')await r(tx,'SELECT public.media_activate_video_pass($1,$2)',[p.payment_token,p.chat_id]);
     if(q.video_id){
-     const delivery=await this.videos.prepare({request_key:'paid:'+p.payment_token,payment_token:p.payment_token,chat_id:Number(p.chat_id)},tx);
+     const prepare=(db:DB)=>this.videos.prepare({request_key:'paid:'+p.payment_token,payment_token:p.payment_token,chat_id:Number(p.chat_id)},db);
+     // Keep a paid scene open when preparing the optional video fails. Recovery
+     // retries this immutable snapshot and the existing delivery request key.
+     const delivery=q.feature_key==='video_pass'
+       ? await tx.savepoint(nested=>prepare(nested)).catch(()=>null)
+       : await prepare(tx);
+     if(!delivery)return asPurchase((await r(tx,"UPDATE app_private.web_purchases SET status='fulfillment_pending',error_code='video_delivery_pending',updated_at=clock_timestamp() WHERE purchase_id=$1::uuid RETURNING *",[id]))[0]!);
      if(delivery.status==='duplicate_payment_requires_review'){
       return asPurchase((await r(tx,"UPDATE app_private.web_purchases SET status='fulfillment_pending',error_code='duplicate_payment_requires_review',updated_at=clock_timestamp() WHERE purchase_id=$1::uuid RETURNING *",[id]))[0]!);
      }
@@ -244,7 +261,7 @@ export class WebCommerceRepository {
    }else throw new WebError(409,'unsupported_fulfillment');
    const token=(await r(tx,"SELECT status FROM public.interaction_tokens WHERE token=$1",[p.payment_token]))[0];
    const status=token?.status==='fulfilled'?'fulfilled':'fulfillment_pending';
-   return asPurchase((await r(tx,"UPDATE app_private.web_purchases SET status=$2,updated_at=clock_timestamp() WHERE purchase_id=$1::uuid RETURNING *",[id,status]))[0]!);
+   return asPurchase((await r(tx,"UPDATE app_private.web_purchases SET status=$2,error_code=CASE WHEN error_code='video_delivery_pending' THEN NULL ELSE error_code END,updated_at=clock_timestamp() WHERE purchase_id=$1::uuid RETURNING *",[id,status]))[0]!);
   });
  }
 
@@ -309,15 +326,20 @@ export class WebCommerceRepository {
   const c=await this.context(this.query,userId,code);
   const owned=await r(this.query,"SELECT DISTINCT ON (m.payload_json->>'uuid') m.payload_json->>'uuid' AS media_id,m.created_at::text,m.scene_session_id FROM public.chat_messages m JOIN public.chat_state s USING(chat_id) JOIN public.media_catalog mc ON mc.uuid::text=m.payload_json->>'uuid' WHERE s.user_id=$1 AND mc.character_i=$2 AND m.event_type=ANY($3::text[]) ORDER BY m.payload_json->>'uuid',m.created_at,m.id",[userId,c.character_i,photoEvents]);
   const mediaById=await new MediaCatalogRepository(this.query).loadPhotosByUuid(owned.map(item=>String(item.media_id)));
-  const panelOffers=await r(this.query,"SELECT DISTINCT media_id::text FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2",[userId,c.chat_id]);
-  const panelIds=new Set(panelOffers.map(item=>item.media_id));
-  const unlocked=owned.map(item=>({media_id:item.media_id,...(panelIds.has(item.media_id)?{panel_media_id:item.media_id}:{}),media_kind:'photo',unlocked:true,created_at:iso(item.created_at),scene_session_id:item.scene_session_id,photo_url:mediaById.get(item.media_id)?.photo_url??null}));
-  const offers=await r(this.query,"SELECT media_id::text,sku,scene_session_id,created_at::text,conditions FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2 AND scene_session_id=$3 ORDER BY created_at",[userId,c.chat_id,c.scene_session_id]);
+  const panelOffers=await r(this.query,`SELECT media_id::text,sku,scene_session_id,created_at::text,conditions,panel_id::text,
+   first_value(media_id::text) OVER (PARTITION BY scene_session_id,panel_id ORDER BY created_at,media_id) AS panel_media_id
+   FROM app_private.web_media_offers WHERE user_id=$1 AND chat_id=$2 ORDER BY created_at,media_id`,[userId,c.chat_id]);
+  const bySceneAndPhoto=new Map(panelOffers.map(row=>[JSON.stringify([row.scene_session_id,row.media_id]),row]));
+  const unlocked=owned.map(item=>{
+   const panel=bySceneAndPhoto.get(JSON.stringify([item.scene_session_id,item.media_id]));
+   return {media_id:item.media_id,...(panel?{panel_id:panel.panel_id,panel_media_id:panel.panel_media_id}:{}),media_kind:'photo',unlocked:true,created_at:iso(item.created_at),scene_session_id:item.scene_session_id,photo_url:mediaById.get(item.media_id)?.photo_url??null};
+  });
+  const offers=panelOffers.filter(row=>row.scene_session_id===c.scene_session_id);
   const ownedIds=new Set(owned.map(item=>item.media_id));
   // In-flight deliveries must survive leaving a scene and closing the browser.
   // Reading their IDs does not claim or re-send them; the existing access route
   // performs that operation with the original delivery's claim token.
   const deliveries=await r(this.query,"SELECT * FROM app_private.video_deliveries WHERE user_id=$1 AND chat_id=$2 AND source='web' AND (requested_photo_uuid IS NOT NULL OR status<>'delivered') ORDER BY created_at,delivery_id",[userId,c.chat_id]);
-  return {media:[...unlocked,...offers.filter(item=>!ownedIds.has(item.media_id)).map(item=>({...item,media_id:String(item.media_id),panel_media_id:String(item.media_id),media_kind:'photo',unlocked:false}))],video_deliveries:deliveries.map(row=>this.videos.publicDelivery(row))};
+  return {media:[...unlocked,...offers.filter(item=>!ownedIds.has(item.media_id)).map(item=>({...item,media_id:String(item.media_id),media_kind:'photo',unlocked:false}))],video_deliveries:deliveries.map(row=>this.videos.publicDelivery(row))};
  }
 }

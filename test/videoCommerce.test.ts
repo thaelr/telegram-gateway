@@ -37,7 +37,7 @@ const withLocalization=<T>(execute:()=>T)=>runWithMediaLocalization({
   commerceCopy:{},
 },execute);
 
-function setup(overrides:Partial<VideoContext>={}) {
+function setup(overrides:Partial<VideoContext>={}, paidSceneUnlockToken: string | null = null) {
   const tokens=new Map<string,InteractionTokenRow>();
   const requests:unknown[]=[];
   let claimed=false;
@@ -46,6 +46,7 @@ function setup(overrides:Partial<VideoContext>={}) {
   const repo={
     async upsertCallbackTokens(rows:InteractionTokenRow[]){rows.forEach(row=>tokens.set(row.token,row));return rows.length;},
     async loadCallbackToken(token:string){const row=tokens.get(token);return row ? {...row,found:true,requested_token:token} : null;},
+    async loadMediaContext(){return {unlocked_items_json:[{uuid:photoId,photo_url:'https://private.test/photo'}]};},
     async loadPhotoByUuid(){return {photo_url:'https://private.test/photo'};},
     async upsertInvoiceTokens(rows:Record<string,unknown>[]){invoices.push(...rows);return rows.map(row=>({...row,stored:true,status:'invoice_sent',invoice_link:`https://pay.test/${row.token}`,checkout_url:`https://pay.test/${row.token}`}));},
     async loadAbTestAssignment(){return null;},
@@ -53,11 +54,13 @@ function setup(overrides:Partial<VideoContext>={}) {
   } as unknown as Repo;
   const videos={
     async context(){return {...context,...overrides};},
+    async passOfferContext(){return {scene_session_id:'scene',user_id:'owner',available:!!({...context,...overrides}).video && !overrides.panel_delivered,
+      paid_scene_unlock_token:paidSceneUnlockToken,subscription_active:!!overrides.subscription_sku,full_active:!!overrides.full_active,video_pass_active:!!overrides.video_pass_active,scene_access_active:!!paidSceneUnlockToken};},
     async storePanel(...args:unknown[]){requests.push(args);},
     async prepareDelivery(request:unknown){requests.push(request);return delivery;},
     async getDelivery(){return currentDelivery;},
     async claimDelivery(){if(claimed)return null;claimed=true;return currentDelivery;},
-    async completeDelivery(){currentDelivery={...delivery,status:'delivered',current_reply_markup:{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]}};return currentDelivery;},
+    async completeDelivery(){currentDelivery={...delivery,status:'delivered',telegram_message_id:77,current_reply_markup:{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]}};return currentDelivery;},
     async failDelivery(...args:unknown[]){requests.push(args);return {...delivery,status:args[3]?'failed':'uncertain'};},
   } as unknown as VideoRepo;
   const service=new MediaCommerceDecisionService(repo,{async createStarsInvoice(){throw Error('Unexpected Stars call');}},null,videos,
@@ -95,10 +98,10 @@ test('video context creates only callback metadata, with independent open-chat o
   assert.equal(result.video?.available,true);assert.ok(result.video?.animate_callback_data);assert.ok(result.video?.chat_offer_callback_data);assert.equal(invoices.length,0);
 });
 test('no matching video hides animate, Full and pass suppress the extra commercial offer',async()=>{
-  for(const override of [{video:null},{panel_delivered:true},{full_active:true},{video_pass_active:true}]){
+  for(const override of [{video:null},{panel_delivered:true},{delivery},{full_active:true},{video_pass_active:true}]){
     const {service}=setup(override);const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
     if('video'in override || 'panel_delivered'in override) assert.equal(result.video?.animate_callback_data,undefined);
-    if('full_active'in override || 'video_pass_active'in override) assert.equal(result.video?.chat_offer_callback_data,undefined);
+    assert.equal(result.video?.chat_offer_callback_data,undefined);
   }
 });
 test('entitled click freezes video and original panel into a delivery without invoices',async()=>{
@@ -122,17 +125,22 @@ test('success returns latest persisted panel; ambiguous failure is never made re
   const failure=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:false});
   assert.equal(failure.reason,'video_delivery_uncertain');assert.equal((requests[0] as unknown[])[3],false);
 });
-test('delivered video keeps photo and video navigation inside the original panel',async()=>{
-  const {service}=setup();
+test('confirmed navigation survives financial TTL; claim, foreign owner and wrong panel cannot view media',async()=>{
+  const {service,tokens}=setup();
   const claimed=await service.evaluate({interaction_mode:'claim_video_delivery',delivery_id:deliveryId,chat_id:1});
-  assert.ok(claimed.video_panel_requested_callback_data);assert.ok(claimed.video_panel_video_callback_data);
-  const photo=await service.evaluate({event_type:'callback_query.received',interaction_mode:'callback',chat_id:1,telegram_chat_id:900,
-    callback_data:claimed.video_panel_requested_callback_data});
-  assert.equal(photo.operation,'video_panel_media_ready');assert.equal(photo.panel_media_kind,'photo');assert.equal(photo.target_message_id,77);
+  const token=claimed.video_panel_video_callback_data!;
+  const click=(telegram_chat_id=900,inbound_message_id=77)=>service.evaluate({interaction_mode:'callback',
+    event_type:'callback_query.received',chat_id:1,telegram_chat_id,inbound_message_id,callback_data:token});
+  assert.ok(tokens.get(token)?.expires_at);
+  assert.equal((await click()).operation,'noop');
   await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:true,sent_message_id:77,chat_id:1});
-  const video=await service.evaluate({event_type:'callback_query.received',interaction_mode:'callback',chat_id:1,telegram_chat_id:900,
-    callback_data:claimed.video_panel_video_callback_data});
-  assert.equal(video.operation,'video_panel_media_ready');assert.equal(video.panel_media_kind,'video');assert.equal(video.target_message_id,77);
+  assert.equal(tokens.get(token)?.expires_at,null);
+  assert.equal((await click(901)).operation,'noop');
+  assert.equal((await click(900,78)).operation,'noop');
+  const video=await click();
+  assert.equal(video.operation,'video_panel_media_ready');assert.equal(video.panel_media_kind,'video');
+  assert.deepEqual(video.panel_navigation_row?.map(button=>button.callback_data),
+    [claimed.video_panel_requested_callback_data,token,claimed.video_panel_requested_callback_data]);
 });
 test('failed paid one-shot delivery retries without another checkout',async()=>{
   const {service,invoices}=setup({delivery:{...delivery,status:'failed'}});
@@ -185,4 +193,62 @@ test('standalone VideoPass reveal retains the animate callback',async()=>{
   const result=await service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:prepared.video!.chat_offer_callback_data!,raw_update:{callback_query:{message:{reply_markup:markup}}}});
   assert.equal(result.video?.pass_payment_options?.length,1);assert.equal(result.video?.unlock_payment_options?.length,0);
   assert.ok(result.video_keep_tokens?.includes(prepared.video!.animate_callback_data!));assert.ok(!result.video_control_tokens?.includes(prepared.video!.animate_callback_data!));
+});
+
+test('scene offer uses separate upgrade prices, original amount and server-selected variant',async(t)=>{
+  const pass=config.MEDIA_ACTION_PLANS_JSON.find(item=>item.feature_key==='video_pass')!;
+  const old=pass.scene_unlock_upgrade;
+  const oldPromos=config.MEDIA_PROMOTIONS_JSON;
+  t.after(()=>{pass.scene_unlock_upgrade=old;config.MEDIA_PROMOTIONS_JSON=oldPromos;});
+  config.MEDIA_PROMOTIONS_JSON=[{promo_key:'test-pass',starts_at:'2000-01-01T00:00:00Z',ends_at:'2099-01-01T00:00:00Z',
+    items:[{sku:pass.sku,promo_amount_xtr:10,promo_amount_rub:20}]}];
+  pass.scene_unlock_upgrade={amount_xtr:101,amount_rub:227,discount_percent:50};
+  const upgraded=setup({},'paid-scene');
+  const open={interaction_mode:'video_context' as const,chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77,current_uuid:photoId};
+  const visible=await upgraded.service.evaluate(open);
+  assert.match(visible.video!.pass_button_text!,/101.*51.*50%/);
+  const response=await upgraded.service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:visible.video!.chat_offer_callback_data!});
+  const option=response.video?.pass_payment_options?.[0];
+  assert.deepEqual([option?.amount,option?.original_amount,option?.discount_percent],[51,101,50]);
+  const invoice=(upgraded.invoices as Array<{payload_json:Record<string,unknown>}>)[0]!.payload_json;
+  assert.deepEqual([invoice.purchase_variant,invoice.original_amount,invoice.final_amount,invoice.currency,invoice.discount_percent,invoice.paid_scene_unlock_token,invoice.user_id,invoice.video_id,invoice.pass_only,invoice.promo_key],
+    ['scene_unlock_upgrade',101,51,'XTR',50,'paid-scene','owner',null,true,null]);
+  const concrete=await upgraded.service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:visible.video!.animate_callback_data!});
+  assert.ok(concrete.video?.pass_reveal_callback_data);
+  const both=upgraded.invoices as Array<{token:string,payload_json:Record<string,unknown>}>;
+  assert.equal(both.filter(row=>row.payload_json.feature_key==='video_pass'&&row.payload_json.video_id===videoId).length,1);
+  assert.equal(new Set(both.map(row=>row.token)).size,both.length);
+  const products=await upgraded.service.webProductPlans(1);
+  assert.deepEqual(products.filter(p=>p.feature_key==='video_pass').map(p=>[p.amount_rub,p.original_amount_rub,p.purchase_variant]),[[114,227,'scene_unlock_upgrade']]);
+  assert.equal(products.some(p=>p.feature_key==='scene_unlock'),false);
+  assert.equal((await upgraded.service.webProductPlans(null)).some(p=>p.feature_key==='video_pass'),false);
+  assert.deepEqual((await setup().service.webProductPlans(1)).filter(p=>p.feature_key==='video_pass').map(p=>[p.amount_xtr,p.purchase_variant]),[[10,'standard']]);
+  delete pass.scene_unlock_upgrade;
+  assert.deepEqual((await upgraded.service.webProductPlans(1)).filter(p=>p.feature_key==='video_pass').map(p=>[p.amount_xtr,p.purchase_variant]),[[10,'standard']]);
+});
+
+test('subscription command and daily paywall independently keep Scene Unlock and gate VideoPass by available media',async()=>{
+  for(const reason of ['subscription_command','daily_turn_limit'] as const){
+    for(const available of [true,false]){
+      const {service}=setup(available ? {} : {video:null});
+      const menu=await service.evaluate({interaction_mode:'subscription_offer',subscription_offer_reason:reason,
+        idempotency_key:'menu-'+reason,chat_id:1,scene_session_id:'scene',telegram_chat_id:900});
+      assert.equal(menu.operation,'subscription_offer_ready');
+      assert.ok(menu.token_rows?.some(item=>item.action_kind==='free_scene_unlock'));
+      assert.equal(!!menu.video?.chat_offer_callback_data,available);
+      assert.ok(menu.subscription_offer_items?.some(item=>item.payment_kind==='subscription'));
+      if(!available)continue;
+      const reveal=await service.evaluate({interaction_mode:'callback',event_type:'callback_query.received',chat_id:1,
+        callback_data:menu.video!.chat_offer_callback_data!,inbound_message_id:91});
+      assert.equal(reveal.video?.pass_menu,true);assert.equal(reveal.target_message_id,91);
+      assert.equal(reveal.video?.pass_payment_options?.length,1);assert.equal(reveal.video?.unlock_payment_options?.length,0);
+    }
+  }
+});
+
+test('Web chat with Base can still buy a VideoPass; active subscriptions remove redundant Scene Unlock',async()=>{
+  const base=await setup({subscription_sku:'base',subscription_until:'2099-01-01T00:00:00Z'}).service.webProductPlans(1);
+  assert.equal(base.some(p=>p.feature_key==='scene_unlock'),false);assert.ok(base.some(p=>p.feature_key==='video_pass'));
+  const full=await setup({subscription_sku:'full',subscription_until:'2099-01-01T00:00:00Z',full_active:true}).service.webProductPlans(1);
+  assert.equal(full.some(p=>p.feature_key==='video_pass'||p.feature_key==='scene_unlock'),false);
 });

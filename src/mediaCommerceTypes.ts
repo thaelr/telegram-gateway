@@ -72,6 +72,7 @@ export interface MediaPaymentOption {
   sort_order?: number | null;
   subscription_days?: number | null;
   original_amount?: number | null;
+  discount_percent?: number;
   promo_key?: string | null;
   title: string;
   description: string;
@@ -161,6 +162,8 @@ export interface MediaCommerceDecisionResponse {
   video_panel_requested_callback_data?: string | null;
   video_panel_source_callback_data?: string | null;
   video_panel_video_callback_data?: string | null;
+  panel_navigation_row?: Array<{text: string; callback_data: string}>;
+  panel_navigation_tokens?: string[];
   panel_media_kind?: 'photo'|'video';
   panel_media_url?: string | null;
   panel_media_uuid?: string | null;

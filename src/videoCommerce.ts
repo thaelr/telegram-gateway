@@ -27,6 +27,8 @@ export interface VideoDeliveryRequest {
   payment_token?: string | null;
 }
 export interface VideoDelivery {
+  scene_session_id?: string;
+  telegram_message_id?: number | null;
   delivery_id: string; status: string; eligible_at: string; video_id: string;
   photo_message_id: number | null; telegram_chat_id: number | null; source: 'telegram' | 'web';
   bucket_name: string; storage_path: string; current_reply_markup?: unknown;
@@ -38,7 +40,20 @@ export interface VideoDelivery {
   panel_caption?: string | null; panel_caption_entities?: unknown[] | null;
   same_photo?: boolean | null;
 }
+export interface VideoPassOfferContext {
+  scene_session_id: string | null;
+  user_id: string | null;
+  available: boolean;
+  scene_access_active: boolean;
+  paid_scene_unlock_token: string | null;
+  subscription_active: boolean;
+  full_active: boolean;
+  video_pass_active: boolean;
+}
 export interface VideoUi {
+  pass_button_text?: string;
+  pass_offer_text?: string;
+  pass_menu?: boolean;
   available: boolean; consumed: boolean; animate_callback_data?: string | null;
   chat_offer_callback_data?: string | null;
   unlock_payment_options?: MediaPaymentOption[]; pass_reveal_callback_data?: string | null;
@@ -57,6 +72,12 @@ export class VideoCommerceRepository {
     if (!rows[0]?.value) throw new Error('Video context missing');
     return {...rows[0].value,delivery:normalizeDelivery(rows[0].value.delivery ?? null)};
   }
+  async passOfferContext(chatId: number, scene: string | null, channel: 'telegram' | 'web'): Promise<VideoPassOfferContext> {
+    const rows = await this.query<{value: VideoPassOfferContext}[]>`SELECT public.media_video_pass_offer_context(
+      ${chatId}::bigint, ${scene}::text, ${channel}::text) AS value`;
+    if (!rows[0]?.value) throw new Error('VideoPass offer context missing');
+    return rows[0].value;
+  }
   async prepareDelivery(input: VideoDeliveryRequest): Promise<VideoDelivery | null> {
     const rows = await this.query<{ value: VideoDelivery | null }[]>`SELECT public.media_prepare_video_delivery(${this.query.json(input as unknown as JSONValue)}::jsonb) AS value`;
     return normalizeDelivery(rows[0]?.value ?? null);
@@ -66,7 +87,9 @@ export class VideoCommerceRepository {
     return normalizeDelivery(rows[0]?.value ?? null);
   }
   async getDelivery(id: string): Promise<VideoDelivery | null> {
-    const rows=await this.query<{value:VideoDelivery|null}[]>`SELECT app_private.video_delivery_json(d) AS value FROM app_private.video_deliveries d WHERE d.delivery_id=${id}::uuid`;
+    const rows=await this.query<{value:VideoDelivery|null}[]>`SELECT app_private.video_delivery_json(d) AS value
+      FROM app_private.video_deliveries d JOIN public.chat_state c ON c.chat_id=d.chat_id AND c.user_id=d.user_id
+      WHERE d.delivery_id=${id}::uuid`;
     return normalizeDelivery(rows[0]?.value??null);
   }
   async completeDelivery(id: string, claimToken: string, messageId: number | null): Promise<VideoDelivery | null> {
@@ -94,5 +117,6 @@ export class VideoCommerceRepository {
 function normalizeDelivery(value: VideoDelivery | null): VideoDelivery | null {
   if (!value) return null;
   const id=(raw:unknown):number|null=>raw == null ? null : Number.isSafeInteger(Number(raw)) ? Number(raw) : null;
-  return {...value,chat_id:id(value.chat_id) ?? undefined,photo_message_id:id(value.photo_message_id),telegram_chat_id:id(value.telegram_chat_id)};
+  return {...value,chat_id:id(value.chat_id) ?? undefined,photo_message_id:id(value.photo_message_id),
+    telegram_message_id:id(value.telegram_message_id),telegram_chat_id:id(value.telegram_chat_id)};
 }

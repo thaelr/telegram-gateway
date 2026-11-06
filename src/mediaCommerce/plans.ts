@@ -197,3 +197,19 @@ export function resolveActionPlanByFeatureKey(
 
   return plan ? applyPromotionToPlan(plan) : null;
 }
+
+export type VideoPassVariant = 'standard' | 'scene_unlock_upgrade';
+
+export function resolveVideoPassPlan(paidSceneUnlockToken: string | null) {
+  const plan = resolveActionPlanByFeatureKey('video_pass');
+  if (!plan) return null;
+  const prices = paidSceneUnlockToken ? plan.scene_unlock_upgrade : null;
+  if (!prices) return {...plan, purchase_variant: 'standard' as const, discount_percent: 0, paid_scene_unlock_token: null};
+  const discounted = (amount: number) => Math.max(1, Math.round(amount * (100 - prices.discount_percent) / 100));
+  const amountXtr = discounted(prices.amount_xtr);
+  const amountRub = prices.amount_rub === null ? null : discounted(prices.amount_rub);
+  return {...plan, purchase_variant: 'scene_unlock_upgrade' as const, paid_scene_unlock_token: paidSceneUnlockToken,
+    amount_xtr: amountXtr, final_amount_xtr: amountXtr, original_amount_xtr: prices.amount_xtr,
+    amount_rub: amountRub, final_amount_rub: amountRub, original_amount_rub: prices.amount_rub,
+    discount_percent: prices.discount_percent, promo_key: null, promo_active: false};
+}

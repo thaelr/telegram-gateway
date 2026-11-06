@@ -190,3 +190,15 @@ test("maintenance whitelist accepts only positive numeric Telegram user ids", as
     /Invalid enum value/u,
   );
 });
+
+test("scene unlock upgrade is a strict video_pass-only price block", async () => {
+  const block={amount_xtr:101,amount_rub:214,discount_percent:99};
+  const check=(feature_key:string,scene_unlock_upgrade:unknown)=>importConfigWith({
+    MEDIA_ACTION_PLANS_JSON:JSON.stringify([{...baselineActionPlans[0],feature_key,scene_unlock_upgrade}]),
+  });
+  await check("video_pass",block);
+  for(const bad of [{...block,amount_xtr:0},{...block,amount_rub:0.5},{...block,discount_percent:100},{...block,extra:1}]){
+    await assert.rejects(check("video_pass",bad));
+  }
+  await assert.rejects(check("scene_unlock",block));
+});

@@ -14,4 +14,8 @@ export type WebProductPlan = {
  upgrade_full_amount_xtr?: number;
  upgrade_full_amount_rub?: number | null;
  feature_key?: string;
+ scene_session_id?: string;
+ purchase_variant?: import('../mediaCommerce/plans.js').VideoPassVariant;
+ discount_percent?: number;
+ paid_scene_unlock_token?: string | null;
 };

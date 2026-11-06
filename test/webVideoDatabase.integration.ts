@@ -12,14 +12,15 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
  const invoice={title:'Neutral test',description:'Neutral synthetic product',label:'Test',button_text:'Buy',amount_xtr:10,amount_rub:100};
  process.env.MEDIA_SUBSCRIPTION_PLANS_JSON=JSON.stringify([{...invoice,sku:'test_base_video',days:7,amount_rub:300,amount_xtr:30},{...invoice,sku:'test_full_video',tier:'full',days:30,amount_rub:1000,amount_xtr:100}]);
  process.env.MEDIA_PHOTO_PLANS_JSON=JSON.stringify([{...invoice,sku:'test_photo_video'}]);
- process.env.MEDIA_ACTION_PLANS_JSON=JSON.stringify([{...invoice,sku:'test_video_unlock',feature_key:'video_unlock'},{...invoice,sku:'test_video_pass',feature_key:'video_pass',amount_rub:500}]);
+ process.env.MEDIA_ACTION_PLANS_JSON=JSON.stringify([{...invoice,sku:'test_video_unlock',feature_key:'video_unlock'},{...invoice,sku:'test_scene_unlock',feature_key:'scene_unlock'},
+  {...invoice,sku:'test_video_pass',feature_key:'video_pass',amount_rub:500,scene_unlock_upgrade:{amount_xtr:91,amount_rub:333,discount_percent:50}}]);
  process.env.MEDIA_VIDEO_ENABLED='true';process.env.MEDIA_UPGRADE_DISCOUNT_PERCENT='10';process.env.MEDIA_FULL_DISCOUNT_PERCENT='15';process.env.SUPABASE_URL='https://example.supabase.co';process.env.SUPABASE_SERVICE_ROLE_KEY='synthetic';
- const [{WebRepository},{WebCommerceRepository},{WebCommerceService},{WebVideoAccess},{MediaCommerceDecisionService},{MediaCommerceRepository},{PaymentProviderRegistry}]=await Promise.all([import('../src/web/repository.js'),import('../src/web/commerceRepository.js'),import('../src/web/commerce.js'),import('../src/web/videoAccess.js'),import('../src/mediaCommerceDecisionService.js'),import('../src/mediaCommerceRepository.js'),import('../src/payments/providers.js')]);
+ const [{WebRepository},{WebCommerceRepository},{WebCommerceService},{WebVideoAccess},{VideoCommerceRepository},{MediaCommerceDecisionService},{MediaCommerceRepository},{PaymentProviderRegistry}]=await Promise.all([import('../src/web/repository.js'),import('../src/web/commerceRepository.js'),import('../src/web/commerce.js'),import('../src/web/videoAccess.js'),import('../src/videoCommerce.js'),import('../src/mediaCommerceDecisionService.js'),import('../src/mediaCommerceRepository.js'),import('../src/payments/providers.js')]);
  const db=postgres(url,{max:8,prepare:false,onnotice:()=>{}});t.after(()=>db.end());
  const accounts=new WebRepository(db);let signed=0;
  const access=new WebVideoAccess(db,async()=>{signed++;return 'https://example.invalid/synthetic-signed-video';});
  const repo=new WebCommerceRepository(db,access);
- const decisions=new MediaCommerceDecisionService(new MediaCommerceRepository(db),{async createStarsInvoice(){throw new Error('Forbidden external call');}},null,undefined,undefined,{async getTelegramCopy(){return testTelegramUxCopy;}});
+ const decisions=new MediaCommerceDecisionService(new MediaCommerceRepository(db),{async createStarsInvoice(){throw new Error('Forbidden external call');}},null,new VideoCommerceRepository(db),undefined,{async getTelegramCopy(){return testTelegramUxCopy;}});
  const provider={id:'test_video',platforms:['web' as const],async create(input:any){return {external_id:'external-'+input.order_id,external_kind:'payment' as const,checkout_url:'https://example.invalid/pay',expires_at:null};},verifyNotification(raw:string){return JSON.parse(raw);}};
  const service=new WebCommerceService(repo,new PaymentProviderRegistry([provider]),decisions,accounts);
  const owner=async()=>{
@@ -54,7 +55,7 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   const userId=(await accounts.bootstrap({auth_user_id:randomUUID(),is_anonymous:false,display_name:'Account subscription fixture',locale:'en'})).user_id;
   await accounts.updateMe(userId,{language:'en'});await accounts.confirmAge(userId);await accounts.acceptTerms(userId);
   const catalog=await service.catalog(userId);assertWebContract('Catalog',catalog);assert.equal(catalog.products.find(p=>p.sku==='test_base_video')!.requires_chat,false);
-  assert.equal(catalog.products.find(p=>p.sku==='test_video_pass')!.requires_chat,true);
+  assert.equal(catalog.products.some(p=>p.sku==='test_video_pass'),false);
   await assert.rejects(service.purchase(userId,{client_message_id:randomUUID(),sku:'test_video_pass',provider:'test_video'}),{code:'chat_required'});
   const left={client_message_id:randomUUID(),sku:'test_base_video',provider:'test_video'},right={...left,client_message_id:randomUUID()};
   const purchases=await Promise.all([service.purchase(userId,left),service.purchase(userId,right)]);
@@ -115,7 +116,10 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   assert.deepEqual(await service.photoPanelAction(o.userId,o.code,anchor,request),previous);
   await assert.rejects(service.photoPanelAction(o.userId,o.code,anchor,{...request,action:'photo_next'}),{code:'idempotency_conflict'});
   assert.equal((await service.photoPanelAction(o.userId,o.code,anchor,{client_message_id:randomUUID(),action:'photo_next',current_media_id:ordered.at(-1)!})).media_id,ordered[0]);
-  assert.ok((await service.gallery(o.userId,o.code)).media.every(item=>'panel_media_id' in item));
+  const gallery=await service.gallery(o.userId,o.code);assertWebContract('Gallery',gallery);
+  assert.equal(gallery.media.length,unlocked.length);
+  assert.ok(gallery.media.every(item=>'panel_media_id' in item&&item.panel_media_id===anchor&&
+    'panel_id' in item&&item.panel_id===String(panel)&&'scene_session_id' in item&&item.scene_session_id===o.scene));
   const [count]=await db`SELECT count(*) AS n FROM public.chat_messages WHERE chat_id=${o.chatId} AND event_type='media.photo.viewed.nav'`;assert.equal(Number(count!.n),2);
   await db`UPDATE public.chat_state SET active_scene_session_id=NULL WHERE chat_id=${o.chatId}`;
   assert.equal((await service.photoPanel(o.userId,o.code,anchor)).actions.more,false);
@@ -144,13 +148,65 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   assert.equal((await new WebRepository(db).history(o.userId,o.code)).messages.filter(message=>message.id==='v:'+id).length,0);
 
  });
- await t.test('VideoPass buys only video for its current scene and expires on replacement',async()=>{
+ await t.test('VideoPass opens this scene before the limit, includes available video and expires on replacement',async()=>{
   const o=await owner(),m=await media(o);const p=await buy(o,'test_video_pass');await paid(p.purchase_id);
+  const purchase=await repo.getById(p.purchase_id);assert.equal(purchase!.status,'fulfilled');assert.equal(purchase!.quote.payload!.purchase_variant,'standard');
+  const [count]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE payment_token=${purchase!.payment_token}`;assert.equal(count!.n,0);
   const available=await service.videoAvailability(o.userId,o.code,m.id);assert.equal(available.video_pass_active,true);assert.equal(available.full_active,false);
-  const [s]=await db`SELECT scene_access_unlocked_at FROM public.chat_scene_sessions WHERE scene_session_id=${o.scene}`;assert.equal(s!.scene_access_unlocked_at,null);
+  const [s]=await db`SELECT scene_access_unlocked_at FROM public.chat_scene_sessions WHERE scene_session_id=${o.scene}`;assert.ok(s!.scene_access_unlocked_at);
   const requested=await service.requestVideo(o.userId,o.code,m.id,'pass-request');const same=await service.requestVideo(o.userId,o.code,m.id,'pass-request');assert.equal(same.delivery_id,requested.delivery_id);
   const next='video-web-'+randomUUID();await db`INSERT INTO public.chat_scene_sessions(chat_id,scene_session_id,scene_mode,character_i) VALUES(${o.chatId},${next},'roleplay',1)`;await db`UPDATE public.chat_state SET active_scene_session_id=${next} WHERE chat_id=${o.chatId}`;
   const [ctx]=await db`SELECT public.media_video_context(${o.chatId},${next},1,${m.signature},${m.panel}) AS value`;assert.equal(ctx!.value.video_pass_active,false);
+ });
+ await t.test('paid scene upgrade freezes its independent RUB quote across retry, config and scene changes',async()=>{
+  const o=await owner();await media(o);
+  const catalog=await service.catalog(o.userId,o.code);
+  assert.ok(catalog.products.some(item=>item.feature_key==='scene_unlock'));
+  assert.equal(catalog.products.find(item=>item.feature_key==='video_pass')?.purchase_variant,'standard');
+  const scene=await buy(o,'test_scene_unlock');await paid(scene.purchase_id);
+  const before=await repo.getById(scene.purchase_id);
+  const after=await service.catalog(o.userId,o.code);
+  assert.equal(after.products.some(item=>item.feature_key==='scene_unlock'),false);
+  const offer=after.products.find(item=>item.feature_key==='video_pass')!;
+  assert.equal(offer.purchase_variant,'scene_unlock_upgrade');assert.equal(offer.price?.amount,'167');assert.equal(offer.original_price?.amount,'333');
+  const p=await buy(o,'test_video_pass');
+  const purchase=await repo.getById(p.purchase_id);
+  assert.equal(purchase!.quote.amount_xtr,46);assert.equal(purchase!.quote.payload?.paid_scene_unlock_token,before!.payment_token);
+  const [snap]=await db`SELECT payload_json,amount,currency FROM public.interaction_tokens WHERE token=${purchase!.payment_token}`;
+  assert.deepEqual([snap!.amount,snap!.currency,snap!.payload_json.purchase_variant,snap!.payload_json.original_amount,
+    snap!.payload_json.discount_percent,snap!.payload_json.final_amount,snap!.payload_json.pass_only],[167,'RUB','scene_unlock_upgrade',333,50,167,true]);
+  const {config}=await import('../src/config.js');
+  const plan=config.MEDIA_ACTION_PLANS_JSON.find(item=>item.feature_key==='video_pass')!;
+  const saved=plan.scene_unlock_upgrade;
+  try {
+   delete plan.scene_unlock_upgrade;
+   const next='upgrade-next-'+randomUUID();
+   await db`INSERT INTO public.chat_scene_sessions(chat_id,scene_session_id,scene_mode,character_i) VALUES(${o.chatId},${next},'roleplay',1)`;
+   await db`UPDATE public.chat_state SET active_scene_session_id=${next} WHERE chat_id=${o.chatId}`;
+   await Promise.all([paid(p.purchase_id),paid(p.purchase_id)]);
+   assert.equal((await repo.getById(p.purchase_id))!.status,'fulfilled');
+   const [flags]=await db`SELECT scene_access_unlocked_at,scene_access_payment_token FROM public.chat_scene_sessions WHERE chat_id=${o.chatId} AND scene_session_id=${o.scene}`;
+   assert.ok(flags!.scene_access_unlocked_at);assert.equal(flags!.scene_access_payment_token,before!.payment_token);
+   const [other]=await db`SELECT scene_access_unlocked_at FROM public.chat_scene_sessions WHERE chat_id=${o.chatId} AND scene_session_id=${next}`;
+   assert.equal(other!.scene_access_unlocked_at,null);
+   const [passes]=await db`SELECT count(*)::int AS n FROM app_private.video_scene_passes WHERE user_id=${o.userId} AND scene_session_id=${o.scene}`;
+   assert.equal(passes!.n,1);assert.equal((await repo.getById(p.purchase_id))!.quote.amount,'167');
+  }finally{plan.scene_unlock_upgrade=saved;}
+ });
+ await t.test('temporary delivery failure preserves confirmed VideoPass rights while fulfillment retries the same snapshot',async(st)=>{
+  const o=await owner(),m=await media(o),p=await buy(o,'test_video_pass',{media_id:m.id});
+  const fail=st.mock.method(access,'prepare',async()=>{throw Error('fixture: delivery unavailable');});
+  await paid(p.purchase_id);
+  const pending=await repo.getById(p.purchase_id);
+  assert.equal(pending!.status,'fulfillment_pending');assert.equal(pending!.error_code,'video_delivery_pending');
+  const [receipt]=await db`SELECT t.status,s.scene_access_unlocked_at FROM public.interaction_tokens t
+    JOIN public.chat_scene_sessions s ON s.chat_id=t.chat_id AND s.scene_session_id=t.scene_session_id WHERE t.token=${pending!.payment_token}`;
+  assert.equal(receipt!.status,'paid');assert.ok(receipt!.scene_access_unlocked_at);
+  fail.mock.restore();
+  const recovered=await service.status(o.userId,p.purchase_id);
+  assert.ok(recovered.video_delivery_id);assert.equal(recovered.purchase_id,p.purchase_id);
+  const [count]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE payment_token=${pending!.payment_token}`;
+  assert.equal(count!.n,1);
  });
  await t.test('two separate paid checkouts for one panel persist a review marker without a second delivery',async()=>{
   const o=await owner(),m=await media(o);

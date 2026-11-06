@@ -89,9 +89,15 @@ function buildPaymentInputRow(input: {
   const localized = products && typeof products === "object" && !Array.isArray(products)
     ? (products as Record<string, unknown>)[input.plan.sku]
     : null;
-  const copy = localized && typeof localized === "object" && !Array.isArray(localized)
-    ? localized as Record<string, unknown>
-    : {};
+  const types = getMediaCommerceCopy().product_types;
+  const productTypes = types && typeof types === "object" && !Array.isArray(types) ? types as Record<string, unknown> : {};
+  const pass = input.payload_json.feature_key === "video_pass";
+  const variant = input.payload_json.purchase_variant === "scene_unlock_upgrade";
+  const semantic = pass ? productTypes[variant ? "scene_unlock_upgrade" : "video_pass"] : null;
+  const copy = {
+    ...(localized && typeof localized === "object" && !Array.isArray(localized) ? localized as Record<string, unknown> : {}),
+    ...(semantic && typeof semantic === "object" && !Array.isArray(semantic) ? semantic as Record<string, unknown> : {}),
+  };
   const localizedText = (key: string, fallback: string): string =>
     typeof copy[key] === "string" && copy[key].trim() ? copy[key] : fallback;
   const isStars = input.source === "stars";
