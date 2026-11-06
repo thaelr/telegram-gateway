@@ -45,6 +45,7 @@ export const WEB_HISTORY_CTE = `WITH history AS (
    (SELECT o.turn_no FROM app_private.web_media_offers o WHERE o.chat_id=d.chat_id AND o.panel_id=d.photo_message_id LIMIT 1),0),
   d.delivered_at,'video',d.video_id::text,d.delivery_id::text,NULL,NULL
  FROM app_private.video_deliveries d WHERE d.chat_id=$1 AND d.status='delivered' AND d.delivered_at IS NOT NULL
+  AND d.requested_photo_uuid IS NULL
 )`;
 
 /** Same journal projection for every already-owned chat in one SQL statement. */

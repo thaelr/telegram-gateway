@@ -6,9 +6,12 @@ import type { MediaPaymentOption } from './mediaCommerceTypes.js';
 export interface VideoContextInput {
   chat_id: number; scene_session_id: string | null; character_i?: number | null;
   media_signature?: string | null; panel_message_id?: number | null;
+  requested_photo_uuid?: string | null;
 }
 export interface VideoContext {
-  video: { video_id: string; bucket_name: string; storage_path: string } | null;
+  video: { video_id: string; bucket_name: string; storage_path: string;
+    requested_photo_uuid: string; source_photo_uuid: string;
+    source_photo_bucket_name: string; source_photo_storage_path: string } | null;
   full_active: boolean; video_pass_active: boolean; subscription_sku: string | null;
   subscription_until: string | null; panel_delivered: boolean; scene_active: boolean;
   current_reply_markup?: unknown; panel_media_signature?: string | null; panel_photo_uuid?: string | null;
@@ -19,6 +22,8 @@ export interface VideoContext {
 export interface VideoDeliveryRequest {
   request_key: string; chat_id: number; scene_session_id: string | null; video_id: string;
   photo_message_id: number | null; telegram_chat_id: number | null; source: 'telegram' | 'web';
+  requested_photo_uuid?: string | null;
+  panel_caption?: string | null; panel_caption_entities?: unknown[] | null;
   payment_token?: string | null;
 }
 export interface VideoDelivery {
@@ -27,6 +32,11 @@ export interface VideoDelivery {
   bucket_name: string; storage_path: string; current_reply_markup?: unknown;
   video_control_tokens?: string[]; video_payment_urls?: string[]; chat_id?: number;
   delivered_at?: string | null;
+  requested_photo_uuid?: string | null; source_photo_uuid?: string | null;
+  source_photo_bucket_name?: string | null; source_photo_storage_path?: string | null;
+  panel_insert_after_uuid?: string | null; source_photo_reveal_at?: string | null;
+  panel_caption?: string | null; panel_caption_entities?: unknown[] | null;
+  same_photo?: boolean | null;
 }
 export interface VideoUi {
   available: boolean; consumed: boolean; animate_callback_data?: string | null;
@@ -42,7 +52,8 @@ export class VideoCommerceRepository {
   async context(input: VideoContextInput): Promise<VideoContext> {
     const rows = await this.query<{ value: VideoContext }[]>`SELECT public.media_video_context(
       ${input.chat_id}::bigint, ${input.scene_session_id}::text, ${input.character_i ?? null}::integer,
-      ${input.media_signature ?? null}::text, ${input.panel_message_id ?? null}::bigint) AS value`;
+      ${input.media_signature ?? null}::text, ${input.panel_message_id ?? null}::bigint,
+      ${input.requested_photo_uuid ?? null}::text) AS value`;
     if (!rows[0]?.value) throw new Error('Video context missing');
     return {...rows[0].value,delivery:normalizeDelivery(rows[0].value.delivery ?? null)};
   }
@@ -53,6 +64,10 @@ export class VideoCommerceRepository {
   async claimDelivery(id: string, claimToken: string): Promise<VideoDelivery | null> {
     const rows = await this.query<{ value: VideoDelivery | null }[]>`SELECT public.media_claim_video_delivery(${id}::uuid,${claimToken}::uuid) AS value`;
     return normalizeDelivery(rows[0]?.value ?? null);
+  }
+  async getDelivery(id: string): Promise<VideoDelivery | null> {
+    const rows=await this.query<{value:VideoDelivery|null}[]>`SELECT app_private.video_delivery_json(d) AS value FROM app_private.video_deliveries d WHERE d.delivery_id=${id}::uuid`;
+    return normalizeDelivery(rows[0]?.value??null);
   }
   async completeDelivery(id: string, claimToken: string, messageId: number | null): Promise<VideoDelivery | null> {
     const rows = await this.query<{ value: VideoDelivery | null }[]>`SELECT public.media_complete_video_delivery(${id}::uuid,${claimToken}::uuid,${messageId}::bigint) AS value`;

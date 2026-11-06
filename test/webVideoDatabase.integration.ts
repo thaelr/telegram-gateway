@@ -36,9 +36,11 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
  const media=async(o:Awaited<ReturnType<typeof owner>>)=>{
   const id=randomUUID(),vid=randomUUID(),signature='synthetic_'+id;
   await db`INSERT INTO public.media_catalog(character_i,uuid,scene_hint,bucket_name,storage_path,status) VALUES(1,${id},${signature},'fixture',${id+'.png'},'ready')`;
-  await db`INSERT INTO public.video_catalog(video_id,character_i,media_signature,storage_path,status) VALUES(${vid},1,${signature},${vid+'.mp4'},'ready')`;
+  await db`INSERT INTO public.video_catalog(video_id,character_i,media_signature,source_photo_uuid,storage_path,status) VALUES(${vid},1,${signature},${id},${vid+'.mp4'},'ready')`;
   await service.prepareOffer(o.userId,o.code,{media_id:id,sku:'test_photo_video',media_signature:signature});
-  const offer=await repo.getOffer(o.userId,o.code,id);assert.ok(offer);return {id,vid,signature,panel:offer.panel_id};
+  const offer=await repo.getOffer(o.userId,o.code,id);assert.ok(offer);
+  const opened=await service.unlock(o.userId,o.code,id,{client_message_id:randomUUID()});assert.equal('unlocked' in opened&&opened.unlocked,true);
+  return {id,vid,signature,panel:offer.panel_id};
  };
  const buy=async(o:Awaited<ReturnType<typeof owner>>,sku:string,extra:Record<string,unknown>={})=>{
   const result=await service.purchase(o.userId,{client_message_id:randomUUID(),chat_code:o.code,sku,provider:'test_video',...extra});
@@ -132,14 +134,14 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   assert.equal((await service.videoAccess(o.userId,id)).status,'delivered');assert.equal(signed,1);
   assert.equal((await service.status(o.userId,p.purchase_id)).status,'fulfilled');
   await assert.rejects(service.videoAccess('u0000000',id));
-  const transcript=await accounts.history(o.userId,o.code);assert.equal(transcript.messages.filter(message=>message.id==='v:'+id).length,1);
-  assert.equal(transcript.messages.find(message=>message.id==='v:'+id)?.video_delivery_id,id);
+  const transcript=await accounts.history(o.userId,o.code);assert.equal(transcript.messages.filter(message=>message.id==='v:'+id).length,0);
+  assert.equal((await service.gallery(o.userId,o.code)).video_deliveries?.some(delivery=>delivery.delivery_id===id),true);
   const [attempts]=await db`SELECT attempts FROM app_private.video_deliveries WHERE delivery_id=${id}`;
   await db`UPDATE app_private.video_deliveries SET delivered_at=clock_timestamp()-interval '35 days' WHERE delivery_id=${id}`;
   await db`UPDATE public.users SET subscription_until=now()-interval '1 day' WHERE user_id=${o.userId}`;
   assert.equal((await service.videoAccess(o.userId,id)).status,'delivered');
   const [replayed]=await db`SELECT attempts FROM app_private.video_deliveries WHERE delivery_id=${id}`;assert.equal(replayed!.attempts,attempts!.attempts);
-  assert.equal((await new WebRepository(db).history(o.userId,o.code)).messages.filter(message=>message.id==='v:'+id).length,1);
+  assert.equal((await new WebRepository(db).history(o.userId,o.code)).messages.filter(message=>message.id==='v:'+id).length,0);
 
  });
  await t.test('VideoPass buys only video for its current scene and expires on replacement',async()=>{
@@ -172,6 +174,7 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   const o=await owner(),m=await media(o),p=await buy(o,'test_video_unlock',{media_id:m.id});await paid(p.purchase_id);
   const stored=await repo.getById(p.purchase_id),delivery=String(stored!.quote.payload!.video_delivery_id);
   await db`UPDATE app_private.video_deliveries SET eligible_at=now()-interval '1 second' WHERE delivery_id=${delivery}`;await service.videoAccess(o.userId,delivery);
+  await db`UPDATE app_private.video_deliveries SET requested_photo_uuid=NULL WHERE delivery_id=${delivery}`;
   const time='2026-11-03T12:00:00.123456Z';
   const operation=await accounts.enqueue(o.userId,o.code,'message','repeated-hello','Hello');
   await db`INSERT INTO public.chat_messages(chat_id,scene_session_id,turn_no,seq_in_turn,sender_type,direction,source,message_text,source_event_id,created_at)
@@ -179,12 +182,12 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   await db`INSERT INTO public.chat_messages(chat_id,scene_session_id,turn_no,seq_in_turn,sender_type,direction,source,message_type,event_type,message_text,payload_json,created_at)
    VALUES(${o.chatId},${o.scene},1,2,'assistant','outbound','web','photo','media.photo.unlocked.free','A photo',${db.json({uuid:m.id,panel_message_id:m.panel})},${time}::text::timestamptz+interval '1 microsecond')`;
   await db`UPDATE app_private.video_deliveries SET delivered_at=${time}::text::timestamptz+interval '2 microseconds' WHERE delivery_id=${delivery}`;
-  const complete=await accounts.history(o.userId,o.code);assert.deepEqual(complete.messages.map(message=>message.media_kind??'text'),['text','photo','video']);
-  assert.deepEqual(complete.messages.map(message=>message.created_at),['2026-11-03T12:00:00.123456Z','2026-11-03T12:00:00.123457Z','2026-11-03T12:00:00.123458Z']);
+  const complete=await accounts.history(o.userId,o.code);assert.deepEqual(complete.messages.slice(0,3).map(message=>message.media_kind??'text'),['text','photo','video']);
+  assert.deepEqual(complete.messages.slice(0,3).map(message=>message.created_at),['2026-11-03T12:00:00.123456Z','2026-11-03T12:00:00.123457Z','2026-11-03T12:00:00.123458Z']);
   assert.ok(complete.messages[1]!.photo_url?.includes(m.id));assert.equal(complete.messages[1]!.text,'A photo');assert.equal(complete.messages[0]!.client_message_id,'repeated-hello');
   const ids:string[]=[];let before:string|undefined;
   do {const page=await accounts.history(o.userId,o.code,before,1);ids.push(...page.messages.map(message=>message.id));before=page.next_before??undefined;}while(before);
-  assert.equal(new Set(ids).size,3,JSON.stringify({ids,expected:complete.messages.map(message=>message.id)}));assert.deepEqual(ids.reverse(),complete.messages.map(message=>message.id));
+  assert.equal(new Set(ids).size,complete.messages.length,JSON.stringify({ids,expected:complete.messages.map(message=>message.id)}));assert.deepEqual(ids.reverse(),complete.messages.map(message=>message.id));
   await assert.rejects(accounts.history('u0000000',o.code),{code:'chat_not_found'});
  });
  await t.test('EN NOWPayments invoice, signed confirmation and duplicate IPN fulfill the same paid delivery once',async()=>{

@@ -28,8 +28,10 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
     const chatId=Number(c!.chat_id),scene='tg-video-'+randomUUID(),signature='neutral_'+randomUUID(),video=randomUUID(),panel=123,telegram=777000;
     await db`INSERT INTO public.chat_scene_sessions(chat_id,scene_session_id,scene_mode,character_i) VALUES(${chatId},${scene},'roleplay',1)`;
     await db`UPDATE public.chat_state SET active_scene_session_id=${scene},current_turn_no=0,scene_turn_no=0 WHERE chat_id=${chatId}`;
-    await db`INSERT INTO public.video_catalog(video_id,character_i,media_signature,storage_path,status) VALUES(${video},1,${signature},${video+'.mp4'},'ready')`;
     const photo=randomUUID();
+    await db`INSERT INTO public.media_catalog(character_i,uuid,scene_hint,bucket_name,storage_path,status) VALUES(1,${photo},${signature},'media_bucket',${photo+'.jpg'},'ready')`;
+    await db`INSERT INTO public.video_catalog(video_id,character_i,media_signature,source_photo_uuid,storage_path,status) VALUES(${video},1,${signature},${photo},${video+'.mp4'},'ready')`;
+    await videos.storePanel(chatId,panel,{inline_keyboard:[]},signature,photo);
     const initial=await service.evaluate({interaction_mode:'video_context',chat_id:chatId,telegram_chat_id:telegram,scene_session_id:scene,media_signature:signature,panel_message_id:panel,current_uuid:photo});
     assert.ok(initial.video?.animate_callback_data,'Null character_i resolves canonical chat character');
     const markup={inline_keyboard:[[{text:'Next',callback_data:'legacy-next'}],[{text:'Video',callback_data:initial.video.animate_callback_data}]]};

@@ -93,7 +93,7 @@ export class WebCommerceService {
   const state=await this.repository.videos.context(offer);
   if(!state.video||!state.scene_active||state.panel_delivered)throw new WebError(409,'video_unavailable');
   if(!state.full_active&&!state.video_pass_active)throw new WebError(402,'video_payment_required');
-  const delivery=await this.repository.videos.prepare({request_key:key,chat_id:offer.chat_id,scene_session_id:offer.scene_session_id,video_id:state.video.video_id,media_signature:offer.media_signature,photo_uuid:offer.media_id,photo_message_id:offer.panel_id});
+  const delivery=await this.repository.videos.prepare({request_key:key,chat_id:offer.chat_id,scene_session_id:offer.scene_session_id,video_id:state.video.video_id,media_signature:offer.media_signature,requested_photo_uuid:offer.media_id,photo_message_id:offer.panel_id});
   return this.repository.videos.publicDelivery(delivery);
  }
  async videoAccess(userId:string,id:string){
@@ -140,7 +140,8 @@ export class WebCommerceService {
     const access=await this.repository.videos.context(offer);
     if(!access.video||access.panel_delivered||!access.scene_active)throw new WebError(409,'video_unavailable');
     if(access.full_active||access.video_pass_active)throw new WebError(409,'video_already_available');
-    Object.assign(quote,{video_id:access.video.video_id,media_id:offer.media_id,media_signature:offer.media_signature,panel_id:offer.panel_id,turn_no:offer.turn_no,scene_turn_no:offer.scene_turn_no});
+    Object.assign(quote,{video_id:access.video.video_id,media_id:offer.media_id,requested_photo_uuid:access.video.requested_photo_uuid,
+     source_photo_uuid:access.video.source_photo_uuid,media_signature:offer.media_signature,panel_id:offer.panel_id,turn_no:offer.turn_no,scene_turn_no:offer.scene_turn_no});
    }
   } else if(input.media_id) throw new WebError(400,'unexpected_media_id');
   return quote;

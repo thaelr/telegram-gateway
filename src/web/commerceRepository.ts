@@ -18,6 +18,7 @@ export type WebCommerceQuote = Omit<WebCommerceContext,'chat_id'|'chat_code'|'ch
  sku:string; title:string; description:string; kind:'subscription'|'photo'|'feature';
  amount:string; currency:string; amount_xtr:number|null; subscription_days?:number;
  feature_key?:string; media_id?:string; media_signature?:string; panel_id?:number; video_id?:string;
+ requested_photo_uuid?:string;source_photo_uuid?:string;
  price_required?:number; payload?:Record<string,unknown>;
 };
 export type WebPurchase = {
@@ -100,7 +101,7 @@ export class WebCommerceRepository {
     if((quote.feature_key==='scene_unlock'&&(credits?.free_scene_unlocks??0)>0)||(quote.feature_key==='fast_scene_skip'&&(credits?.free_fast_scene_skips??0)>0))throw new WebError(409,'free_feature_available');
     if(quote.feature_key==='fast_scene_skip'&&current.scene_mode!=='fast')throw new WebError(409,'feature_not_available');
     if(quote.feature_key==='video_unlock'||quote.feature_key==='video_pass'){
-     const ctx=await this.videos.context({...current,media_signature:quote.media_signature??'',panel_id:quote.panel_id??0},tx);
+     const ctx=await this.videos.context({...current,media_signature:quote.media_signature??'',panel_id:quote.panel_id??0,media_id:quote.requested_photo_uuid??quote.media_id??''},tx);
      if(!ctx.scene_active)throw new WebError(409,'stale_scene');
      if(ctx.full_active||ctx.video_pass_active)throw new WebError(409,'video_already_available');
      if(quote.video_id&&(!ctx.video||ctx.video.video_id!==quote.video_id||ctx.panel_delivered))throw new WebError(409,'stale_video_offer');
@@ -111,7 +112,7 @@ export class WebCommerceRepository {
    if(amount.includes('.')||Number(amount)>2147483647||compareDecimals(amount,'0')<=0)throw new WebError(400,'invalid_order_amount');
    const id=randomUUID(),token='web_inv_'+randomUUID();
    const action=quote.kind==='subscription'?'subscription_payment':quote.kind==='photo'?'photo_payment':'feature_payment';
-   const payload={...(quote.payload??{}),source:'web',user_id:userId,purchase_id:id,web_client_ids:[clientId],idempotency_key:id,chat_id:quote.chat_id,scene_session_id:quote.scene_session_id,turn_no:quote.turn_no,scene_turn_no:quote.scene_turn_no,character_i:quote.character_i,scene_mode:quote.scene_mode,subscription_days:quote.subscription_days??null,subscription_sku:quote.kind==='subscription'?quote.sku:null,feature_key:quote.feature_key??null,media_signature:quote.media_signature??null,target_message_id:quote.panel_id??null,photo_message_id:quote.panel_id??null,photo_uuid:quote.media_id??null,video_id:quote.video_id??null,photo_sku:quote.kind==='photo'?quote.sku:null};
+   const payload={...(quote.payload??{}),source:'web',user_id:userId,purchase_id:id,web_client_ids:[clientId],idempotency_key:id,chat_id:quote.chat_id,scene_session_id:quote.scene_session_id,turn_no:quote.turn_no,scene_turn_no:quote.scene_turn_no,character_i:quote.character_i,scene_mode:quote.scene_mode,subscription_days:quote.subscription_days??null,subscription_sku:quote.kind==='subscription'?quote.sku:null,feature_key:quote.feature_key??null,media_signature:quote.media_signature??null,target_message_id:quote.panel_id??null,photo_message_id:quote.panel_id??null,photo_uuid:quote.media_id??null,requested_photo_uuid:quote.requested_photo_uuid??null,source_photo_uuid:quote.source_photo_uuid??null,video_id:quote.video_id??null,photo_sku:quote.kind==='photo'?quote.sku:null};
    if(quote.chat_id==null){
     if(quote.kind!=='subscription')throw new WebError(400,'chat_required');
     await r(tx,"INSERT INTO public.interaction_tokens(token,kind,chat_id,payload_json,action_kind,sku,payment_source,amount,currency,amount_xtr,invoice_title,invoice_description,invoice_label,invoice_button_text) VALUES($1,'invoice_payload',NULL,$2::text::jsonb,'subscription_payment',$3,$4,$5::integer,$6,$7::integer,$8,$9,$8,$8)",[token,JSON.stringify(payload),quote.sku,provider,amount,quote.currency.toUpperCase(),quote.amount_xtr,quote.title,quote.description]);
@@ -316,7 +317,7 @@ export class WebCommerceRepository {
   // In-flight deliveries must survive leaving a scene and closing the browser.
   // Reading their IDs does not claim or re-send them; the existing access route
   // performs that operation with the original delivery's claim token.
-  const deliveries=await r(this.query,"SELECT * FROM app_private.video_deliveries WHERE user_id=$1 AND chat_id=$2 AND source='web' AND status<>'delivered' ORDER BY created_at,delivery_id",[userId,c.chat_id]);
+  const deliveries=await r(this.query,"SELECT * FROM app_private.video_deliveries WHERE user_id=$1 AND chat_id=$2 AND source='web' AND (requested_photo_uuid IS NOT NULL OR status<>'delivered') ORDER BY created_at,delivery_id",[userId,c.chat_id]);
   return {media:[...unlocked,...offers.filter(item=>!ownedIds.has(item.media_id)).map(item=>({...item,media_id:String(item.media_id),panel_media_id:String(item.media_id),media_kind:'photo',unlocked:false}))],video_deliveries:deliveries.map(row=>this.videos.publicDelivery(row))};
  }
 }

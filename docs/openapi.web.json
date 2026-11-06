@@ -6196,9 +6196,31 @@
           "expires_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "requested_photo_uuid": {
+            "type": ["string", "null"],
+            "format": "uuid"
+          },
+          "source_photo_uuid": {
+            "type": ["string", "null"],
+            "format": "uuid"
+          },
+          "source_photo_url": {
+            "type": ["string", "null"],
+            "format": "uri"
+          },
+          "source_photo_reveal_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "same_photo": {
+            "type": ["boolean", "null"]
+          },
+          "panel_id": {
+            "type": ["string", "null"]
           }
         },
-        "description": "An owned delivery journal entry. Initial delivery becomes eligible at ready_at. Successful deliveries remain playable in chat history indefinitely, including after subscription/scene changes. Each access issues a fresh signed Storage URL valid for 120 seconds; its expiry does not expire the delivered message. An uncertain initial delivery is not automatically repeated."
+        "description": "An owned delivery journal entry. Paired deliveries stay in their existing photo panel; legacy unpaired deliveries remain playable in chat history. Each access issues a fresh signed Storage URL valid for 120 seconds, including after subscription or scene changes. An uncertain initial delivery is not automatically repeated."
       },
       "VideoDeliveredData": {
         "type": "object",
@@ -6231,6 +6253,17 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "panel_id": {
+            "type": ["string", "null"]
+          },
+          "requested_photo_uuid": {
+            "type": ["string", "null"],
+            "format": "uuid"
+          },
+          "source_photo_uuid": {
+            "type": ["string", "null"],
+            "format": "uuid"
           }
         },
         "required": [

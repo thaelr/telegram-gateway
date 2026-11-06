@@ -19,10 +19,13 @@ type Repo=ConstructorParameters<typeof MediaCommerceDecisionService>[0];
 type VideoRepo=NonNullable<ConstructorParameters<typeof MediaCommerceDecisionService>[3]>;
 const videoId='00000000-0000-4000-8000-000000000001';
 const deliveryId='00000000-0000-4000-8000-000000000002';
-const context:VideoContext={video:{video_id:videoId,bucket_name:'videos',storage_path:'one.mp4'},full_active:false,video_pass_active:false,
+const photoId='11111111-1111-4111-8111-111111111111';
+const context:VideoContext={video:{video_id:videoId,bucket_name:'videos',storage_path:'one.mp4',requested_photo_uuid:photoId,
+  source_photo_uuid:photoId,source_photo_bucket_name:'photos',source_photo_storage_path:'one.jpg'},full_active:false,video_pass_active:false,
   subscription_sku:null,subscription_until:null,panel_delivered:false,scene_active:true};
 const delivery:VideoDelivery={delivery_id:deliveryId,status:'pending',eligible_at:'2026-10-28T12:00:05Z',video_id:videoId,
-  photo_message_id:77,telegram_chat_id:900,source:'telegram',bucket_name:'videos',storage_path:'one.mp4'};
+  photo_message_id:77,telegram_chat_id:900,source:'telegram',bucket_name:'videos',storage_path:'one.mp4',chat_id:1,
+  requested_photo_uuid:photoId,source_photo_uuid:photoId,source_photo_bucket_name:'photos',source_photo_storage_path:'one.jpg',same_photo:true};
 const localization={
   async getTelegramCopy(){return testTelegramUxCopy;},
   async getPaymentMethods():Promise<Array<'stars'|'sbp'>>{return config.SBP_ENABLED ? ['sbp','stars'] : ['stars'];},
@@ -38,10 +41,12 @@ function setup(overrides:Partial<VideoContext>={}) {
   const tokens=new Map<string,InteractionTokenRow>();
   const requests:unknown[]=[];
   let claimed=false;
+  let currentDelivery=delivery;
   const invoices:unknown[]=[];
   const repo={
     async upsertCallbackTokens(rows:InteractionTokenRow[]){rows.forEach(row=>tokens.set(row.token,row));return rows.length;},
     async loadCallbackToken(token:string){const row=tokens.get(token);return row ? {...row,found:true,requested_token:token} : null;},
+    async loadPhotoByUuid(){return {photo_url:'https://private.test/photo'};},
     async upsertInvoiceTokens(rows:Record<string,unknown>[]){invoices.push(...rows);return rows.map(row=>({...row,stored:true,status:'invoice_sent',invoice_link:`https://pay.test/${row.token}`,checkout_url:`https://pay.test/${row.token}`}));},
     async loadAbTestAssignment(){return null;},
     async loadSceneAccessStatus(){return {subscription_active:!!overrides.subscription_sku,scene_is_active:true,active_scene_session_id:'scene',scene_access_active:false};},
@@ -50,8 +55,9 @@ function setup(overrides:Partial<VideoContext>={}) {
     async context(){return {...context,...overrides};},
     async storePanel(...args:unknown[]){requests.push(args);},
     async prepareDelivery(request:unknown){requests.push(request);return delivery;},
-    async claimDelivery(){if(claimed)return null;claimed=true;return delivery;},
-    async completeDelivery(){return {...delivery,status:'delivered',current_reply_markup:{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]}};},
+    async getDelivery(){return currentDelivery;},
+    async claimDelivery(){if(claimed)return null;claimed=true;return currentDelivery;},
+    async completeDelivery(){currentDelivery={...delivery,status:'delivered',current_reply_markup:{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]}};return currentDelivery;},
     async failDelivery(...args:unknown[]){requests.push(args);return {...delivery,status:args[3]?'failed':'uncertain'};},
   } as unknown as VideoRepo;
   const service=new MediaCommerceDecisionService(repo,{async createStarsInvoice(){throw Error('Unexpected Stars call');}},null,videos,
@@ -115,6 +121,18 @@ test('success returns latest persisted panel; ambiguous failure is never made re
   assert.equal(success.delivered,true);assert.deepEqual(success.reply_markup,{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]});
   const failure=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:false});
   assert.equal(failure.reason,'video_delivery_uncertain');assert.equal((requests[0] as unknown[])[3],false);
+});
+test('delivered video keeps photo and video navigation inside the original panel',async()=>{
+  const {service}=setup();
+  const claimed=await service.evaluate({interaction_mode:'claim_video_delivery',delivery_id:deliveryId,chat_id:1});
+  assert.ok(claimed.video_panel_requested_callback_data);assert.ok(claimed.video_panel_video_callback_data);
+  const photo=await service.evaluate({event_type:'callback_query.received',interaction_mode:'callback',chat_id:1,telegram_chat_id:900,
+    callback_data:claimed.video_panel_requested_callback_data});
+  assert.equal(photo.operation,'video_panel_media_ready');assert.equal(photo.panel_media_kind,'photo');assert.equal(photo.target_message_id,77);
+  await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:true,sent_message_id:77,chat_id:1});
+  const video=await service.evaluate({event_type:'callback_query.received',interaction_mode:'callback',chat_id:1,telegram_chat_id:900,
+    callback_data:claimed.video_panel_video_callback_data});
+  assert.equal(video.operation,'video_panel_media_ready');assert.equal(video.panel_media_kind,'video');assert.equal(video.target_message_id,77);
 });
 test('failed paid one-shot delivery retries without another checkout',async()=>{
   const {service,invoices}=setup({delivery:{...delivery,status:'failed'}});

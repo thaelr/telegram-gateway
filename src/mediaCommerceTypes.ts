@@ -16,6 +16,7 @@ export type MediaCommerceRoute =
 
 export type MediaCommerceOperation =
   | "video_ui_ready"
+  | "video_panel_media_ready"
   | "video_delivery_required"
   | "video_delivery_claimed"
   | "video_delivery_stored"
@@ -148,6 +149,21 @@ export interface MediaCommerceDecisionResponse {
   claim_token?: string;
   eligible_at?: string;
   video_url?: string;
+  requested_photo_uuid?: string | null;
+  source_photo_uuid?: string | null;
+  source_photo_bucket_name?: string | null;
+  source_photo_storage_path?: string | null;
+  source_photo_url?: string | null;
+  source_photo_reveal_at?: string | null;
+  same_photo?: boolean | null;
+  panel_caption?: string | null;
+  panel_caption_entities?: unknown[] | null;
+  video_panel_requested_callback_data?: string | null;
+  video_panel_source_callback_data?: string | null;
+  video_panel_video_callback_data?: string | null;
+  panel_media_kind?: 'photo'|'video';
+  panel_media_url?: string | null;
+  panel_media_uuid?: string | null;
   delivered?: boolean;
   delivery_success?: boolean;
   reply_markup?: unknown;

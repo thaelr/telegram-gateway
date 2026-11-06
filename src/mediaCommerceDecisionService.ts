@@ -219,6 +219,13 @@ function renderUx(
   );
 }
 
+function sourcePhotoUrl(bucket: string | null | undefined,path: string | null | undefined): string | null {
+  const cleanPath=path?.trim().replace(/^\/+/,"")??"";
+  const raw=bucket?.trim()??"";
+  const resolved=config.MEDIA_BUCKET_ALIAS_MAP_JSON[raw.toLowerCase()]??raw;
+  return cleanPath&&resolved ? `${config.MEDIA_STORAGE_BASE_URL.replace(/\/+$/u,"")}/storage/v1/object/public/${resolved}/${cleanPath}` : null;
+}
+
 function buildStableCallbackToken(parts: Array<string | number | null | undefined>): string {
   const hash = createHash("sha256")
     .update(parts.map((part) => String(part ?? "")).join("\u001f"))
@@ -1916,12 +1923,15 @@ export class MediaCommerceDecisionService {
       turn_no:base.turn_no ?? null,scene_turn_no:base.scene_turn_no ?? null,media_signature:base.media_signature ?? null,
       target_message_id:base.target_message_id ?? base.panel_message_id ?? null,current_uuid:base.current_uuid ?? base.selected_uuid ?? null,
       base_price_xtr:0,next_action:action,requested_action:action,button_text:action === 'video_request' ? renderUx(getMediaUxCopy().media.animate_photo_button) : renderUx(getMediaUxCopy().media.video_unlock_button),
-      extraPayload:{character_i:base.character_i ?? null,telegram_chat_id:base.telegram_chat_id ?? null,...extra,action_kind:action}});
+      extraPayload:{character_i:base.character_i ?? null,telegram_chat_id:base.telegram_chat_id ?? null,
+        panel_text:base.caption_text ?? base.panel_text ?? null,panel_entities_json:base.caption_entities_json ?? base.panel_entities_json ?? [],
+        ...extra,action_kind:action}});
   }
 
   private async loadVideoContext(base: MediaCommerceDecisionResponse): Promise<VideoContext> {
     return this.videos.context({chat_id:base.chat_id!,scene_session_id:base.scene_session_id ?? null,
-      character_i:base.character_i,media_signature:base.media_signature,panel_message_id:base.target_message_id ?? base.panel_message_id});
+      character_i:base.character_i,media_signature:base.media_signature,panel_message_id:base.target_message_id ?? base.panel_message_id,
+      requested_photo_uuid:base.current_uuid ?? base.selected_uuid ?? null});
   }
 
   private async decoratePhotoVideo(base: MediaCommerceDecisionResponse): Promise<MediaCommerceDecisionResponse> {
@@ -1936,7 +1946,8 @@ export class MediaCommerceDecisionService {
       video.pass_price_rub = pass.amount_rub ?? null;
     }
     if (!video.available || video.consumed) return {...base,video};
-    const row = this.videoToken(base,'video_request',{video_id:context.video!.video_id,character_i:context.character_i ?? base.character_i});
+    const row = this.videoToken(base,'video_request',{video_id:context.video!.video_id,character_i:context.character_i ?? base.character_i,
+      requested_photo_uuid:context.video!.requested_photo_uuid,source_photo_uuid:context.video!.source_photo_uuid});
     await this.repository.upsertCallbackTokens([row]);
     return {...base,video:{...video,animate_callback_data:row.token},token_rows:[...(base.token_rows ?? []),row],
       token_rows_prepared:(base.token_rows_prepared ?? 0)+1,token_rows_inserted:(base.token_rows_inserted ?? 0)+1};
@@ -1959,7 +1970,50 @@ export class MediaCommerceDecisionService {
     }
     return {...base,operation:['queued','pending','failed','ready'].includes(delivery.status) ? 'video_delivery_required' : 'noop',
       delivery_id:delivery.delivery_id,eligible_at:delivery.eligible_at,target_message_id:delivery.photo_message_id,
-      telegram_chat_id:delivery.telegram_chat_id,reason:`video_delivery_${delivery.status}`};
+      telegram_chat_id:delivery.telegram_chat_id,requested_photo_uuid:delivery.requested_photo_uuid,
+      source_photo_uuid:delivery.source_photo_uuid,source_photo_reveal_at:delivery.source_photo_reveal_at,
+      source_photo_url:sourcePhotoUrl(delivery.source_photo_bucket_name,delivery.source_photo_storage_path),
+      panel_caption:delivery.panel_caption,panel_caption_entities:delivery.panel_caption_entities,
+      same_photo:delivery.same_photo,reason:`video_delivery_${delivery.status}`};
+  }
+
+  private async videoPanelTokens(base:MediaCommerceDecisionResponse,delivery:VideoDelivery) {
+    if(!delivery.requested_photo_uuid||!delivery.source_photo_uuid||!delivery.photo_message_id)return null;
+    const make=(action:string,current:string)=>{const row=this.videoToken({...base,chat_id:delivery.chat_id??base.chat_id,
+      target_message_id:delivery.photo_message_id,current_uuid:current,caption_text:delivery.panel_caption,
+      caption_entities_json:delivery.panel_caption_entities},action,{delivery_id:delivery.delivery_id,
+      requested_photo_uuid:delivery.requested_photo_uuid,source_photo_uuid:delivery.source_photo_uuid});
+      row.token='btn_'+createHash('sha256').update([action,delivery.delivery_id].join(':')).digest('hex').slice(0,32);return row;};
+    const requested=make('video_panel_requested_photo',delivery.requested_photo_uuid);
+    const source=delivery.source_photo_uuid===delivery.requested_photo_uuid?requested:make('video_panel_source_photo',delivery.source_photo_uuid);
+    const video=make('video_panel_video',delivery.source_photo_uuid);
+    const callbacks={video_panel_requested_callback_data:requested.token,video_panel_source_callback_data:source.token,video_panel_video_callback_data:video.token};
+    const rows=[...new Map([requested,source,video].map(item=>[item.token,item])).values()];
+    for(const row of rows)Object.assign(row.payload_json,callbacks);
+    await this.repository.upsertCallbackTokens(rows);
+    return callbacks;
+  }
+
+  private async evaluateVideoPanelCallback(base:MediaCommerceDecisionResponse,payload:Record<string,unknown>,action:string):Promise<MediaCommerceDecisionResponse>{
+    const id=typeof payload.delivery_id==='string'?payload.delivery_id:null;
+    if(!id)return {...base,operation:'noop',reason:'video_delivery_required'};
+    const delivery=await this.videos.getDelivery(id);
+    if(!delivery||delivery.chat_id!==base.chat_id||delivery.photo_message_id!==base.target_message_id||!delivery.requested_photo_uuid||!delivery.source_photo_uuid)return {...base,operation:'noop',reason:'video_panel_changed'};
+    const callbacks=await this.videoPanelTokens(base,delivery);
+    if(!callbacks)return {...base,operation:'noop',reason:'video_panel_changed'};
+    let mediaUrl:string|null=null;let mediaUuid:string|null=null;let kind:'photo'|'video'='photo';
+    if(action==='video_panel_video'){
+      if(delivery.status!=='delivered')return {...base,operation:'noop',reason:'video_delivery_not_ready'};
+      mediaUrl=await this.videoSigner(delivery.bucket_name,delivery.storage_path);kind='video';
+    }else if(action==='video_panel_source_photo'){mediaUrl=sourcePhotoUrl(delivery.source_photo_bucket_name,delivery.source_photo_storage_path);mediaUuid=delivery.source_photo_uuid;}
+    else {const photo=await this.repository.loadPhotoByUuid(delivery.requested_photo_uuid);mediaUrl=photo?.photo_url??null;mediaUuid=delivery.requested_photo_uuid;}
+    if(!mediaUrl)return {...base,operation:'noop',reason:'video_panel_media_unavailable'};
+    return {...base,...callbacks,operation:'video_panel_media_ready',delivery_id:delivery.delivery_id,
+      target_message_id:delivery.photo_message_id,telegram_chat_id:delivery.telegram_chat_id,panel_media_kind:kind,panel_media_url:mediaUrl,panel_media_uuid:mediaUuid,
+      requested_photo_uuid:delivery.requested_photo_uuid,source_photo_uuid:delivery.source_photo_uuid,
+      panel_caption:delivery.panel_caption,panel_caption_entities:delivery.panel_caption_entities,
+      video_control_tokens:delivery.video_control_tokens ?? [],video_payment_urls:delivery.video_payment_urls ?? [],
+      current_reply_markup:delivery.current_reply_markup,reply_markup:delivery.current_reply_markup,reason:'video_panel_media_ready'};
   }
 
   private async evaluateVideoCallback(base: MediaCommerceDecisionResponse, payload: Record<string,unknown>, action: string): Promise<MediaCommerceDecisionResponse> {
@@ -1982,7 +2036,9 @@ export class MediaCommerceDecisionService {
       if (!targetMessageId || !frozen.telegram_chat_id) return {...frozen,operation:'noop',reason:'video_panel_required'};
       return this.deliveryResponse(frozen,await this.videos.prepareDelivery({request_key:`video:${base.callback_data}`,
         chat_id:frozen.chat_id!,scene_session_id:frozen.scene_session_id ?? null,video_id:context.video!.video_id,
-        photo_message_id:targetMessageId,telegram_chat_id:frozen.telegram_chat_id,source:'telegram'}));
+        photo_message_id:targetMessageId,telegram_chat_id:frozen.telegram_chat_id,source:'telegram',
+        requested_photo_uuid:context.video!.requested_photo_uuid,panel_caption:frozen.caption_text ?? frozen.panel_text,
+        panel_caption_entities:(frozen.caption_entities_json ?? frozen.panel_entities_json ?? []) as unknown[]}));
     }
     const unlock = resolveActionPlanByFeatureKey('video_unlock');
     const pass = resolveActionPlanByFeatureKey('video_pass');
@@ -1994,6 +2050,10 @@ export class MediaCommerceDecisionService {
       media_signature:frozen.media_signature,video_id:passOnly ? null : context.video?.video_id,
       photo_message_id:passOnly ? null : targetMessageId,target_message_id:targetMessageId,
       telegram_chat_id:frozen.telegram_chat_id,source:'telegram',current_uuid:frozen.current_uuid,
+      requested_photo_uuid:passOnly ? null : context.video?.requested_photo_uuid,
+      source_photo_uuid:passOnly ? null : context.video?.source_photo_uuid,
+      panel_text:frozen.caption_text ?? frozen.panel_text ?? null,
+      panel_entities_json:frozen.caption_entities_json ?? frozen.panel_entities_json ?? [],
       requested_action:'video_request',base_reply_markup:base.current_reply_markup};
     const plans = [!passOnly ? unlock : null,pass].filter((plan): plan is NonNullable<typeof plan> => plan != null);
     const inputs = plans.flatMap(plan => buildPaymentInputs({base_token:`pay_v_${purchaseRoot}_${plan.feature_key === 'video_pass' ? 'p' : 'u'}`,
@@ -2063,8 +2123,16 @@ export class MediaCommerceDecisionService {
       if (!delivery) return {...base,reason:'video_delivery_not_claimed'};
       try {
         const videoUrl = await this.videoSigner(delivery.bucket_name,delivery.storage_path);
+        const callbacks=await this.videoPanelTokens(base,delivery);
         return {...base,operation:'video_delivery_claimed',delivery_id:delivery.delivery_id,claim_token:claim,
           video_url:videoUrl,target_message_id:delivery.photo_message_id,telegram_chat_id:delivery.telegram_chat_id,
+          requested_photo_uuid:delivery.requested_photo_uuid,source_photo_uuid:delivery.source_photo_uuid,
+          source_photo_bucket_name:delivery.source_photo_bucket_name,source_photo_storage_path:delivery.source_photo_storage_path,
+          source_photo_url:sourcePhotoUrl(delivery.source_photo_bucket_name,delivery.source_photo_storage_path),
+          source_photo_reveal_at:delivery.source_photo_reveal_at,same_photo:delivery.same_photo,
+          panel_caption:delivery.panel_caption,panel_caption_entities:delivery.panel_caption_entities,
+          ...callbacks,
+          current_reply_markup:delivery.current_reply_markup,
           reason:'video_delivery_claimed'};
       } catch (error) {
         await this.videos.failDelivery(input.delivery_id,claim,'video_url_signing_failed',true);
@@ -2076,9 +2144,13 @@ export class MediaCommerceDecisionService {
       ? await this.videos.completeDelivery(input.delivery_id,input.claim_token,input.sent_message_id)
       : await this.videos.failDelivery(input.delivery_id,input.claim_token,input.delivery_error ?? 'send_failed',input.retryable === true);
     const delivered = delivery?.status === 'delivered';
+    const callbacks=delivered&&delivery?await this.videoPanelTokens(base,delivery):null;
     return {...base,operation:'video_delivery_stored',delivery_id:input.delivery_id,delivered,delivery_success:delivered,
       target_message_id:delivery?.photo_message_id ?? null,telegram_chat_id:delivery?.telegram_chat_id ?? null,
       current_reply_markup:delivery?.current_reply_markup,reply_markup:delivery?.current_reply_markup,
+      requested_photo_uuid:delivery?.requested_photo_uuid,source_photo_uuid:delivery?.source_photo_uuid,
+      same_photo:delivery?.same_photo,
+      ...callbacks,
       video_control_tokens:delivery?.video_control_tokens ?? [],video_payment_urls:delivery?.video_payment_urls ?? [],
       reason:delivered ? 'video_delivered' : `video_delivery_${delivery?.status ?? 'not_updated'}`};
   }
@@ -2715,6 +2787,9 @@ export class MediaCommerceDecisionService {
       };
     }
 
+    if(config.MEDIA_VIDEO_ENABLED&&['video_panel_requested_photo','video_panel_source_photo','video_panel_video'].includes(actionKind??'')){
+      return this.evaluateVideoPanelCallback(callbackBase,payload,actionKind!);
+    }
     if (config.MEDIA_VIDEO_ENABLED && (actionKind === 'video_request' || actionKind === 'video_pass_options')) {
       return this.evaluateVideoCallback(callbackBase, payload, actionKind);
     }

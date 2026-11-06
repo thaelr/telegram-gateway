@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { sql } from '../db.js';
 import { signVideoUrl } from '../videoStorage.js';
+import { config } from '../config.js';
 import { WebError } from './types.js';
 
 type Row = Record<string, any>;
@@ -17,22 +18,22 @@ const query = async (db: DB, statement: string, args: any[] = []): Promise<Row[]
 const iso = (value: unknown) => value == null ? null : new Date(String(value)).toISOString();
 export const WEB_VIDEO_ACCESS_SECONDS = 120;
 export type WebVideoContext = {
- video: { video_id: string; bucket_name: string; storage_path: string } | null;
+ video: { video_id: string; bucket_name: string; storage_path: string; requested_photo_uuid:string; source_photo_uuid:string; source_photo_bucket_name:string; source_photo_storage_path:string } | null;
  full_active: boolean; video_pass_active: boolean; panel_delivered: boolean; scene_active: boolean;
  delivery?: Row | null;
 };
-export type VideoPhotoContext = {chat_id: number; scene_session_id: string | null; character_i: number; media_signature: string; panel_id: number};
+export type VideoPhotoContext = {chat_id: number; scene_session_id: string | null; character_i: number; media_signature: string; panel_id: number;media_id:string};
 
 /** Uses the common Commerce delivery ledger. No Web video ownership library is created. */
 export class WebVideoAccess {
  constructor(private readonly db: typeof sql = sql, private readonly signer = signVideoUrl, private readonly now: () => number = Date.now) {}
  async context(photo: VideoPhotoContext, db: DB = this.db): Promise<WebVideoContext> {
-  const [row] = await query(db, 'SELECT public.media_video_context($1,$2,$3::integer,$4,$5) AS result', [photo.chat_id, photo.scene_session_id, photo.character_i, photo.media_signature, photo.panel_id]);
+  const [row] = await query(db, 'SELECT public.media_video_context($1,$2,$3::integer,$4,$5,$6) AS result', [photo.chat_id, photo.scene_session_id, photo.character_i, photo.media_signature, photo.panel_id,photo.media_id]);
   return row!.result as WebVideoContext;
  }
  async contexts(photos:Array<VideoPhotoContext&{media_id:string}>):Promise<Map<string,WebVideoContext>>{
   if(!photos.length)return new Map();
-  const result=await query(this.db,`SELECT p.media_id,public.media_video_context(p.chat_id,p.scene_session_id,p.character_i,p.media_signature,p.panel_id) AS result
+  const result=await query(this.db,`SELECT p.media_id,public.media_video_context(p.chat_id,p.scene_session_id,p.character_i,p.media_signature,p.panel_id,p.media_id) AS result
     FROM jsonb_to_recordset($1::text::jsonb) AS p(media_id text,chat_id bigint,scene_session_id text,character_i integer,media_signature text,panel_id bigint)`,[JSON.stringify(photos)]);
   return new Map(result.map(row=>[row.media_id,row.result as WebVideoContext]));
  }
@@ -54,7 +55,15 @@ export class WebVideoAccess {
   return row;
  }
  publicDelivery(row: Row) {
-  return {delivery_id: row.delivery_id, video_id: row.video_id, status: row.status, ready_at: iso(row.eligible_at ?? row.ready_at), access_path: '/web/commerce/video-deliveries/' + row.delivery_id};
+  const photoPath=String(row.source_photo_storage_path??'').replace(/^\/+/, '');
+  const rawBucket=String(row.source_photo_bucket_name??'').trim();
+  const bucket=config.MEDIA_BUCKET_ALIAS_MAP_JSON[rawBucket.toLowerCase()]??rawBucket;
+  const sourcePhotoUrl=photoPath&&bucket?`${config.MEDIA_STORAGE_BASE_URL.replace(/\/+$/u,'')}/storage/v1/object/public/${bucket}/${photoPath}`:null;
+  return {delivery_id: row.delivery_id, video_id: row.video_id, status: row.status, ready_at: iso(row.eligible_at ?? row.ready_at),
+   source_photo_reveal_at:iso(row.source_photo_reveal_at),requested_photo_uuid:row.requested_photo_uuid??null,
+   source_photo_uuid:row.source_photo_uuid??null,source_photo_url:sourcePhotoUrl,
+   same_photo:row.requested_photo_uuid==null?null:String(row.requested_photo_uuid)===String(row.source_photo_uuid),
+   panel_id:row.photo_message_id==null?null:String(row.photo_message_id),access_path: '/web/commerce/video-deliveries/' + row.delivery_id};
  }
  async access(userId: string, id: string) {
   let delivery = await this.owned(userId, id);
