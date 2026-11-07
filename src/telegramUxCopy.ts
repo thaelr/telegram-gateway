@@ -104,16 +104,14 @@ export const telegramUxCopySchema = z.object({
     more_photo_button: textSchema,
     generating: textSchema,
     pay_button: textSchema,
-    scene_unlock_button: textSchema,
     prev_button: textSchema,
     next_button: textSchema,
-    video_unlock_button: textSchema.optional(),
     animate_photo_button: textSchema.optional(),
-    video_pass_button: textSchema.optional(),
   }),
   commerce_ui: z.object({
     video:textSchema, scene_photo:textSchema, scene_subscription:textSchema, back:textSchema,
     scene_unlock:textSchema, video_pass:textSchema, scene_unlock_upgrade:textSchema, video_unlock:textSchema,
+    free_scene_unlock:textSchema,
   }).passthrough().optional(),
   video: z.object({
     duplicate_payment_review: textSchema,

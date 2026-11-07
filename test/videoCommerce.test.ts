@@ -109,6 +109,8 @@ test('video context creates only callback metadata, with independent open-chat o
   assert.notEqual(result.commerce_ui.actions.video,result.commerce_ui.actions.scene);
   assert.equal(tokens.get(result.commerce_ui.actions.video!)?.action_kind,'video_request');
   assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.action_kind,'commerce_scene');
+  assert.equal(tokens.get(result.commerce_ui.actions.video!)?.payload_json.action_button_text,null);
+  assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.payload_json.action_button_text,null);
 });
 test('no matching video hides animate, Full and pass suppress the extra commercial offer',async()=>{
   for(const override of [{video:null},{panel_delivered:true},{delivery},{full_active:true},{video_pass_active:true}]){

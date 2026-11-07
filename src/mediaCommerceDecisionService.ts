@@ -2026,7 +2026,7 @@ export class MediaCommerceDecisionService {
     return buildCallbackTokenRow({chat_id:base.chat_id!,scene_session_id:base.scene_session_id ?? null,
       turn_no:base.turn_no ?? null,scene_turn_no:base.scene_turn_no ?? null,media_signature:base.media_signature ?? null,
       target_message_id:base.target_message_id ?? base.panel_message_id ?? null,current_uuid:base.current_uuid ?? base.selected_uuid ?? null,
-      base_price_xtr:0,next_action:action,requested_action:action,button_text:action === 'video_request' ? renderUx(getMediaUxCopy().media.animate_photo_button) : renderUx(getMediaUxCopy().media.video_unlock_button),
+      base_price_xtr:0,next_action:action,requested_action:action,
       extraPayload:{character_i:base.character_i ?? null,telegram_chat_id:base.telegram_chat_id ?? null,
         panel_text:base.caption_text ?? base.panel_text ?? null,panel_entities_json:base.caption_entities_json ?? base.panel_entities_json ?? [],
         ...extra,action_kind:action}});
@@ -2612,7 +2612,7 @@ export class MediaCommerceDecisionService {
         current_uuid: input.current_uuid,
         base_price_xtr: input.base_price_xtr,
         feature_key: "scene_unlock",
-        action_button_text: getMediaUxCopy().media.scene_unlock_button,
+        action_button_text: renderUx(getMediaUxCopy().commerce_ui?.free_scene_unlock),
         ab_test: toAbTestContext(abSelection),
       }),
     ];
