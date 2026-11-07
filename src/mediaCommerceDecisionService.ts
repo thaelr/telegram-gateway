@@ -2074,8 +2074,10 @@ export class MediaCommerceDecisionService {
     const description=typeof copy?.description==='string'?copy.description:plan.description;
     const duration=key==='scene_unlock'||key==='video_pass'?config.SCENE_ACCESS_DAYS:undefined;
     return {feature_key:key,sku:plan.sku,purchase_variant:variant,duration_days:duration,valid_until:validUntil,
-      label_key:labelKey,amount:currency==='XTR'?plan.amount_xtr:plan.amount_rub!,currency,callback_data:token,
-      title:title.replaceAll('{days}',String(duration??'')),description:description.replaceAll('{days}',String(duration??''))};
+  label_key:labelKey,amount:currency==='XTR'?plan.amount_xtr:plan.amount_rub!,
+original_amount:currency==='XTR'?plan.original_amount_xtr:plan.original_amount_rub,
+currency,callback_data:token,
+            title:title.replaceAll('{days}',String(duration??'')),description:description.replaceAll('{days}',String(duration??''))};
   }
 
   private async commerceRoot(base:MediaCommerceDecisionResponse,surface:CommerceSurface,ctx?:VideoContext|null,
@@ -2123,7 +2125,8 @@ export class MediaCommerceDecisionService {
       rows.push(row);
       const full=config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(p=>p.sku===sub.sku)?.tier==='full';
       products.push({feature_key:full?'full':'base',label_key:full?'full':'base',sku:sub.sku,label:sub.title,title:sub.title,
-        description:sub.description,duration_days:sub.subscription_days??undefined,amount:opt.amount,currency:opt.currency,callback_data:row.token});
+        description:sub.description,duration_days:sub.subscription_days??undefined,amount:opt.amount,
+original_amount:opt.original_amount,currency:opt.currency,callback_data:row.token});
     }
     if(sceneEntry && (balance?.free_scene_unlocks??0)>0)actions.bonus_scene=sceneEntry.token;
     if(photoEntry){
@@ -2135,7 +2138,9 @@ export class MediaCommerceDecisionService {
         const copy=parseJsonObject(parseJsonObject(getMediaCommerceCopy().product_types)?.photo);
         const currency=getMediaLanguage()==='en'||plan.amount_rub==null?'XTR':'RUB';
         products.push({feature_key:'photo_unlock',sku:plan.sku,label_key:'photo',label:typeof copy?.title==='string'?copy.title:plan.title,
-          title:plan.title,description:plan.description,amount:currency==='XTR'?plan.amount_xtr:plan.amount_rub!,currency,callback_data:row.token});
+          title:plan.title,description:plan.description,amount:currency==='XTR'?plan.amount_xtr:plan.amount_rub!,
+original_amount:currency==='XTR'?plan.original_amount_xtr:plan.original_amount_rub,
+currency,callback_data:row.token});
       }
     }
     if(rows.length)await this.repository.upsertCallbackTokens(rows);
@@ -2203,7 +2208,7 @@ export class MediaCommerceDecisionService {
       const opt=options.find(o=>o.currency===(getMediaLanguage()==='en'?'XTR':'RUB'))??options[0];
       if(!opt)return stale();
       const product:CommerceProduct={feature_key:key,sku,label_key:key,title:opt.title,label:opt.title,description:opt.description,
-        amount:opt.amount,currency:opt.currency,callback_data:String(base.callback_data)};
+        amount:opt.amount,original_amount:opt.original_amount,currency:opt.currency,callback_data:String(base.callback_data)};
       await this.repository.upsertCallbackTokens([back]);
       const ui:CommerceUi={surface,step:'payment',products:[product],actions:{back:back.token},payment_options:options,return_context:root};
       return {...base,operation:'video_ui_ready' as const,commerce_ui:ui,reason:'commerce_payment'};
@@ -3439,7 +3444,8 @@ export class MediaCommerceDecisionService {
       await this.repository.upsertCallbackTokens([back]);
       const opt=paymentOptions.find(option=>option.currency===(getMediaLanguage()==='en'?'XTR':'RUB'))??paymentOptions[0]!;
       ui={surface,step:'payment',actions:{back:back.token},products:[{feature_key:featureKey,sku:opt.sku??'',
-        label_key:featureKey,title:opt.title,label:opt.title,description:opt.description,amount:opt.amount,currency:opt.currency,
+        label_key:featureKey,title:opt.title,label:opt.title,description:opt.description,amount:opt.amount,
+original_amount:opt.original_amount,currency:opt.currency,
         duration_days:featureKey==='scene_unlock'?config.SCENE_ACCESS_DAYS:undefined,callback_data:base.callback_data??''}],
         payment_options:paymentOptions,return_context:root};
     }
