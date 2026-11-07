@@ -33,6 +33,7 @@ export interface VideoDelivery {
   photo_message_id: number | null; telegram_chat_id: number | null; source: 'telegram' | 'web';
   bucket_name: string; storage_path: string; current_reply_markup?: unknown;
   video_control_tokens?: string[]; video_payment_urls?: string[]; chat_id?: number;
+  payment_token?: string | null;
   delivered_at?: string | null;
   requested_photo_uuid?: string | null; source_photo_uuid?: string | null;
   source_photo_bucket_name?: string | null; source_photo_storage_path?: string | null;

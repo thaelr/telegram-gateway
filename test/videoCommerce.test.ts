@@ -25,7 +25,10 @@ const context:VideoContext={video:{video_id:videoId,bucket_name:'videos',storage
   subscription_sku:null,subscription_until:null,panel_delivered:false,scene_active:true};
 const delivery:VideoDelivery={delivery_id:deliveryId,status:'pending',eligible_at:'2026-10-28T12:00:05Z',video_id:videoId,
   photo_message_id:77,telegram_chat_id:900,source:'telegram',bucket_name:'videos',storage_path:'one.mp4',chat_id:1,
-  requested_photo_uuid:photoId,source_photo_uuid:photoId,source_photo_bucket_name:'photos',source_photo_storage_path:'one.jpg',same_photo:true};
+  requested_photo_uuid:photoId,source_photo_uuid:photoId,source_photo_bucket_name:'photos',source_photo_storage_path:'one.jpg',same_photo:true,
+  payment_token:'pay_v_fixture_u:stars',current_reply_markup:{inline_keyboard:[
+    [{text:'SBP',url:'https://gateway.example/v1/pay/sbp/pay_v_fixture_u%3Asbp'}]
+  ]}};
 const localization={
   async getTelegramCopy(){return testTelegramUxCopy;},
   async getPaymentMethods():Promise<Array<'stars'|'sbp'>>{return config.SBP_ENABLED ? ['sbp','stars'] : ['stars'];},
@@ -99,16 +102,24 @@ test('subscription invoice snapshot freezes tier, upgrade source and discounts',
   assert.equal(row.payload_json.subscription_change,'upgrade');assert.equal(row.payload_json.upgrade_base_sku,'base_long');assert.equal(row.payload_json.subscription_days,30);
 }));
 test('video context creates only callback metadata, with independent open-chat offer',async()=>{
-  const {service,invoices}=setup();
+  const {service,invoices,tokens}=setup();
   const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
   assert.equal(result.video?.available,true);assert.ok(result.video?.animate_callback_data);assert.ok(result.video?.chat_offer_callback_data);assert.equal(invoices.length,0);
+  assert.ok(result.commerce_ui?.actions.video);assert.ok(result.commerce_ui?.actions.scene);
+  assert.notEqual(result.commerce_ui.actions.video,result.commerce_ui.actions.scene);
+  assert.equal(tokens.get(result.commerce_ui.actions.video!)?.action_kind,'video_request');
+  assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.action_kind,'commerce_scene');
 });
 test('no matching video hides animate, Full and pass suppress the extra commercial offer',async()=>{
   for(const override of [{video:null},{panel_delivered:true},{delivery},{full_active:true},{video_pass_active:true}]){
-    const {service}=setup(override);const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
+    const {service,tokens}=setup(override);const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
     if('video'in override || 'panel_delivered'in override) assert.equal(result.video?.animate_callback_data,undefined);
     if('full_active' in override || 'video_pass_active' in override)assert.equal(result.commerce_ui?.actions.scene,undefined);
-    else assert.ok(result.commerce_ui?.actions.scene,'ordinary scene product remains available without a video');
+    else {
+      assert.ok(result.commerce_ui?.actions.scene,'ordinary scene product remains available without a video');
+      assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.action_kind,'commerce_scene');
+    }
+    if(override.video===null)assert.equal(result.commerce_ui?.actions.video,undefined);
   }
 });
 test('entitled click freezes video and original panel into a delivery without invoices',async()=>{
@@ -126,11 +137,15 @@ test('claims are required before exposing signed URL; duplicate claims do not se
   assert.equal(second.operation,'noop');assert.equal(second.video_url,undefined);
 });
 test('success returns latest persisted panel; ambiguous failure is never made retryable implicitly',async()=>{
-  const {service,requests}=setup();
-  const success=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:true,sent_message_id:100});
-  assert.equal(success.delivered,true);assert.deepEqual(success.reply_markup,{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]});
-  const failure=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:false});
-  assert.equal(failure.reason,'video_delivery_uncertain');assert.equal((requests[0] as unknown[])[3],false);
+  const enabled=config.SBP_ENABLED;config.SBP_ENABLED=true;
+  try {
+    const {service,requests}=setup();
+    const success=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:true,sent_message_id:100});
+    assert.equal(success.delivered,true);assert.deepEqual(success.reply_markup,{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]});
+    assert.ok(success.video_payment_urls?.includes('https://gateway.example/v1/pay/sbp/pay_v_fixture_u%3Asbp'));
+    const failure=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:false});
+    assert.equal(failure.reason,'video_delivery_uncertain');assert.equal((requests.at(-1) as unknown[])[3],false);
+  } finally {config.SBP_ENABLED=enabled;}
 });
 test('confirmed navigation survives financial TTL; claim, foreign owner and wrong panel cannot view media',async()=>{
   const {service,tokens}=setup();

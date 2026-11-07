@@ -891,6 +891,38 @@ function buildSbpGatewayRow(row: StoredInvoiceToken): StoredInvoiceToken {
   };
 }
 
+function videoPaymentCleanupUrls(urls: unknown, paymentToken: string | null | undefined, markup?: unknown): string[] {
+  const result = normalizeInvoiceTokens(urls);
+  const token = normalizeString(paymentToken);
+  if (config.SBP_ENABLED && token && /:(?:stars|sbp)$/u.test(token)) {
+    result.push(buildSbpGatewayCheckoutUrl(token.replace(/:(?:stars|sbp)$/u, ':sbp')));
+  }
+  const baseUrl = normalizeString(config.GATEWAY_PUBLIC_URL);
+  const keyboard = parseJsonObject(markup)?.inline_keyboard;
+  if (config.SBP_ENABLED && baseUrl && Array.isArray(keyboard)) {
+    const prefix = `${baseUrl}/v1/pay/sbp/`;
+    for (const button of keyboard.flat()) {
+      const rawUrl = parseJsonObject(button)?.url;
+      const url = typeof rawUrl === 'string' ? normalizeString(rawUrl) : null;
+      if (url?.startsWith(prefix)) result.push(url);
+    }
+  }
+  return Array.from(new Set(result));
+}
+
+function cleanDeliveredVideoMarkup(markup: unknown, tokens: unknown, urls: string[]): Record<string, unknown> | null {
+  const parsed = parseJsonObject(markup);
+  if (!parsed || !Array.isArray(parsed.inline_keyboard)) return null;
+  const blockedTokens = new Set(normalizeInvoiceTokens(tokens));
+  const blockedUrls = new Set(urls);
+  const inlineKeyboard = parsed.inline_keyboard.map(row => Array.isArray(row) ? row.filter(button => {
+    const parsedButton = parseJsonObject(button);
+    return !blockedTokens.has(typeof parsedButton?.callback_data === 'string' ? parsedButton.callback_data : '')
+      && !blockedUrls.has(typeof parsedButton?.url === 'string' ? parsedButton.url : '');
+  }) : []).filter(row => row.length > 0);
+  return {...parsed,inline_keyboard:inlineKeyboard};
+}
+
 function normalizePositiveFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? value
@@ -1927,7 +1959,8 @@ export class MediaCommerceDecisionService {
           return {...response,...nav,target_message_id:panel,video_panel_reconcile:true,video:{available:false,consumed:true},
             current_reply_markup:context.current_reply_markup,reply_markup:context.current_reply_markup,
             video_control_tokens:context.video_control_tokens ?? context.delivery?.video_control_tokens ?? [],
-            video_payment_urls:context.video_payment_urls ?? context.delivery?.video_payment_urls ?? []};
+            video_payment_urls:videoPaymentCleanupUrls(context.video_payment_urls ?? context.delivery?.video_payment_urls,
+              context.delivery?.payment_token,context.current_reply_markup)};
         }
         if (input.interaction_mode === 'finalize_photo_event' && input.selected_uuid && response.media_signature) {
           // A first-time photo becomes a valid selector input only after its receipt.
@@ -2376,7 +2409,7 @@ export class MediaCommerceDecisionService {
       panel_media_url:mediaUrl, panel_media_uuid:uuid, requested_photo_uuid:delivery.requested_photo_uuid,
       source_photo_uuid:delivery.source_photo_uuid, panel_caption:delivery.panel_caption,
       panel_caption_entities:delivery.panel_caption_entities, video_control_tokens:delivery.video_control_tokens ?? [],
-      video_payment_urls:delivery.video_payment_urls ?? [], reply_markup:delivery.current_reply_markup,
+      video_payment_urls:videoPaymentCleanupUrls(delivery.video_payment_urls,delivery.payment_token,delivery.current_reply_markup), reply_markup:delivery.current_reply_markup,
       current_reply_markup:delivery.current_reply_markup, reason:'video_panel_media_ready'};
   }
 
@@ -2470,7 +2503,7 @@ export class MediaCommerceDecisionService {
       }));
       return {...frozen,operation:feature === 'video_pass' ? 'video_pass_activated' : 'noop',target_message_id:target,
         current_reply_markup:originalMenu ?? context?.current_reply_markup,reply_markup:originalMenu ?? context?.current_reply_markup,
-        video_control_tokens:controls.filter((token):token is string=>token!==null),video_payment_urls:context?.video_payment_urls ?? [],
+        video_control_tokens:controls.filter((token):token is string=>token!==null),video_payment_urls:videoPaymentCleanupUrls(context?.video_payment_urls,paid.token,context?.current_reply_markup),
         ...(menu ? {video:{available:false,consumed:true,pass_menu:true}} : {}),
         text:context?.scene_active === false ? renderUx(getMediaUxCopy().video?.pass_scene_changed)
           : renderUx(getMediaUxCopy().video?.pass_activated),reason:feature === 'video_pass' ? 'video_pass_activated' : 'video_snapshot_invalid'};
@@ -2505,7 +2538,7 @@ export class MediaCommerceDecisionService {
           panel_caption:delivery.panel_caption,panel_caption_entities:delivery.panel_caption_entities,
           ...callbacks,
           current_reply_markup:delivery.current_reply_markup,
-          video_control_tokens:delivery.video_control_tokens??[],video_payment_urls:delivery.video_payment_urls??[],
+          video_control_tokens:delivery.video_control_tokens??[],video_payment_urls:videoPaymentCleanupUrls(delivery.video_payment_urls,delivery.payment_token,delivery.current_reply_markup),
           reason:'video_delivery_claimed'};
       } catch (error) {
         await this.videos.failDelivery(input.delivery_id,claim,'video_url_signing_failed',true);
@@ -2513,10 +2546,21 @@ export class MediaCommerceDecisionService {
       }
     }
     if (!input.claim_token) return {...base,reason:'claim_token_required'};
-    const delivery = input.delivery_success === true && input.sent_message_id
+    let delivery = input.delivery_success === true && input.sent_message_id
       ? await this.videos.completeDelivery(input.delivery_id,input.claim_token,input.sent_message_id)
       : await this.videos.failDelivery(input.delivery_id,input.claim_token,input.delivery_error ?? 'send_failed',input.retryable === true);
     const delivered = delivery?.status === 'delivered';
+    const cleanupUrls=videoPaymentCleanupUrls(delivery?.video_payment_urls,delivery?.payment_token,delivery?.current_reply_markup);
+    if (delivered && delivery?.chat_id && delivery.photo_message_id) {
+      const cleaned=cleanDeliveredVideoMarkup(delivery.current_reply_markup,delivery.video_control_tokens,cleanupUrls);
+      if (cleaned) {
+        const scope=await this.videos.context({chat_id:delivery.chat_id,scene_session_id:delivery.scene_session_id ?? null,
+          panel_message_id:delivery.photo_message_id});
+        await this.videos.storePanel(delivery.chat_id,delivery.photo_message_id,cleaned,
+          scope.panel_media_signature ?? null,scope.panel_photo_uuid ?? null);
+        delivery={...delivery,current_reply_markup:cleaned};
+      }
+    }
     const callbacks=delivered&&delivery?await this.videoPanelTokens(base,delivery):null;
     return {...base,operation:'video_delivery_stored',delivery_id:input.delivery_id,delivered,delivery_success:delivered,
       target_message_id:delivery?.photo_message_id ?? null,telegram_chat_id:delivery?.telegram_chat_id ?? null,
@@ -2524,7 +2568,7 @@ export class MediaCommerceDecisionService {
       requested_photo_uuid:delivery?.requested_photo_uuid,source_photo_uuid:delivery?.source_photo_uuid,
       same_photo:delivery?.same_photo,
       ...callbacks,
-      video_control_tokens:delivery?.video_control_tokens ?? [],video_payment_urls:delivery?.video_payment_urls ?? [],
+      video_control_tokens:delivery?.video_control_tokens ?? [],video_payment_urls:cleanupUrls,
       reason:delivered ? 'video_delivered' : `video_delivery_${delivery?.status ?? 'not_updated'}`};
   }
 
