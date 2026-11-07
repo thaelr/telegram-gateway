@@ -2064,8 +2064,14 @@ export class MediaCommerceDecisionService {
   }
 
   private commerceItem(plan:NonNullable<ReturnType<typeof resolveActionPlanByFeatureKey>>,key:string,token:string,
-    variant?:string,validUntil?:string|null):CommerceProduct|null {
-    const currency = getMediaLanguage()==='en' || plan.amount_rub==null ? 'XTR' : 'RUB';
+    variant?:string,validUntil?:string|null,selectedSource?:PaymentSource|null):CommerceProduct|null {
+    const currency =
+  getMediaLanguage()==='en' ||
+  selectedSource==='stars' ||
+  !getMediaPaymentMethods().includes('sbp') ||
+  plan.amount_rub==null
+    ? 'XTR'
+    : 'RUB';
     const amounts = getMediaPaymentMethods();
     if(!amounts.some(source=>source==='stars' || (config.SBP_ENABLED && plan.amount_rub!=null)))return null;
     const labelKey=variant==='scene_unlock_upgrade'?variant:key;
@@ -2103,9 +2109,11 @@ currency,callback_data:token,
     const sceneEntry=oldEntry&&prior&&(balance?.free_scene_unlocks??0)>0
       ? {...oldEntry,token:buildStableCallbackToken(['free_scene_unlock',base.chat_id,base.scene_session_id,base.turn_no,panel,prior])} : oldEntry;
     const snap={surface,opened_photo:photo,root_text:root?.text??base.caption_text??base.panel_text??base.text??null,
-      root_entities:root?.entities??parseJsonArray(base.caption_entities_json??base.panel_entities_json)??[],root_receipts:base.subscription_invoice_tokens??[],photo_token:base.token_rows?.find(row=>row.action_kind==='free_photo_unlock')?.token??null,
-      scene_token:sceneEntry?.token??null,
-      user_id:offer.user_id,media_signature:base.media_signature??offer.media_signature??null,source_photo:base.current_uuid??base.selected_uuid??null};
+  root_entities:root?.entities??parseJsonArray(base.caption_entities_json??base.panel_entities_json)??[],root_receipts:base.subscription_invoice_tokens??[],photo_token:base.token_rows?.find(row=>row.action_kind==='free_photo_unlock')?.token??null,
+  scene_token:sceneEntry?.token??null,
+  selected_payment_source:base.selected_payment_source??null,
+  payment_source_toggle_tokens:base.payment_source_toggle_tokens??null,
+  user_id:offer.user_id,media_signature:base.media_signature??offer.media_signature??null,source_photo:base.current_uuid??base.selected_uuid??null};
     const rows:InteractionTokenRow[]=sceneEntry && sceneEntry!==oldEntry?[sceneEntry]:[];
     const actions:CommerceUi['actions']={};
     if(canScene||canPass){
@@ -2119,7 +2127,7 @@ currency,callback_data:token,
     const products:CommerceProduct[]=[];
     for(const sub of base.subscription_offer_items??[]){
       const opts=sub.payment_options.filter(o=>o.payment_kind==='subscription' && getMediaPaymentMethods().includes(o.source));
-      const opt=opts.find(o=>o.currency===(getMediaLanguage()==='en'?'XTR':'RUB'))??opts[0];
+      const opt=opts.find(o=>o.source===base.selected_payment_source)??opts[0];
       if(!opt||!sub.sku)continue;
       const row=this.videoToken(base,'commerce_account_pay',{...snap,sku:sub.sku,sub_tokens:opts.map(o=>o.token)});
       rows.push(row);
@@ -2166,7 +2174,20 @@ currency,callback_data:row.token});
       (input.chat_id!=null&&base.chat_id!==input.chat_id) ||
       (payload.target_message_id!=null&&Number(payload.target_message_id)!==messageId) ||
       (sender && payload.telegram_chat_id!=null && sender!==Number(payload.telegram_chat_id)))return stale();
-    base={...base,target_message_id:messageId,telegram_chat_id:sender??base.telegram_chat_id};
+    const selectedSource=normalizePaymentSource(
+  typeof payload.selected_payment_source==='string'
+    ? payload.selected_payment_source
+    : null
+);
+const toggleTokens=parseJsonObject(payload.payment_source_toggle_tokens) as Partial<Record<PaymentSource,string>>|null;
+
+base={
+  ...base,
+  target_message_id:messageId,
+  telegram_chat_id:sender??base.telegram_chat_id,
+  selected_payment_source:selectedSource??base.selected_payment_source,
+  payment_source_toggle_tokens:toggleTokens??base.payment_source_toggle_tokens
+};
     const account=action==='commerce_account_pay';
     const offer=await this.sceneOffer(account ? {...base,scene_session_id:null} : base);
     if(!account && base.scene_session_id && offer.scene_session_id!==base.scene_session_id || (payload.user_id!=null&&payload.user_id!==offer.user_id))return stale();
@@ -2179,9 +2200,14 @@ currency,callback_data:row.token});
     const root:CommerceUi['return_context']={message_id:messageId,kind:surface==='subscription'||surface==='daily_messages'?'subscription':'photo',
       text:rootText,entities:Array.isArray(payload.root_entities)?payload.root_entities:[],
       reply_markup:payload.root_markup??base.current_reply_markup};
-    const snap={surface,opened_photo:photo,root_text:root.text,root_entities:root.entities,root_markup:root.reply_markup,
-      root_receipts:Array.isArray(payload.root_receipts)?payload.root_receipts:[],photo_token:payload.photo_token??null,scene_token:payload.scene_token??null,user_id:offer.user_id,
-      media_signature:signature??offer.media_signature??null,source_photo:uuid};
+   const snap={surface,opened_photo:photo,root_text:root.text,root_entities:root.entities,root_markup:root.reply_markup,
+  root_receipts:Array.isArray(payload.root_receipts)?payload.root_receipts:[],
+  photo_token:payload.photo_token??null,
+  scene_token:payload.scene_token??null,
+  selected_payment_source:base.selected_payment_source??null,
+  payment_source_toggle_tokens:base.payment_source_toggle_tokens??null,
+  user_id:offer.user_id,
+  media_signature:signature??offer.media_signature??null,source_photo:uuid};
     const stage=action==='commerce_back'?payload.back_step:action==='commerce_account_pay'||action==='commerce_photo_pay'?'existing':action==='commerce_pay'?payload.product_step:
       action==='video_request'?'video':'scene';
     if(stage==='existing'){
@@ -2205,7 +2231,9 @@ currency,callback_data:row.token});
           scene_turn_no:normalizeNonNegativeInteger(source.scene_turn_no),panel_text:root.text??null,panel_entities_json:root.entities??[]});
         key='photo_unlock';
       }
-      const opt=options.find(o=>o.currency===(getMediaLanguage()==='en'?'XTR':'RUB'))??options[0];
+      const opt=options.find(o=>o.source===base.selected_payment_source)
+  ??options.find(o=>o.currency===(getMediaLanguage()==='en'?'XTR':'RUB'))
+  ??options[0];
       if(!opt)return stale();
       const product:CommerceProduct={feature_key:key,sku,label_key:key,title:opt.title,label:opt.title,description:opt.description,
         amount:opt.amount,original_amount:opt.original_amount,currency:opt.currency,callback_data:String(base.callback_data)};
@@ -2243,7 +2271,16 @@ currency,callback_data:row.token});
       const variant=plan.feature_key==='video_pass'?pass?.purchase_variant:undefined;
       const row=this.videoToken(base,'commerce_pay',{...snap,product_step:stage,feature_key:plan.feature_key,purchase_variant:variant??null,
         quoted_xtr:plan.amount_xtr,quoted_rub:plan.amount_rub??null,video_id:ctx?.video?.video_id??null});
-      const item=this.commerceItem(plan,plan.feature_key,row.token,variant,plan.feature_key==='video_pass'?offer.video_pass_valid_until:offer.scene_access_valid_until);
+      const item=this.commerceItem(
+  plan,
+  plan.feature_key,
+  row.token,
+  variant,
+  plan.feature_key==='video_pass'
+    ? offer.video_pass_valid_until
+    : offer.scene_access_valid_until,
+  base.selected_payment_source
+);
       if(item){rows.push(row);products.push(item);}
     }
     if(!products.length)return stale();
@@ -3562,8 +3599,33 @@ original_amount:opt.original_amount,currency:opt.currency,
     const hasRequestedSource = offerItems.some((item) =>
       item.payment_options.some((option) => option.source === selectedPaymentSource));
     const effectivePaymentSource: PaymentSource = hasRequestedSource
-      ? selectedPaymentSource
-      : getFirstAvailablePaymentSource(offerItems);
+  ? selectedPaymentSource
+  : getFirstAvailablePaymentSource(offerItems);
+    const sceneSessionId = normalizeString(base.scene_session_id);
+const sceneStatus = sceneSessionId
+  ? await this.repository.loadSceneAccessStatus({
+      chat_id: base.chat_id,
+      scene_session_id: sceneSessionId,
+    })
+  : null;
+
+const sceneEntryRows =
+  sceneStatus?.scene_is_active === true &&
+  sceneStatus.active_scene_session_id === sceneSessionId
+    ? await this.buildSceneUnlockEntryTokenRows({
+        chat_id: base.chat_id,
+        scene_session_id: sceneSessionId,
+        turn_no: null,
+        scene_turn_no: null,
+        target_message_id: null,
+        subscription_active: sceneStatus.subscription_active === true,
+        scene_access_active: sceneStatus.scene_access_active === true,
+      })
+    : [];
+
+if (sceneEntryRows.length) {
+  await this.repository.upsertCallbackTokens(sceneEntryRows);
+}
 
     return {
       ...base,
@@ -3571,9 +3633,10 @@ original_amount:opt.original_amount,currency:opt.currency,
       callback_valid: true,
       callback_answer_text: "",
       selected_payment_source: effectivePaymentSource,
-      subscription_offer_items: offerItems,
-      token_rows: [],
-      token_rows_prepared: 0,
+subscription_offer_items: offerItems,
+subscription_invoice_tokens: invoiceTokens,
+ token_rows: sceneEntryRows,
+token_rows_prepared: sceneEntryRows.length,
       text: base.panel_text,
       free_balance_text: null,
       offer_message_id:
