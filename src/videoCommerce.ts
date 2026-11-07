@@ -46,6 +46,12 @@ export interface VideoPassOfferContext {
   available: boolean;
   scene_access_active: boolean;
   paid_scene_unlock_token: string | null;
+  media_signature?: string | null;
+  matching_video?: boolean;
+  scene_access_payment_token?: string | null;
+  video_pass_payment_token?: string | null;
+  scene_access_valid_until?: string | null;
+  video_pass_valid_until?: string | null;
   subscription_active: boolean;
   full_active: boolean;
   video_pass_active: boolean;

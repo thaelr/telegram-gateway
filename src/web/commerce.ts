@@ -38,8 +38,8 @@ export class WebCommerceService {
    const semantic=variant ? productTypes.scene_unlock_upgrade : productTypes[plan.kind==='subscription'?(plan.subscription_tier??'base'):plan.kind==='photo'?'photo':plan.feature_key??''];
    const specific=products[plan.sku];
    const object=(value:unknown):Record<string,unknown>=>value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:{};
-   const copy=plan.feature_key==='video_pass' ? object(semantic) : {...object(semantic),...object(specific)};
-   const localized=(value:unknown,fallback:string)=>typeof value==='string'&&value.trim()?value.replaceAll('{days}',String(plan.subscription_days??'')):fallback;
+   const copy=plan.feature_key==='video_pass'||plan.feature_key==='scene_unlock' ? object(semantic) : {...object(semantic),...object(specific)};
+   const localized=(value:unknown,fallback:string)=>typeof value==='string'&&value.trim()?value.replaceAll('{days}',String(plan.duration_days??plan.subscription_days??'')):fallback;
    return {...plan,title:localized(copy.title,plan.title),description:localized(copy.description,plan.description)};
   });
  }
@@ -118,6 +118,7 @@ export class WebCommerceService {
   if((videoFeature||plan.subscription_tier==='full')&&!config.MEDIA_VIDEO_ENABLED)throw new WebError(409,'video_disabled');
   if(plan.amount_rub==null&&plan.kind==='subscription')throw new WebError(409,'web_price_unavailable');
   const quote:WebCommerceQuote={...context,sku:plan.sku,kind:plan.kind,title:plan.title,description:plan.description,amount:plan.amount_rub==null?'0':String(plan.amount_rub),currency:'RUB',amount_xtr:plan.amount_xtr,subscription_days:plan.subscription_days,feature_key:plan.feature_key,payload:{promo_key:plan.promo_key,original_amount_rub:plan.original_amount_rub,web_price_available:plan.amount_rub!=null}};
+  if(plan.feature_key==='video_pass'||plan.feature_key==='scene_unlock') quote.payload={...quote.payload,duration_days:config.SCENE_ACCESS_DAYS,grant_cycle:plan.grant_cycle??null};
   if(plan.kind==='subscription'){
    quote.payload={...quote.payload,account_subscription:true,subscription_tier:plan.subscription_tier??'base',subscription_change:input.subscription_change??'renew'};
    if(input.subscription_change==='upgrade'){
@@ -155,6 +156,7 @@ export class WebCommerceService {
  }
  private fingerprint(input:PurchaseInput,quote?:WebCommerceQuote){return createHash('sha256').update(JSON.stringify({chat_code:input.chat_code,sku:input.sku,provider:input.provider,media_id:input.media_id??null,
   ...(quote?.payload?.purchase_variant ? {purchase_variant:quote.payload.purchase_variant,scene_session_id:quote.scene_session_id} : {}),
+  ...(quote?.payload?.grant_cycle ? {grant_cycle:quote.payload.grant_cycle,scene_session_id:quote.scene_session_id} : {}),
   ...(input.subscription_change==='upgrade'?{subscription_change:'upgrade'}:{})})).digest('hex');}
  private providerInput(p:WebPurchase):ProviderCreateInput{return {order_id:p.purchase_id,attempt_id:p.payment_token,amount:p.quote.amount,currency:p.quote.currency,description:p.quote.description,...(p.chat_id==null?{user_id:p.user_id}:{chat_id:p.chat_id})};}
  private async createCheckout(p:WebPurchase):Promise<void>{
@@ -165,7 +167,7 @@ export class WebCommerceService {
  publicPurchase(p:WebPurchase){return {purchase_id:p.purchase_id,status:p.status,sku:p.quote.sku,kind:p.quote.kind,provider:p.provider,price:{amount:p.quote.amount,currency:p.quote.currency},...(p.quote.feature_key==='video_pass' && p.quote.payload?.purchase_variant ? {
   purchase_variant:p.quote.payload.purchase_variant,discount_percent:p.quote.payload.discount_percent,
   original_price:{amount:String(p.quote.payload.original_amount),currency:p.quote.currency}
- } : {}),checkout_url:p.checkout_url,media_id:p.quote.media_id??null,video_id:p.quote.video_id??null,video_delivery_id:p.quote.payload?.video_delivery_id??null,review_required:p.error_code==='duplicate_payment_requires_review',subscription_tier:p.quote.payload?.subscription_tier,subscription_change:p.quote.payload?.subscription_change,created_at:p.created_at,updated_at:p.updated_at};}
+ } : {}),checkout_url:p.checkout_url,media_id:p.quote.media_id??null,video_id:p.quote.video_id??null,video_delivery_id:p.quote.payload?.video_delivery_id??null,review_required:p.error_code==='duplicate_payment_requires_review'||p.error_code==='paid_scene_requires_review',subscription_tier:p.quote.payload?.subscription_tier,subscription_change:p.quote.payload?.subscription_change,created_at:p.created_at,updated_at:p.updated_at};}
  async purchase(userId:string,input:PurchaseInput){
   await this.consent(userId);
   const old=await this.repository.findByClient(userId,input.client_message_id);
@@ -184,7 +186,7 @@ export class WebCommerceService {
   return this.publicPurchase(await this.repository.getOwned(userId,p.purchase_id));
  }
  private async recover(p:WebPurchase):Promise<WebPurchase>{
-  if(p.error_code==='duplicate_payment_requires_review')return p;
+  if(p.error_code==='duplicate_payment_requires_review'||p.error_code==='paid_scene_requires_review')return p;
   if(p.status==='paid'||p.status==='fulfillment_pending')return this.repository.fulfill(p.purchase_id);
   return p;
  }

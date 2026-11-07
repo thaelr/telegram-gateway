@@ -787,7 +787,8 @@ export class AccessDecisionService {
       free_scene_unlocks: accessContext.free_scene_unlocks,
       free_photo_unlocks: accessContext.free_photo_unlocks,
       turns_today: accessContext.turns_today,
-      turn_limit: config.TURN_LIMIT,
+      turn_limit: config.DAILY_FREE_LIMITS_JSON.messages,
+      daily_photo_limit: config.DAILY_FREE_LIMITS_JSON.photos,
       turn_limit_reset_text: config.TURN_LIMIT_RESET_TEXT,
       selected_character_i: accessContext.selected_character_i,
       active_menu_screen: accessContext.active_menu_screen,
@@ -941,7 +942,7 @@ export class AccessDecisionService {
       if (
         accessContext.subscription_active ||
         accessContext.scene_access_active ||
-        accessContext.turns_today < config.TURN_LIMIT
+        accessContext.turns_today < config.DAILY_FREE_LIMITS_JSON.messages
       ) {
         return attachDismissedSubscriptionOffer({
           ...resolvedPassthrough,

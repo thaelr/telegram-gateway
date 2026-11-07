@@ -136,6 +136,7 @@ export interface AccessDecisionResponse {
   free_photo_unlocks?: number | null;
   turns_today?: number | null;
   turn_limit?: number | null;
+  daily_photo_limit?: number;
   turn_limit_reset_text?: string | null;
   subscription_offer_reason?: "subscription_command" | "daily_turn_limit" | null;
   post_accept_intent?: "start" | "menu" | "subscription" | "paysupport" | null;

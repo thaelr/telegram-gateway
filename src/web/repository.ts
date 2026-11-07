@@ -120,12 +120,12 @@ export class WebRepository implements WebRepositoryContract, WebDeliveryStore {
    return operation(existing,c.chat_code);
   }
   if(action==='message'){
-   const access=(await rows(db,`SELECT (u.subscription_until>now()) OR EXISTS(SELECT 1 FROM public.chat_scene_sessions s WHERE s.chat_id=$1 AND s.scene_session_id=c.active_scene_session_id AND s.scene_access_unlocked_at IS NOT NULL) AS unlimited FROM public.chat_state c JOIN public.users u ON u.user_id=c.user_id WHERE c.chat_id=$1`,[c.chat_id]))[0];
+   const access=(await rows(db,`SELECT (u.subscription_until>now()) OR COALESCE((SELECT e.scene_access_active FROM app_private.scene_entitlements(c.chat_id,c.active_scene_session_id) e),false) AS unlimited FROM public.chat_state c JOIN public.users u ON u.user_id=c.user_id WHERE c.chat_id=$1`,[c.chat_id]))[0];
    const usage=(await rows(db,`SELECT (SELECT count(*) FROM public.chat_turns WHERE chat_id=$1 AND message_type<>'command' AND (created_at AT TIME ZONE $2)::date=(now() AT TIME ZONE $2)::date) + (SELECT count(*) FROM app_private.web_operations o WHERE o.chat_id=$1 AND (o.created_at AT TIME ZONE $2)::date=(now() AT TIME ZONE $2)::date AND action='message' AND status IN ('accepted','delivering','delivered','processing') AND NOT EXISTS(SELECT 1 FROM public.chat_messages m WHERE m.chat_id=o.chat_id AND m.source_event_id=o.event_id::text)) AS used`,[c.chat_id,config.BUSINESS_TIME_ZONE]))[0];
-   if(!access?.unlimited&&Number(usage?.used)>=config.TURN_LIMIT)throw new WebError(429,'turn_limit');
+   if(!access?.unlimited&&Number(usage?.used)>=config.DAILY_FREE_LIMITS_JSON.messages)throw new WebError(429,'turn_limit');
   }
   const eventId=randomUUID();
-  const envelope:WebDeliveryEvent={event_id:eventId,user_id:userId,chat_id:Number(c.chat_id),character_i:Number(c.character_i),scene_mode:mode,source:'web',action,data};
+  const envelope:WebDeliveryEvent={event_id:eventId,user_id:userId,chat_id:Number(c.chat_id),character_i:Number(c.character_i),scene_mode:mode,source:'web',action,data,...(['scene_start','reset'].includes(action)?{daily_photo_limit:config.DAILY_FREE_LIMITS_JSON.photos}:{})};
   const r=(await rows(db,`INSERT INTO app_private.web_operations(event_id,user_id,chat_id,client_message_id,action,fingerprint,envelope) VALUES($1,$2,$3,$4,$5,$6,$7::text::jsonb) RETURNING *`,[eventId,userId,c.chat_id,clientId,action,fingerprint,JSON.stringify(envelope)]))[0]!;
   await rows(db,`INSERT INTO app_private.web_activity(chat_id,last_web_at) VALUES($1,now()) ON CONFLICT(chat_id) DO UPDATE SET last_web_at=EXCLUDED.last_web_at`,[c.chat_id]);
   return operation(r,c.chat_code);

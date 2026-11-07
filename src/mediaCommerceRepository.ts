@@ -1,4 +1,5 @@
 import { sql } from "./db.js";
+import { config } from "./config.js";
 import type { AbTestAssignment } from "./abTesting.js";
 import type {
   InteractionTokenRow,
@@ -191,6 +192,14 @@ export class MediaCommerceRepository {
 
   async storePhotoEvent(input: StorePhotoEventInput): Promise<MediaFinalizeResult> {
     return this.mediaEventRepository.storePhotoEvent(input);
+  }
+
+  async authorizeDailyPhoto(chatId:number,scene:string,requestKey:string,photo:string,panel:number) {
+    const [row] = await this.query<{ mode:'free'|'subscription'|'scene_pass'|'nav'|null;dispatch_by:Date }[]>`
+      SELECT app_private.authorize_daily_photo(${chatId}::bigint,${scene}::text,${requestKey}::text,
+        ${photo}::text,${panel}::bigint,${config.DAILY_FREE_LIMITS_JSON.photos}::integer) AS mode,
+        statement_timestamp()+interval '90 seconds' AS dispatch_by`;
+    return { mode:row?.mode ?? null,dispatchBy:row?.dispatch_by.toISOString() };
   }
 
   async finalizeFreePhotoUnlock(

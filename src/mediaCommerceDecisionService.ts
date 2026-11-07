@@ -14,12 +14,13 @@ import {
 } from "./abTesting.js";
 import { config } from "./config.js";
 import type { LocalizationService } from "./localization.js";
-import { getMediaCommerceCopy, getMediaPaymentMethods, getMediaUxCopy, runWithMediaLocalization } from "./mediaLocalization.js";
+import { getMediaLanguage, getMediaCommerceCopy, getMediaPaymentMethods, getMediaUxCopy, runWithMediaLocalization } from "./mediaLocalization.js";
 import { isMaintenanceBlocked } from "./maintenance.js";
 import {
   normalizeUnlockedItems,
   buildCallbackTokenRow,
   buildMediaAction,
+  normalizeNextUnseen,
   buildPhotoInvoiceInput,
   calculateMediaPriceRequired,
 } from "./mediaCommerce/mediaAction.js";
@@ -85,6 +86,7 @@ import {
   type SbpTransactionStatus,
 } from "./payments/sbp.js";
 import type {
+  CommerceUi, CommerceSurface, CommerceProduct,
   MediaCommerceDecisionResponse,
   MediaCommerceRoute,
   InteractionTokenRow,
@@ -110,6 +112,7 @@ type MediaRepository = Pick<
   | "upsertInvoiceTokens"
   | "loadCallbackToken"
   | "loadMediaContext"
+  | "authorizeDailyPhoto"
   | "loadPhotoByUuid"
   | "storePanel"
   | "loadInvoiceToken"
@@ -329,6 +332,7 @@ function buildFreeActionTokenRow(input: {
     turn_no: input.turn_no,
     payload_json: {
       action_kind: input.action_kind,
+      ...(input.action_kind === 'free_scene_unlock' ? {duration_days:config.SCENE_ACCESS_DAYS} : {}),
       chat_id: input.chat_id,
       scene_session_id: input.scene_session_id,
       turn_no: input.turn_no,
@@ -1018,11 +1022,13 @@ export class MediaCommerceDecisionService {
     const subscriptions = applySubscriptionPlanOverrides(resolveSubscriptionPlans(), params);
     const offer = config.MEDIA_VIDEO_ENABLED && chatId != null
       ? await this.videos.passOfferContext(chatId, null, 'web') : null;
+    const scene = offer ?? (chatId!=null && config.MEDIA_ACTION_PLANS_JSON.some(p=>p.feature_key==='scene_unlock')
+      ? await this.repository.loadSceneAccessStatus({chat_id:chatId,scene_session_id:null}) : null);
     const pass = offer?.available && !offer.full_active && !offer.video_pass_active
       ? resolveVideoPassPlan(offer.paid_scene_unlock_token) : null;
     const actions = config.MEDIA_ACTION_PLANS_JSON.flatMap(item => {
       if (!config.MEDIA_VIDEO_ENABLED && ['video_unlock','video_pass'].includes(item.feature_key)) return [];
-      if (item.feature_key === 'scene_unlock' && (offer?.scene_access_active || offer?.subscription_active)) return [];
+      if (item.feature_key === 'scene_unlock' && (scene?.scene_access_active || scene?.subscription_active)) return [];
       if (item.feature_key === 'video_pass') {
         return pass ? [pass] : [];
       }
@@ -1040,6 +1046,8 @@ export class MediaCommerceDecisionService {
       ...subscriptions.map(p => ({...base(p),kind:'subscription' as const,subscription_days:p.days,subscription_tier:p.tier ?? 'base'})),
       ...photos.map(p => ({...base(p),kind:'photo' as const})),
       ...actions.map(p => ({...base(p),kind:'feature' as const,feature_key:p.feature_key,
+        ...(['scene_unlock','video_pass'].includes(p.feature_key) ? {duration_days:config.SCENE_ACCESS_DAYS,scene_session_id:scene?.scene_session_id??undefined,
+          grant_cycle:(p.feature_key==='video_pass' ? offer?.video_pass_payment_token : scene?.scene_access_payment_token) ?? null} : {}),
         ...(p.feature_key === 'video_pass' && pass ? {
           purchase_variant: pass.purchase_variant,
           scene_session_id: offer?.scene_session_id ?? undefined,
@@ -1179,8 +1187,10 @@ export class MediaCommerceDecisionService {
       }),
     );
 
-    return sceneStatus?.scene_is_active === true
-      && normalizeString(sceneStatus.active_scene_session_id) === sceneSessionId;
+    if(!sceneStatus?.scene_is_active || normalizeString(sceneStatus.active_scene_session_id)!==sceneSessionId)return false;
+    if(action.feature_key==='video_unlock'||action.feature_key==='video_pass')return this.videoInvoiceAllowed(row.chat_id,sceneSessionId,action.feature_key,payload);
+    if(action.feature_key==='scene_unlock')return !sceneStatus.subscription_active && !sceneStatus.scene_access_active;
+    return true;
   }
 
   private async createSbpSuccessorAttempt(
@@ -1790,6 +1800,11 @@ export class MediaCommerceDecisionService {
       );
     }
 
+    const payload=parseJsonObject(resolvedRow.payload_json)??{};
+    if(['video_unlock','video_pass','scene_unlock'].includes(String(payload.feature_key)) &&
+      !await this.canCreateSbpSuccessor(resolvedRow,'sbpRedirect')){
+      throw new MediaCommerceOperationError('Product is no longer available','sbpRedirect.validateCheckoutEligibility','sbp_invoice_not_payable');
+    }
     const ready = await this.ensureSbpCheckout(resolvedRow, "sbpRedirect");
     const checkoutUrl = normalizeString(ready.checkout_url);
     if (!checkoutUrl) {
@@ -1887,7 +1902,16 @@ export class MediaCommerceDecisionService {
       return this.evaluateVideoTransport(input);
     }
     const response = await this.evaluateCore(input);
-    if (!config.MEDIA_VIDEO_ENABLED || !response.chat_id) return response;
+    if (!response.chat_id) return response;
+    if(response.operation==='prepare_offer_callback' && response.scene_session_id && response.price_required){
+      const exhausted=(response.free_photos_today??0)>=(response.daily_photo_limit??config.DAILY_FREE_LIMITS_JSON.photos);
+      return this.commerceRoot(response,exhausted?'daily_photos':'photo');
+    }
+    if(!config.MEDIA_VIDEO_ENABLED) {
+      if(response.operation==='edit_photo')return this.commerceRoot(response,'photo');
+      if(response.operation==='subscription_offer_ready')return this.decorateChatVideoOffer(response);
+      return response;
+    }
     if (['finalize_offer','finalize_photo_event'].includes(input.interaction_mode ?? '') && input.current_reply_markup != null) {
       const panel = normalizePositiveInteger(response.panel_message_id ?? input.panel_message_id ?? input.target_message_id);
       if (panel) {
@@ -1916,7 +1940,10 @@ export class MediaCommerceDecisionService {
             return typeof token === 'string' && controls.has(token);
           });
           if (context.video && context.scene_active && !context.panel_delivered && !context.delivery && !alreadyDecorated) {
-            const decorated = await this.decoratePhotoVideo(photo,context);
+            const root:CommerceUi['return_context']={message_id:panel,kind:'photo',text:photo.caption_text??photo.panel_text,
+              entities:parseJsonArray(photo.caption_entities_json??photo.panel_entities_json)??[],reply_markup:input.current_reply_markup};
+            await this.allowRootButtons(root,[],photo);
+            const decorated=await this.commerceRoot(photo,'photo',context,root);
             return {...decorated,video_panel_reconcile:true,reply_markup:input.current_reply_markup,
               current_reply_markup:input.current_reply_markup};
           }
@@ -1927,7 +1954,7 @@ export class MediaCommerceDecisionService {
       return this.decoratePhotoVideo(response);
     }
     if (response.operation === 'scene_access_activated'
-      || (response.operation === 'subscription_offer_ready' && response.scene_session_id &&
+      || (response.operation === 'subscription_offer_ready' &&
         (response.subscription_offer_reason === 'subscription_command' || response.subscription_offer_reason === 'daily_turn_limit' ||
          response.reason === 'subscription_payment_source_toggled'))) {
       return this.decorateChatVideoOffer(response);
@@ -1978,55 +2005,265 @@ export class MediaCommerceDecisionService {
       requested_photo_uuid:base.current_uuid ?? base.selected_uuid ?? null});
   }
 
-  private async decoratePhotoVideo(base: MediaCommerceDecisionResponse, stored?: VideoContext): Promise<MediaCommerceDecisionResponse> {
-    const context = stored ?? await this.loadVideoContext(base);
-    const video: VideoUi = {available:!!context.video && context.scene_active,consumed:context.panel_delivered,
-      full_active:context.full_active,video_pass_active:context.video_pass_active};
-    if (video.available && !video.consumed && !context.delivery && !context.full_active && !context.video_pass_active) {
-      const offer = await this.videos.passOfferContext(base.chat_id!,base.scene_session_id ?? null,'telegram');
-      const pass = resolveVideoPassPlan(offer.paid_scene_unlock_token);
-      if (pass && offer.scene_session_id === base.scene_session_id) {
-        const chatOffer = this.videoToken(base,'video_pass_options',{pass_only:true});
-        await this.repository.upsertCallbackTokens([chatOffer]);
-        Object.assign(video,this.videoPassUi(pass),{chat_offer_callback_data:chatOffer.token});
+  private async decoratePhotoVideo(base:MediaCommerceDecisionResponse, stored?:VideoContext) {
+    const context=stored ?? await this.loadVideoContext(base);
+    const exhausted=(base.free_photos_today??0)>=(base.daily_photo_limit??config.DAILY_FREE_LIMITS_JSON.photos);
+    return this.commerceRoot(base,exhausted&&base.token_rows?.some(row=>row.action_kind==='free_photo_unlock')?'daily_photos':'photo',context);
+  }
+
+  private async decorateChatVideoOffer(base:MediaCommerceDecisionResponse) {
+    if(base.operation==='scene_access_activated'){
+      if(base.commerce_ui)return base;
+      // The old text offer can be retired. The confirmation's buttons belong to a new message.
+      const confirmed=await this.commerceRoot({...base,target_message_id:null,panel_message_id:null},'subscription');
+      return {...confirmed,target_message_id:base.target_message_id};
+    }
+    return this.commerceRoot(base,base.subscription_offer_reason==='daily_turn_limit'?'daily_messages':'subscription');
+  }
+
+  private async sceneOffer(base:MediaCommerceDecisionResponse) {
+    if(config.MEDIA_VIDEO_ENABLED) return this.videos.passOfferContext(base.chat_id!,base.scene_session_id ?? null,'telegram');
+    const state=await this.repository.loadSceneAccessStatus({chat_id:base.chat_id!,scene_session_id:base.scene_session_id??null});
+    return {scene_session_id:state?.scene_is_active?state.active_scene_session_id:null,scene_access_active:!!state?.scene_access_active,
+      subscription_active:!!state?.subscription_active,available:false,full_active:false,video_pass_active:false,
+      paid_scene_unlock_token:null,user_id:state?.user_id??null,matching_video:false,media_signature:null,scene_access_valid_until:null,
+      video_pass_valid_until:null,video_pass_payment_token:null,scene_access_payment_token:state?.scene_access_payment_token??null};
+  }
+
+  private commerceItem(plan:NonNullable<ReturnType<typeof resolveActionPlanByFeatureKey>>,key:string,token:string,
+    variant?:string,validUntil?:string|null):CommerceProduct|null {
+    const currency = getMediaLanguage()==='en' || plan.amount_rub==null ? 'XTR' : 'RUB';
+    const amounts = getMediaPaymentMethods();
+    if(!amounts.some(source=>source==='stars' || (config.SBP_ENABLED && plan.amount_rub!=null)))return null;
+    const labelKey=variant==='scene_unlock_upgrade'?variant:key;
+    const copy=parseJsonObject(parseJsonObject(getMediaCommerceCopy().product_types)?.[labelKey]);
+    const title=typeof copy?.title==='string'?copy.title:plan.title;
+    const description=typeof copy?.description==='string'?copy.description:plan.description;
+    const duration=key==='scene_unlock'||key==='video_pass'?config.SCENE_ACCESS_DAYS:undefined;
+    return {feature_key:key,sku:plan.sku,purchase_variant:variant,duration_days:duration,valid_until:validUntil,
+      label_key:labelKey,amount:currency==='XTR'?plan.amount_xtr:plan.amount_rub!,currency,callback_data:token,
+      title:title.replaceAll('{days}',String(duration??'')),description:description.replaceAll('{days}',String(duration??''))};
+  }
+
+  private async commerceRoot(base:MediaCommerceDecisionResponse,surface:CommerceSurface,ctx?:VideoContext|null,
+    root?:CommerceUi['return_context']) {
+    if(!base.chat_id)return base;
+    const photo=surface==='photo'||(surface==='daily_photos'&&!!ctx?.panel_photo_uuid), panel=base.target_message_id??base.panel_message_id??null;
+    const offer=await this.sceneOffer(base);
+    const current=!!base.scene_session_id && offer.scene_session_id===base.scene_session_id;
+    const trustedFirstPhoto=base.operation==='edit_photo' && !!base.selected_uuid && !!offer.matching_video &&
+      !!base.media_signature && base.media_signature===offer.media_signature;
+    const videoAvailable=!!ctx && current && ctx.scene_active && !ctx.panel_delivered &&
+      (!!ctx.video || trustedFirstPhoto) && (!ctx.delivery || ctx.delivery.status==='failed');
+    const canPass=current && !offer.full_active && !offer.video_pass_active && !!resolveVideoPassPlan(offer.paid_scene_unlock_token) &&
+      (photo?videoAvailable&&!ctx?.delivery:offer.available);
+    const knownSceneEntry=base.token_rows?.some(row=>row.action_kind==='free_scene_unlock');
+    const canScene=current && !offer.subscription_active && !offer.full_active && !offer.video_pass_active && !offer.scene_access_active && !!resolveActionPlanByFeatureKey('scene_unlock') &&
+      (['subscription_offer_ready','prepare_offer_callback'].includes(base.operation) ? knownSceneEntry :
+        (await this.resolveAbTestSelection(base.chat_id,'subscription_offer'))?.params.scene_unlock?.enabled!==false);
+    const photoEntry=base.token_rows?.find(row=>row.action_kind==='free_photo_unlock');
+    const oldEntry=base.token_rows?.find(row=>row.action_kind==='free_scene_unlock');
+    const balance=photoEntry||oldEntry?await this.repository.loadFreeCredits(base.chat_id):null;
+    const prior=offer.scene_access_payment_token;
+    const sceneEntry=oldEntry&&prior&&(balance?.free_scene_unlocks??0)>0
+      ? {...oldEntry,token:buildStableCallbackToken(['free_scene_unlock',base.chat_id,base.scene_session_id,base.turn_no,panel,prior])} : oldEntry;
+    const snap={surface,opened_photo:photo,root_text:root?.text??base.caption_text??base.panel_text??base.text??null,
+      root_entities:root?.entities??parseJsonArray(base.caption_entities_json??base.panel_entities_json)??[],root_receipts:base.subscription_invoice_tokens??[],photo_token:base.token_rows?.find(row=>row.action_kind==='free_photo_unlock')?.token??null,
+      scene_token:sceneEntry?.token??null,
+      user_id:offer.user_id,media_signature:base.media_signature??offer.media_signature??null,source_photo:base.current_uuid??base.selected_uuid??null};
+    const rows:InteractionTokenRow[]=sceneEntry && sceneEntry!==oldEntry?[sceneEntry]:[];
+    const actions:CommerceUi['actions']={};
+    if(canScene||canPass){
+      const row=this.videoToken(base,'commerce_scene',snap);rows.push(row);actions.scene=row.token;
+    }
+    if(photo && videoAvailable){
+      const row=this.videoToken(base,'video_request',{...snap,video_id:ctx?.video?.video_id??null,
+        requested_photo_uuid:ctx?.video?.requested_photo_uuid??snap.source_photo,source_photo_uuid:ctx?.video?.source_photo_uuid??null});
+      rows.push(row);actions.video=row.token;
+    }
+    const products:CommerceProduct[]=[];
+    for(const sub of base.subscription_offer_items??[]){
+      const opts=sub.payment_options.filter(o=>o.payment_kind==='subscription' && getMediaPaymentMethods().includes(o.source));
+      const opt=opts.find(o=>o.currency===(getMediaLanguage()==='en'?'XTR':'RUB'))??opts[0];
+      if(!opt||!sub.sku)continue;
+      const row=this.videoToken(base,'commerce_account_pay',{...snap,sku:sub.sku,sub_tokens:opts.map(o=>o.token)});
+      rows.push(row);
+      const full=config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(p=>p.sku===sub.sku)?.tier==='full';
+      products.push({feature_key:full?'full':'base',label_key:full?'full':'base',sku:sub.sku,label:sub.title,title:sub.title,
+        description:sub.description,duration_days:sub.subscription_days??undefined,amount:opt.amount,currency:opt.currency,callback_data:row.token});
+    }
+    if(sceneEntry && (balance?.free_scene_unlocks??0)>0)actions.bonus_scene=sceneEntry.token;
+    if(photoEntry){
+      const plan=resolvePhotoPlanBySku(typeof photoEntry.payload_json.photo_sku==='string'?photoEntry.payload_json.photo_sku:base.photo_sku);
+      if((balance?.free_photo_unlocks??0)>0)actions.bonus_photo=photoEntry.token;
+      else if(plan){
+        const row=this.videoToken(base,'commerce_photo_pay',{...snap,photo_token:photoEntry.token,photo_sku:plan.sku});
+        rows.push(row);
+        const copy=parseJsonObject(parseJsonObject(getMediaCommerceCopy().product_types)?.photo);
+        const currency=getMediaLanguage()==='en'||plan.amount_rub==null?'XTR':'RUB';
+        products.push({feature_key:'photo_unlock',sku:plan.sku,label_key:'photo',label:typeof copy?.title==='string'?copy.title:plan.title,
+          title:plan.title,description:plan.description,amount:currency==='XTR'?plan.amount_xtr:plan.amount_rub!,currency,callback_data:row.token});
       }
     }
-    if (!video.available || video.consumed) return {...base,video};
-    const row = this.videoToken(base,'video_request',{video_id:context.video!.video_id,character_i:context.character_i ?? base.character_i,
-      requested_photo_uuid:context.video!.requested_photo_uuid,source_photo_uuid:context.video!.source_photo_uuid});
-    await this.repository.upsertCallbackTokens([row]);
-    return {...base,video:{...video,animate_callback_data:row.token},token_rows:[...(base.token_rows ?? []),row],
-      token_rows_prepared:(base.token_rows_prepared ?? 0)+1,token_rows_inserted:(base.token_rows_inserted ?? 0)+1};
+    if(rows.length)await this.repository.upsertCallbackTokens(rows);
+    const kind=surface==='subscription'||surface==='daily_messages'?'subscription':'photo';
+    const ui:CommerceUi={surface,step:'root',actions,products,return_context:root??{kind,message_id:panel,
+      text:snap.root_text,entities:snap.root_entities}};
+    const video:VideoUi={available:videoAvailable,consumed:!!ctx?.panel_delivered,full_active:offer.full_active,video_pass_active:offer.video_pass_active,
+      animate_callback_data:actions.video,chat_offer_callback_data:actions.scene};
+    // Token rows also serve the existing non-UI callers. The renderer uses the separately authorized actions.
+    return {...base,commerce_ui:ui,video,token_rows:sceneEntry!==oldEntry?base.token_rows?.map(row=>row===oldEntry?sceneEntry!:row):base.token_rows};
   }
 
-  private async decorateChatVideoOffer(base: MediaCommerceDecisionResponse): Promise<MediaCommerceDecisionResponse> {
-    if (!base.scene_session_id) return base;
-    const offer = await this.videos.passOfferContext(base.chat_id!,base.scene_session_id,'telegram');
-    if (!offer.available || offer.scene_session_id !== base.scene_session_id || offer.full_active || offer.video_pass_active) return base;
-    const plan = resolveVideoPassPlan(offer.paid_scene_unlock_token);
-    if (!plan) return base;
-    const row = this.videoToken({...base,target_message_id:null,panel_message_id:null},'video_pass_options',{pass_only:true,pass_menu:true});
-    await this.repository.upsertCallbackTokens([row]);
-    return {...base,video:{available:false,consumed:false,chat_offer_callback_data:row.token,
-      pass_reveal_callback_data:row.token,pass_menu:true,...this.videoPassUi(plan)}};
+  private async commerceCallback(base:MediaCommerceDecisionResponse, payload:Record<string,unknown>, action:string, input:MediaCommerceDecisionRequest) {
+    const surface=(payload.surface??(payload.pass_menu?'subscription':'photo')) as CommerceSurface;
+    const photo=surface==='photo'||(surface==='daily_photos'&&payload.opened_photo===true);
+    const stale=()=>({...base,operation:'noop' as const,callback_valid:false,
+      callback_answer_text:getMediaUxCopy().payment_errors.stale,reason:'commerce_screen_stale'});
+    const raw=parseJsonObject(parseJsonObject(input.raw_update)?.callback_query);
+    const message=parseJsonObject(raw?.message);
+    const messageId=normalizePositiveInteger(message?.message_id??input.inbound_message_id??base.target_message_id);
+    const sender=normalizePositiveInteger(parseJsonObject(raw?.from)?.id??input.source_user_id??input.telegram_chat_id);
+    if(!base.chat_id||!messageId ||
+      (input.chat_id!=null&&base.chat_id!==input.chat_id) ||
+      (payload.target_message_id!=null&&Number(payload.target_message_id)!==messageId) ||
+      (sender && payload.telegram_chat_id!=null && sender!==Number(payload.telegram_chat_id)))return stale();
+    base={...base,target_message_id:messageId,telegram_chat_id:sender??base.telegram_chat_id};
+    const account=action==='commerce_account_pay';
+    const offer=await this.sceneOffer(account ? {...base,scene_session_id:null} : base);
+    if(!account && base.scene_session_id && offer.scene_session_id!==base.scene_session_id || (payload.user_id!=null&&payload.user_id!==offer.user_id))return stale();
+    const signature=typeof payload.media_signature==='string'?payload.media_signature:null;
+    const uuid=typeof payload.source_photo==='string'?payload.source_photo:base.current_uuid??null;
+    const ctx=photo&&config.MEDIA_VIDEO_ENABLED ? await this.loadVideoContext({...base,current_uuid:uuid}) : null;
+    if(photo && (ctx?.panel_photo_uuid && uuid!==ctx.panel_photo_uuid || ctx?.panel_media_signature && ctx.panel_media_signature!==signature))return stale();
+    if(!account && action!=='commerce_back' && !photo && signature && offer.media_signature && offer.media_signature!==signature)return stale();
+    const rootText=typeof payload.root_text==='string'?payload.root_text:base.panel_text??null;
+    const root:CommerceUi['return_context']={message_id:messageId,kind:surface==='subscription'||surface==='daily_messages'?'subscription':'photo',
+      text:rootText,entities:Array.isArray(payload.root_entities)?payload.root_entities:[],
+      reply_markup:payload.root_markup??base.current_reply_markup};
+    const snap={surface,opened_photo:photo,root_text:root.text,root_entities:root.entities,root_markup:root.reply_markup,
+      root_receipts:Array.isArray(payload.root_receipts)?payload.root_receipts:[],photo_token:payload.photo_token??null,scene_token:payload.scene_token??null,user_id:offer.user_id,
+      media_signature:signature??offer.media_signature??null,source_photo:uuid};
+    const stage=action==='commerce_back'?payload.back_step:action==='commerce_account_pay'||action==='commerce_photo_pay'?'existing':action==='commerce_pay'?payload.product_step:
+      action==='video_request'?'video':'scene';
+    if(stage==='existing'){
+      const back=this.videoToken(base,'commerce_back',{...snap,back_step:'root',photo_token:payload.photo_token??null});
+      let options:MediaPaymentOption[];
+      let sku=typeof payload.sku==='string'?payload.sku:'';
+      let key='base';
+      if(action==='commerce_account_pay'){
+        if(!Array.isArray(payload.sub_tokens))return stale();
+        const rows=await this.currentSubscriptionRows(payload.sub_tokens,base);
+        options=rows.filter(row=>row.sku===sku).map(buildPaymentOption);
+        key=config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(p=>p.sku===sku)?.tier==='full'?'full':'base';
+      }else{
+        const saved=typeof payload.photo_token==='string'?await this.repository.loadCallbackToken(payload.photo_token,base.chat_id):null;
+        if(!saved?.found||saved.status!=='active'||isExpired(saved.expires_at)||saved.scene_session_id!==base.scene_session_id||offer.scene_access_active||offer.subscription_active)return stale();
+        const source=parseJsonObject(saved.payload_json)??{};
+        sku=String(source.photo_sku??base.photo_sku??'');
+        options=await this.buildPhotoPaymentOptionsAtClick({token:saved.token!,chat_id:base.chat_id!,scene_session_id:base.scene_session_id!,
+          photo_sku:sku,media_signature:signature,target_message_id:messageId,current_uuid:uuid,requested_action:String(source.requested_action??'photo_request'),
+          base_price_xtr:normalizePositiveInteger(source.base_price_xtr)??10,turn_no:normalizeNonNegativeInteger(source.turn_no),
+          scene_turn_no:normalizeNonNegativeInteger(source.scene_turn_no),panel_text:root.text??null,panel_entities_json:root.entities??[]});
+        key='photo_unlock';
+      }
+      const opt=options.find(o=>o.currency===(getMediaLanguage()==='en'?'XTR':'RUB'))??options[0];
+      if(!opt)return stale();
+      const product:CommerceProduct={feature_key:key,sku,label_key:key,title:opt.title,label:opt.title,description:opt.description,
+        amount:opt.amount,currency:opt.currency,callback_data:String(base.callback_data)};
+      await this.repository.upsertCallbackTokens([back]);
+      const ui:CommerceUi={surface,step:'payment',products:[product],actions:{back:back.token},payment_options:options,return_context:root};
+      return {...base,operation:'video_ui_ready' as const,commerce_ui:ui,reason:'commerce_payment'};
+    }
+    if(stage==='root'){
+      const subs=groupOfferItems(await this.currentSubscriptionRows(snap.root_receipts,base));
+      const photoRows:InteractionTokenRow[]=[];
+      for(const id of [payload.photo_token,payload.scene_token]){
+        if(typeof id!=='string')continue;
+        const entry=await this.repository.loadCallbackToken(id,base.chat_id);
+        if(entry?.found && entry.token && entry.payload_json && entry.status==='active' && !isExpired(entry.expires_at) &&
+          entry.scene_session_id===base.scene_session_id)photoRows.push({...entry,kind:'button_callback',payload_json:entry.payload_json} as InteractionTokenRow);
+      }
+      await this.allowRootButtons(root,snap.root_receipts,base);
+      const restored=await this.commerceRoot({...base,caption_text:root.text,current_uuid:uuid,subscription_offer_items:subs,token_rows:photoRows,subscription_invoice_tokens:snap.root_receipts as string[]},surface,ctx,root);
+      return {...restored,operation:'video_ui_ready' as const,reason:'commerce_root'};
+    }
+    if(stage!=='scene'&&stage!=='video')return stale();
+    const hasVideo=photo?!!ctx?.video&&ctx.scene_active&&!ctx.panel_delivered&&!ctx.delivery:offer.available;
+    if(stage==='video' && (!photo || !ctx))return stale();
+    if(stage==='video' && ctx && (ctx.delivery || ctx.full_active || ctx.video_pass_active)){
+      return this.evaluateVideoCallback({...base,current_uuid:uuid},payload);
+    }
+    const scenePlan=!offer.subscription_active&&!offer.scene_access_active && stage==='scene'
+      ? applySceneUnlockOverride(resolveActionPlanByFeatureKey('scene_unlock'),(await this.resolveAbTestSelection(base.chat_id!,'subscription_offer'))?.params??{}) : null;
+    const unlockPlan=stage==='video'&&hasVideo?resolveActionPlanByFeatureKey('video_unlock'):null;
+    const pass=hasVideo && !offer.full_active && !offer.video_pass_active?resolveVideoPassPlan(offer.paid_scene_unlock_token):null;
+    const back=this.videoToken(base,'commerce_back',{...snap,back_step:action==='commerce_pay'?stage:'root'});
+    const rows=[back],products:CommerceProduct[]=[];
+    for(const plan of [scenePlan,unlockPlan,pass]){
+      if(!plan)continue;
+      const variant=plan.feature_key==='video_pass'?pass?.purchase_variant:undefined;
+      const row=this.videoToken(base,'commerce_pay',{...snap,product_step:stage,feature_key:plan.feature_key,purchase_variant:variant??null,
+        quoted_xtr:plan.amount_xtr,quoted_rub:plan.amount_rub??null,video_id:ctx?.video?.video_id??null});
+      const item=this.commerceItem(plan,plan.feature_key,row.token,variant,plan.feature_key==='video_pass'?offer.video_pass_valid_until:offer.scene_access_valid_until);
+      if(item){rows.push(row);products.push(item);}
+    }
+    if(!products.length)return stale();
+    const ui:CommerceUi={surface,step:stage,products,actions:{back:back.token},return_context:root};
+    if(action==='commerce_pay'){
+      const product=products.find(item=>item.feature_key===payload.feature_key);
+      const plan=product?.feature_key==='scene_unlock'?scenePlan:product?.feature_key==='video_unlock'?unlockPlan:pass;
+      if(!product||!plan||product.purchase_variant!==(payload.purchase_variant??undefined) ||
+         plan.amount_xtr!==payload.quoted_xtr || (plan.amount_rub??null)!==payload.quoted_rub ||
+         (stage==='video'&&ctx?.video?.video_id!==payload.video_id))return stale();
+      let options:MediaPaymentOption[];
+      const cycle=product.feature_key==='scene_unlock'?offer.scene_access_payment_token:offer.video_pass_payment_token;
+      const key=createHash('sha256').update(JSON.stringify([base.chat_id,base.scene_session_id,messageId,stage,product.feature_key,
+        product.purchase_variant,cycle??null,plan.amount_xtr,plan.amount_rub,uuid,snap.media_signature])).digest('hex').slice(0,24);
+      if(product.feature_key==='scene_unlock'){
+        options=await this.buildSceneUnlockPaymentOptionsAtClick({chat_id:base.chat_id!,scene_session_id:base.scene_session_id!,target_message_id:messageId,token:key,
+          user_id:offer.user_id,signature:snap.media_signature,commerce_origin:snap});
+      }else{
+        const opened=await this.evaluateVideoCallback({...base,current_uuid:uuid,media_signature:snap.media_signature},
+          {...payload,chosen_feature:product.feature_key,pass_only:stage==='scene',pass_menu:!photo,video_purchase_key:key});
+        if(opened.operation!=='video_ui_ready')return opened;
+        options=product.feature_key==='video_pass'?opened.video?.pass_payment_options??[]:opened.video?.unlock_payment_options??[];
+      }
+      if(!options.length)return stale();
+      ui.products=[product];ui.step='payment';ui.payment_options=options;
+      await this.repository.upsertCallbackTokens([back]);
+    }else await this.repository.upsertCallbackTokens(rows);
+    return {...base,operation:'video_ui_ready' as const,commerce_ui:ui,reason:'commerce_'+ui.step};
   }
 
-  private videoPassUi(plan: NonNullable<ReturnType<typeof resolveVideoPassPlan>>) {
-    const types = parseJsonObject(getMediaCommerceCopy().product_types);
-    const copy = parseJsonObject(types?.[plan.purchase_variant === 'scene_unlock_upgrade' ? 'scene_unlock_upgrade' : 'video_pass']);
-    const title = typeof copy?.title === 'string' && copy.title.trim() ? copy.title : plan.title;
-    const description = typeof copy?.description === 'string' && copy.description.trim() ? copy.description : plan.description;
-    const price = (amount: number, original: number, unit: string) => {
-      const final = `${amount} ${unit}`;
-      if (plan.discount_percent === 0) return final;
-      return String(copy?.discount_format ?? '{original} → {final} (−{percent}%)')
-        .replaceAll('{original}', `${original} ${unit}`).replaceAll('{final}', final)
-        .replaceAll('{percent}', String(plan.discount_percent));
-    };
-    const lines = getMediaPaymentMethods().flatMap(method => method === 'stars'
-      ? [price(plan.amount_xtr,plan.original_amount_xtr,'⭐')]
-      : config.SBP_ENABLED && plan.amount_rub != null ? [price(plan.amount_rub,plan.original_amount_rub!,'₽')] : []);
-    return {pass_button_text:[title,...lines].join(' · '),pass_offer_text:description,pass_price_rub:plan.amount_rub ?? null};
+  private async allowRootButtons(root:CommerceUi['return_context'], receipts:unknown[],base:MediaCommerceDecisionResponse) {
+    const markup=parseJsonObject(root.reply_markup);
+    const buttons=Array.isArray(markup?.inline_keyboard)?markup.inline_keyboard.flat().map(parseJsonObject):[];
+    const allowed:string[]=[];
+    for(const button of buttons){
+      const token=typeof button?.callback_data==='string'?button.callback_data:null;
+      if(!token)continue;
+      const stored=await this.repository.loadCallbackToken(token,base.chat_id);
+      if(!stored?.found || stored.status!=='active' || isExpired(stored.expires_at) || Number(stored.chat_id)!==base.chat_id ||
+        (stored.scene_session_id && stored.scene_session_id!==base.scene_session_id) ||
+        (stored.payload_json?.target_message_id != null && Number(stored.payload_json.target_message_id)!==root.message_id) ||
+        ['video_request','video_pass_options','commerce_scene','commerce_pay','commerce_back','commerce_account_pay','commerce_photo_pay'].includes(stored.action_kind??''))continue;
+      if(stored.action_kind==='free_scene_unlock' && !(Number((await this.repository.loadFreeCredits(base.chat_id!))?.free_scene_unlocks)>0))continue;
+      allowed.push(token);
+    }
+    root.allowed_callback_data=allowed;
+    root.allowed_urls=[];
+    // Subscription buttons are rebuilt from their validated invoice snapshots, not copied from root markup.
+  }
+
+  private async currentSubscriptionRows(receipts:unknown[],base:MediaCommerceDecisionResponse) {
+    const ids=receipts.filter((id):id is string=>typeof id==='string');
+    if(!ids.length)return [];
+    const active=await this.repository.loadActiveSubscriptionOfferId(base.chat_id!);
+    return (await this.repository.loadStoredInvoiceTokens(ids)).filter(row=>Number(row.chat_id)===base.chat_id && row.status==='invoice_sent' &&
+      !isExpired(row.expires_at) && getMediaPaymentMethods().includes(row.payment_source as PaymentSource) &&
+      row.action_kind==='subscription_payment' && active && active===row.payload_json.idempotency_key)
+      .map(row=>row.payment_source==='sbp'?buildSbpGatewayRow(row):row);
   }
 
   private deliveryResponse(base: MediaCommerceDecisionResponse, delivery: VideoDelivery | null): MediaCommerceDecisionResponse {
@@ -2143,7 +2380,7 @@ export class MediaCommerceDecisionService {
       current_reply_markup:delivery.current_reply_markup, reason:'video_panel_media_ready'};
   }
 
-  private async evaluateVideoCallback(base: MediaCommerceDecisionResponse, payload: Record<string,unknown>, action: string): Promise<MediaCommerceDecisionResponse> {
+  private async evaluateVideoCallback(base: MediaCommerceDecisionResponse, payload: Record<string,unknown>): Promise<MediaCommerceDecisionResponse> {
     const targetMessageId = base.target_message_id ?? base.inbound_message_id ?? null;
     const frozen = {...base,target_message_id:targetMessageId,character_i:normalizePositiveInteger(payload.character_i) ?? base.character_i,
       telegram_chat_id:normalizePositiveInteger(payload.telegram_chat_id) ?? base.telegram_chat_id};
@@ -2173,10 +2410,8 @@ export class MediaCommerceDecisionService {
     const unlock = resolveActionPlanByFeatureKey('video_unlock');
     const pass = resolveVideoPassPlan(offer.paid_scene_unlock_token);
     if (passOnly && !pass) return {...frozen,operation:'noop',reason:'video_pass_unavailable'};
-    const passToken = this.videoToken(frozen,'video_pass_options',{...payload,pass_only:passOnly});
     const purchaseRoot = typeof payload.video_purchase_key === 'string' ? payload.video_purchase_key
       : createHash('sha256').update([frozen.chat_id,frozen.scene_session_id,targetMessageId,context.video?.video_id ?? 'pass'].join(':')).digest('hex').slice(0,24);
-    passToken.payload_json.video_purchase_key = purchaseRoot;
     const snapshot = {chat_id:frozen.chat_id,scene_session_id:frozen.scene_session_id,character_i:context.character_i ?? frozen.character_i,
       media_signature:frozen.media_signature,video_id:passOnly ? null : context.video?.video_id,
       photo_message_id:passOnly ? null : targetMessageId,target_message_id:targetMessageId,
@@ -2186,7 +2421,7 @@ export class MediaCommerceDecisionService {
       panel_text:frozen.caption_text ?? frozen.panel_text ?? null,
       panel_entities_json:frozen.caption_entities_json ?? frozen.panel_entities_json ?? [],
       requested_action:'video_request',base_reply_markup:base.current_reply_markup};
-    const plans = [!passOnly ? unlock : null,pass].filter((plan): plan is NonNullable<typeof plan> => plan != null);
+    const plans = [!passOnly && payload.chosen_feature!=='video_pass' ? unlock : null,payload.chosen_feature==='video_unlock'?null:pass].filter((plan): plan is NonNullable<typeof plan> => plan != null);
     const inputs = plans.flatMap(plan => {
       const variant = plan.feature_key === 'video_pass' ? pass : null;
       const suffix = variant ? (variant.purchase_variant === 'scene_unlock_upgrade' ? 'pg' : 'p') + (passOnly ? 'o' : '') : 'u';
@@ -2206,28 +2441,17 @@ export class MediaCommerceDecisionService {
     const stored = await this.upsertCurrentPaymentAttempts(inputs,'video');
     const rendered = await this.prepareRenderablePaymentRows(stored,'video');
     const options = rendered.map(buildPaymentOption);
-    await this.repository.upsertCallbackTokens([passToken]);
-    const markup = parseJsonObject(base.current_reply_markup);
-    const buttons = Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard.flat().map(parseJsonObject) : [];
-    const existingTokens = buttons.flatMap(button=>typeof button?.callback_data === 'string' ? [button.callback_data] : []);
-    const keepTokens: string[]=[];
-    const videoTokens = await Promise.all(existingTokens.map(async token=>{
-      const storedToken = await this.repository.loadCallbackToken(token,frozen.chat_id);
-      if(passOnly && storedToken?.chat_id === frozen.chat_id && storedToken.action_kind === 'video_request') {keepTokens.push(token);return null;}
-      return storedToken?.chat_id === frozen.chat_id && ['video_request','video_pass_options'].includes(storedToken.action_kind ?? '') ? token : null;
-    }));
-    const knownTokens = [...new Set([base.callback_data,passToken.token,...videoTokens].filter((value):value is string=>!!value))];
     return {...frozen,operation:'video_ui_ready',video:{available:!passOnly,consumed:false,
-      unlock_payment_options:options.filter(option=>option.feature_key === 'video_unlock'),
-      pass_reveal_callback_data:pass ? passToken.token : null,pass_menu:menu,...(pass ? this.videoPassUi(pass) : {}),
-      pass_payment_options:action === 'video_pass_options' ? options.filter(option=>option.feature_key === 'video_pass') : []},
-      current_reply_markup:base.current_reply_markup,video_control_tokens:knownTokens,
-      video_keep_tokens:keepTokens,
-      video_payment_urls:options.map(option=>option.checkout_url),reason:'video_payment_options'};
+      unlock_payment_options:options.filter(option=>option.feature_key==='video_unlock'),
+      pass_payment_options:options.filter(option=>option.feature_key==='video_pass')},
+      reason:'video_payment_options'};
   }
 
   private async fulfillVideoPayment(base: MediaCommerceDecisionResponse, paid: PaidInvoiceToken, payload: Record<string,unknown>, feature: string): Promise<MediaCommerceDecisionResponse> {
-    if (feature === 'video_pass') await this.videos.activateVideoPass(paid.token,paid.chat_id);
+    if (feature === 'video_pass' && !await this.videos.activateVideoPass(paid.token,paid.chat_id)) {
+      return {...base,operation:'video_payment_review_required',payment_token:paid.token,reason:'paid_scene_requires_review',
+        text:renderUx(getMediaUxCopy().video?.duplicate_payment_review)};
+    }
     const videoId = typeof payload.video_id === 'string' ? payload.video_id : null;
     const panelId = normalizePositiveInteger(payload.photo_message_id);
     const frozen = {...base,chat_id:paid.chat_id,scene_session_id:paid.scene_session_id,target_message_id:panelId,
@@ -2281,6 +2505,7 @@ export class MediaCommerceDecisionService {
           panel_caption:delivery.panel_caption,panel_caption_entities:delivery.panel_caption_entities,
           ...callbacks,
           current_reply_markup:delivery.current_reply_markup,
+          video_control_tokens:delivery.video_control_tokens??[],video_payment_urls:delivery.video_payment_urls??[],
           reason:'video_delivery_claimed'};
       } catch (error) {
         await this.videos.failDelivery(input.delivery_id,claim,'video_url_signing_failed',true);
@@ -2354,6 +2579,9 @@ export class MediaCommerceDecisionService {
     chat_id: number;
     scene_session_id: string;
     target_message_id: number | null;
+    user_id?:string|null;
+    signature?:string|null;
+    commerce_origin?:Record<string,unknown>;
   }): Promise<MediaPaymentOption[]> {
     const abSelection = await this.resolveAbTestSelection(
       input.chat_id,
@@ -2372,7 +2600,8 @@ export class MediaCommerceDecisionService {
         chat_id: input.chat_id,
         scene_session_id: input.scene_session_id,
         idempotency_key: `scene-unlock-click:${input.token}`,
-        turn_limit: config.TURN_LIMIT,
+        user_id:input.user_id,media_signature:input.signature,commerce_origin:input.commerce_origin,
+        turn_limit: config.DAILY_FREE_LIMITS_JSON.messages,
         target_message_id: input.target_message_id,
         plan,
         ab_test: toAbTestContext(abSelection),
@@ -2443,8 +2672,7 @@ export class MediaCommerceDecisionService {
         "unknown_photo_sku",
       );
     }
-    const stored = await this.repository.upsertInvoiceToken(
-      buildPhotoInvoiceInput({
+    const stars = buildPhotoInvoiceInput({
         token: `photo-unlock-click:${input.token}`,
         chat_id: input.chat_id,
         scene_session_id: input.scene_session_id,
@@ -2478,15 +2706,23 @@ export class MediaCommerceDecisionService {
           panel_entities_json: input.panel_entities_json,
           idempotency_key: `photo-unlock-click:${input.token}`,
           original_amount_xtr: plan.original_amount_xtr,
+          original_amount_rub: plan.original_amount_rub,
           promo_key: plan.promo_key,
         },
-      }),
-    );
-    const ready = stored
-      ? await this.ensureStarsInvoiceLink(stored, "photoUnlock.click")
-      : null;
-
-    return ready ? buildTopLevelPaymentFields([ready]).payment_options ?? [] : [];
+    });
+    const rows:StoredInvoiceToken[]=[];
+    const methods=getMediaPaymentMethods();
+    if(methods.includes('stars')){
+      const stored=await this.repository.upsertInvoiceToken(stars);
+      if(stored)rows.push(stored);
+    }
+    if(methods.includes('sbp') && plan.amount_rub!=null){
+      const rub=buildPaymentInputs({base_token:stars.token,chat_id:input.chat_id,scene_session_id:input.scene_session_id,
+        turn_no:input.turn_no,scene_turn_no:input.scene_turn_no,action_kind:'photo_payment',plan,payload_json:stars.payload_json})
+        .filter(row=>row.payment_source==='sbp');
+      rows.push(...await this.upsertCurrentPaymentAttempts(rub,'photoUnlock.click'));
+    }
+    return (await this.prepareRenderablePaymentRows(rows,'photoUnlock.click')).map(buildPaymentOption);
   }
 
   private async evaluatePrepareOffer(
@@ -2516,7 +2752,8 @@ export class MediaCommerceDecisionService {
     stats: MediaOfferStats,
     photoSku: string | null,
   ): Promise<MediaCommerceDecisionResponse> {
-    const deliveredInScene = normalizeNonNegativeInteger(stats.delivered_in_scene) ?? 0;
+    const confirmed = normalizeNonNegativeInteger(stats.free_photos_today) ?? 0;
+    base = {...base, free_photos_today: confirmed, daily_photo_limit: config.DAILY_FREE_LIMITS_JSON.photos};
     const subscriptionActive = stats.subscription_active === true;
     const sceneAccessActive = stats.scene_access_active === true;
     const totalAvailable = normalizeNonNegativeInteger(stats.total_available) ?? 0;
@@ -2526,7 +2763,7 @@ export class MediaCommerceDecisionService {
     const priceRequired = calculateMediaPriceRequired({
       subscription_active: subscriptionActive,
       scene_access_active: sceneAccessActive,
-      delivered_in_scene: deliveredInScene,
+      free_photos_today: confirmed + (stats.pending_free_photos ?? 0),
       base_price_xtr: basePrice,
     });
     const mediaSignature = normalizeString(stats.media_signature);
@@ -2938,8 +3175,8 @@ export class MediaCommerceDecisionService {
     if (config.MEDIA_VIDEO_ENABLED && (['video_panel_requested_photo','video_panel_source_photo','video_panel_video'].includes(actionKind ?? '') || (actionKind === 'photo_next' && payload.delivery_id))) {
       return this.evaluateVideoPanelCallback(callbackBase, payload, actionKind!, input);
     }
-    if (config.MEDIA_VIDEO_ENABLED && (actionKind === 'video_request' || actionKind === 'video_pass_options')) {
-      return this.evaluateVideoCallback(callbackBase, payload, actionKind);
+    if(['commerce_scene','commerce_back','commerce_pay','commerce_account_pay','commerce_photo_pay','video_request','video_pass_options'].includes(actionKind??'')){
+      return this.commerceCallback(callbackBase,payload,actionKind!,input);
     }
 
     if (
@@ -3129,10 +3366,10 @@ export class MediaCommerceDecisionService {
       }
     }
 
-    const readyRows = await this.prepareRenderablePaymentRows(
-      orderedRows,
-      "featurePayment.rebuild",
-    );
+    const supported=['photo_unlock','scene_unlock'].includes(featureKey)
+      ? orderedRows.filter(row=>getMediaPaymentMethods().includes(row.payment_source as PaymentSource) && !isExpired(row.expires_at))
+      : orderedRows;
+    const readyRows = await this.prepareRenderablePaymentRows(supported,"featurePayment.rebuild");
     if (readyRows.length === 0) {
       return {
         ...base,
@@ -3147,8 +3384,23 @@ export class MediaCommerceDecisionService {
       .map((row) => buildPaymentOption(row))
       .sort((left, right) => getSourceSortOrder(left.source) - getSourceSortOrder(right.source));
 
+    let ui:CommerceUi|undefined;
+    if(featureKey==='photo_unlock'||featureKey==='scene_unlock'){
+      const photo=featureKey==='photo_unlock'||!!base.media_signature;
+      const surface:CommerceSurface=photo?'daily_photos':'subscription';
+      const root:CommerceUi['return_context']={kind:photo?'photo':'subscription',message_id:base.target_message_id??null,
+        text:base.panel_text,entities:parseJsonArray(base.panel_entities_json)??[],reply_markup:base.current_reply_markup};
+      const back=this.videoToken(base,'commerce_back',{surface,back_step:photo?'root':'scene',root_text:root.text,root_entities:root.entities,
+        root_markup:root.reply_markup,photo_token:featureKey==='photo_unlock'?base.payment_token??base.callback_data:null});
+      await this.repository.upsertCallbackTokens([back]);
+      const opt=paymentOptions.find(option=>option.currency===(getMediaLanguage()==='en'?'XTR':'RUB'))??paymentOptions[0]!;
+      ui={surface,step:'payment',actions:{back:back.token},products:[{feature_key:featureKey,sku:opt.sku??'',
+        label_key:featureKey,title:opt.title,label:opt.title,description:opt.description,amount:opt.amount,currency:opt.currency,
+        duration_days:featureKey==='scene_unlock'?config.SCENE_ACCESS_DAYS:undefined,callback_data:base.callback_data??''}],
+        payment_options:paymentOptions,return_context:root};
+    }
     return {
-      ...base,
+      ...base,commerce_ui:ui,
       operation: "feature_payment_options_revealed",
       callback_valid: true,
       callback_answer_text: "",
@@ -3683,6 +3935,22 @@ export class MediaCommerceDecisionService {
     base: MediaCommerceDecisionResponse,
     context: MediaContext,
   ): Promise<MediaCommerceDecisionResponse> {
+    // Reserve before returning the photo URL to Telegram. Its confirmed edit
+    // closes the reservation in the same transaction as the ordinary receipt.
+    const candidate = normalizeNextUnseen(context.next_unseen_json);
+    if (candidate && context.callback_valid && !context.force_deliver_after_payment && !context.paid_access_mode
+        && !context.subscription_active && !context.scene_access_active
+        && (context.free_photos_today ?? 0) < config.DAILY_FREE_LIMITS_JSON.photos
+        && (context.panel_unlocked_count ?? 0) < 5 && context.chat_id && context.scene_session_id && context.target_message_id
+        && ['photo_request','photo_regen'].includes(context.action_kind ?? '') && base.callback_data) {
+      const {mode,dispatchBy} = await this.repository.authorizeDailyPhoto(context.chat_id,context.scene_session_id,base.callback_data,candidate.uuid,context.target_message_id);
+      if (mode === 'free') base={...base,photo_dispatch_by:dispatchBy};
+      if (mode === 'nav') return {...base,operation:'noop',reason:'photo_already_unlocked'};
+      const quota = config.DAILY_FREE_LIMITS_JSON.photos;
+      const used = (context.free_photos_today ?? 0) + (context.pending_free_photos ?? 0);
+      context = {...context, subscription_active:mode === 'subscription', scene_access_active:mode === 'scene_pass',
+        free_photos_today:mode === null ? quota : Math.min(used,quota-1),pending_free_photos:0};
+    }
     const decision = buildMediaAction(context);
     if (decision.operation === "noop") {
       return {
@@ -3785,6 +4053,23 @@ export class MediaCommerceDecisionService {
       scene_access_active: context.scene_access_active,
       reason: "media_ready",
     };
+  }
+
+  private async videoInvoiceAllowed(chatId:number, scene:string, feature:string, payload:Record<string,unknown>) {
+    const offer=await this.videos.passOfferContext(chatId,scene,'telegram');
+    if(offer.scene_session_id!==scene || offer.full_active || offer.video_pass_active ||
+      (payload.user_id!=null && payload.user_id!==offer.user_id)) return false;
+    if(feature==='video_pass'){
+      if(payload.purchase_variant==='scene_unlock_upgrade' && (!offer.paid_scene_unlock_token ||
+        payload.paid_scene_unlock_token!==offer.paid_scene_unlock_token))return false;
+      if(payload.video_id==null)return offer.available && (payload.media_signature==null || payload.media_signature===offer.media_signature);
+    }
+    const context=await this.videos.context({chat_id:chatId,scene_session_id:scene,panel_message_id:normalizePositiveInteger(payload.photo_message_id),
+      media_signature:normalizeString(typeof payload.media_signature==='string'?payload.media_signature:null),
+      requested_photo_uuid:typeof payload.requested_photo_uuid==='string'?payload.requested_photo_uuid:null,
+      character_i:normalizePositiveInteger(payload.character_i)});
+    return context.scene_active && !context.panel_delivered && !context.delivery && context.video?.video_id===payload.video_id &&
+      (!context.panel_photo_uuid || context.panel_photo_uuid===payload.requested_photo_uuid);
   }
 
   private async evaluatePrecheckout(
@@ -3899,6 +4184,10 @@ export class MediaCommerceDecisionService {
             error: getMediaUxCopy().payment_errors.different_scene,
             reason: "scene_invoice_not_active",
           };
+        } else if (validationAction.feature_key === 'video_unlock' || validationAction.feature_key === 'video_pass') {
+          if (!await this.videoInvoiceAllowed(chatId,invoiceSceneSessionId,validationAction.feature_key,payload)) {
+            validation={...validation,ok:false,error:getMediaUxCopy().payment_errors.stale,reason:'video_invoice_stale'};
+          }
         } else if (sceneStatus.subscription_active) {
           validation = {
             ...validation,
@@ -4041,7 +4330,7 @@ export class MediaCommerceDecisionService {
     if (existingStatus === "fulfilled") {
       if (
         resolvedAction.payment_kind === "feature"
-        && resolvedAction.feature_key === "scene_unlock"
+        && resolvedAction.feature_key === "scene_unlock" && !payload.commerce_origin
       ) {
         return {
           ...base,
@@ -4918,7 +5207,7 @@ export class MediaCommerceDecisionService {
         sceneSessionId,
       );
 
-    return {
+    const receipt:MediaCommerceDecisionResponse = {
       ...base,
       operation: activatedCount > 0 ? "scene_access_activated" : "noop",
       text: activatedCount > 0
@@ -4945,6 +5234,17 @@ export class MediaCommerceDecisionService {
           ? "scene_access_activated"
           : failureReason,
     };
+    const origin=parseJsonObject(payload.commerce_origin);
+    if(activatedCount && origin && (origin.surface==='photo'||origin.surface==='daily_photos') && receipt.target_message_id){
+      const photo={...receipt,media_signature:typeof origin.media_signature==='string'?origin.media_signature:null,
+        current_uuid:typeof origin.source_photo==='string'?origin.source_photo:null};
+      const ctx=config.MEDIA_VIDEO_ENABLED && origin.surface==='photo'?await this.loadVideoContext(photo):null;
+      const root:CommerceUi['return_context']={message_id:receipt.target_message_id,kind:'photo',text:typeof origin.root_text==='string'?origin.root_text:null,
+        entities:parseJsonArray(origin.root_entities)??[],reply_markup:origin.root_markup};
+      await this.allowRootButtons(root,[],photo);
+      return this.commerceRoot(photo,origin.surface,ctx,root);
+    }
+    return receipt;
   }
 
   private async resolveSceneAccessActivationFailure(
@@ -5145,11 +5445,11 @@ export class MediaCommerceDecisionService {
     if (!offerId) {
       return { ...base, chat_id: chatId, reason: "subscription_offer_id_required" };
     }
-    const turnLimit = normalizePositiveInteger(input.turn_limit) ?? config.TURN_LIMIT;
+    const turnLimit = config.DAILY_FREE_LIMITS_JSON.messages;
     const turnsToday =
       normalizeNonNegativeInteger(input.turns_today) ?? turnLimit;
     const turnLimitResetText =
-      normalizeString(input.turn_limit_reset_text) ?? config.TURN_LIMIT_RESET_TEXT;
+      config.TURN_LIMIT_RESET_TEXT;
     const abSelection = await this.resolveAbTestSelection(
       chatId,
       "subscription_offer",

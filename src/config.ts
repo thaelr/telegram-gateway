@@ -252,9 +252,11 @@ const rawEnvSchema = z.object({
     .string()
     .default("[]")
     .transform((raw) => parseJsonEnv(raw, z.array(telegramUserIdSchema))),
-  TURN_LIMIT: z.coerce.number().int().positive().default(20),
-  BUSINESS_TIME_ZONE: z.string().min(1).default("Europe/Moscow"),
-  TURN_LIMIT_RESET_TEXT: z.string().min(1).default("00:00 МСК"),
+  DAILY_FREE_LIMITS_JSON: z.string().optional().transform(raw => raw === undefined ? undefined :
+    parseJsonEnv(raw,z.object({messages:positiveIntegerSchema,photos:positiveIntegerSchema}).strict())),
+  BUSINESS_TIME_ZONE: z.literal("Europe/Moscow").default("Europe/Moscow"),
+  SCENE_ACCESS_DAYS: z.coerce.number().int().positive().safe().default(7),
+
   MEDIA_PAYMENT_CURRENCY: z.string().min(1).default("XTR"),
   MEDIA_STORAGE_BASE_URL: z
     .string()
@@ -390,6 +392,11 @@ if (normalizedSbpConfig.SBP_ENABLED) {
 export const config = {
   ...parsedEnv,
   ...normalizedSbpConfig,
+  // The legacy message limit applies only when the combined config is absent.
+  DAILY_FREE_LIMITS_JSON: parsedEnv.DAILY_FREE_LIMITS_JSON ?? {
+    messages: z.coerce.number().int().positive().parse(process.env.TURN_LIMIT ?? 20), photos: 3
+  },
+  TURN_LIMIT_RESET_TEXT: "00:00 МСК",
   GATEWAY_PUBLIC_URL: gatewayPublicUrl,
   EXPERIMENTS: loadExperimentConfigsFromEnv(process.env),
 };

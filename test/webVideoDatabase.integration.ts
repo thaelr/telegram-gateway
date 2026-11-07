@@ -35,7 +35,8 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   return {userId,chatId,scene,code:created.chat.chat_code};
  };
  const media=async(o:Awaited<ReturnType<typeof owner>>)=>{
-  const id=randomUUID(),vid=randomUUID(),signature='synthetic_'+id;
+  const id=randomUUID(),vid=randomUUID(),loc='fixture'+id.replaceAll('-',''),signature=loc+'_close_sitting_dress_front';
+  await db`UPDATE public.chat_scene_sessions SET entry_scene_start_hint_json=${db.json({location:loc,pose:'sitting',clothes:'dress',partner_position:'front'})} WHERE chat_id=${o.chatId} AND scene_session_id=${o.scene}`;
   await db`INSERT INTO public.media_catalog(character_i,uuid,scene_hint,bucket_name,storage_path,status) VALUES(1,${id},${signature},'fixture',${id+'.png'},'ready')`;
   await db`INSERT INTO public.video_catalog(video_id,character_i,media_signature,source_photo_uuid,storage_path,status) VALUES(${vid},1,${signature},${id},${vid+'.mp4'},'ready')`;
   await service.prepareOffer(o.userId,o.code,{media_id:id,sku:'test_photo_video',media_signature:signature});
@@ -153,7 +154,8 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   const purchase=await repo.getById(p.purchase_id);assert.equal(purchase!.status,'fulfilled');assert.equal(purchase!.quote.payload!.purchase_variant,'standard');
   const [count]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE payment_token=${purchase!.payment_token}`;assert.equal(count!.n,0);
   const available=await service.videoAvailability(o.userId,o.code,m.id);assert.equal(available.video_pass_active,true);assert.equal(available.full_active,false);
-  const [s]=await db`SELECT scene_access_unlocked_at FROM public.chat_scene_sessions WHERE scene_session_id=${o.scene}`;assert.ok(s!.scene_access_unlocked_at);
+  const [s]=await db`SELECT * FROM app_private.scene_entitlements(${o.chatId},${o.scene})`;
+  assert.ok(s!.scene_access_active);assert.ok(s!.video_pass_valid_until);assert.equal(s!.scene_unlock_active,false);
   const requested=await service.requestVideo(o.userId,o.code,m.id,'pass-request');const same=await service.requestVideo(o.userId,o.code,m.id,'pass-request');assert.equal(same.delivery_id,requested.delivery_id);
   const next='video-web-'+randomUUID();await db`INSERT INTO public.chat_scene_sessions(chat_id,scene_session_id,scene_mode,character_i) VALUES(${o.chatId},${next},'roleplay',1)`;await db`UPDATE public.chat_state SET active_scene_session_id=${next} WHERE chat_id=${o.chatId}`;
   const [ctx]=await db`SELECT public.media_video_context(${o.chatId},${next},1,${m.signature},${m.panel}) AS value`;assert.equal(ctx!.value.video_pass_active,false);
@@ -184,13 +186,14 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
    await db`INSERT INTO public.chat_scene_sessions(chat_id,scene_session_id,scene_mode,character_i) VALUES(${o.chatId},${next},'roleplay',1)`;
    await db`UPDATE public.chat_state SET active_scene_session_id=${next} WHERE chat_id=${o.chatId}`;
    await Promise.all([paid(p.purchase_id),paid(p.purchase_id)]);
-   assert.equal((await repo.getById(p.purchase_id))!.status,'fulfilled');
+   const closed=await repo.getById(p.purchase_id);
+   assert.equal(closed!.status,'fulfillment_pending');assert.equal(closed!.error_code,'paid_scene_requires_review');
    const [flags]=await db`SELECT scene_access_unlocked_at,scene_access_payment_token FROM public.chat_scene_sessions WHERE chat_id=${o.chatId} AND scene_session_id=${o.scene}`;
    assert.ok(flags!.scene_access_unlocked_at);assert.equal(flags!.scene_access_payment_token,before!.payment_token);
    const [other]=await db`SELECT scene_access_unlocked_at FROM public.chat_scene_sessions WHERE chat_id=${o.chatId} AND scene_session_id=${next}`;
    assert.equal(other!.scene_access_unlocked_at,null);
    const [passes]=await db`SELECT count(*)::int AS n FROM app_private.video_scene_passes WHERE user_id=${o.userId} AND scene_session_id=${o.scene}`;
-   assert.equal(passes!.n,1);assert.equal((await repo.getById(p.purchase_id))!.quote.amount,'167');
+   assert.equal(passes!.n,0);assert.equal((await repo.getById(p.purchase_id))!.quote.amount,'167');
   }finally{plan.scene_unlock_upgrade=saved;}
  });
  await t.test('temporary delivery failure preserves confirmed VideoPass rights while fulfillment retries the same snapshot',async(st)=>{
@@ -199,9 +202,9 @@ test('Web video and Full use the real local PostgreSQL Commerce ledger',async(t)
   await paid(p.purchase_id);
   const pending=await repo.getById(p.purchase_id);
   assert.equal(pending!.status,'fulfillment_pending');assert.equal(pending!.error_code,'video_delivery_pending');
-  const [receipt]=await db`SELECT t.status,s.scene_access_unlocked_at FROM public.interaction_tokens t
-    JOIN public.chat_scene_sessions s ON s.chat_id=t.chat_id AND s.scene_session_id=t.scene_session_id WHERE t.token=${pending!.payment_token}`;
-  assert.equal(receipt!.status,'paid');assert.ok(receipt!.scene_access_unlocked_at);
+  const [receipt]=await db`SELECT t.status,s.scene_access_active FROM public.interaction_tokens t
+    CROSS JOIN LATERAL app_private.scene_entitlements(t.chat_id,t.scene_session_id) s WHERE t.token=${pending!.payment_token}`;
+  assert.equal(receipt!.status,'paid');assert.ok(receipt!.scene_access_active);
   fail.mock.restore();
   const recovered=await service.status(o.userId,p.purchase_id);
   assert.ok(recovered.video_delivery_id);assert.equal(recovered.purchase_id,p.purchase_id);

@@ -252,6 +252,7 @@ async function runPrepareAssistantSendContext(input: {
       },
     },
     "Build Dynamic Instructions": { json: { chat_id: 101, n: 14 } },
+    "Resolved turn event": {json:{debounce_revision:1}},
     "Scene Turn Input": { json: { chat_id: 101 } },
   });
 
@@ -289,10 +290,10 @@ async function runPrepareMediaOfferInput(
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const jsCode = await loadSceneTurnWorkflowNodeCode("Prepare media offer input");
-  const evaluator = new Function("$json", jsCode) as (
-    json: Record<string, unknown>,
+  const evaluator = new Function("$json","$node", jsCode) as (
+    json: Record<string, unknown>,nodes:Record<string,{json:Record<string,unknown>}>,
   ) => Array<{ json: Record<string, unknown> }>;
-  const result = evaluator(input);
+  const result = evaluator(input,{"Scene Turn Input":{json:input},"Resolved turn event":{json:{debounce_revision:1}}});
 
   assert.ok(Array.isArray(result));
   assert.equal(result.length, 1);
@@ -376,7 +377,7 @@ async function runPrepareRefreshedSubscriptionOfferResult(
     items: (nodeName: string) => Array<{ json: Record<string, unknown> }>,
   ) => Array<{ json: Record<string, unknown> }>;
   const result = evaluator(input, (nodeName: string) => {
-    assert.equal(nodeName, "Build subscription offer message");
+    assert.equal(nodeName, "Build video-only panel markup");
     return [{ json: base }];
   });
 
@@ -398,7 +399,7 @@ async function runPrepareFinalizeSubscriptionOfferInput(
     items: (nodeName: string) => Array<{ json: Record<string, unknown> }>,
   ) => Array<{ json: Record<string, unknown> }>;
   const result = evaluator(input, (nodeName: string) => {
-    assert.equal(nodeName, "Build subscription offer message");
+    assert.equal(nodeName, "Build video-only panel markup");
     return [{ json: base }];
   });
 
@@ -542,7 +543,7 @@ test("router fast scene skip offer passes explicit feature discriminator", async
     scene_turn_no: 0,
     selected_character_i: 2,
     scene_mode: "fast",
-    start_media_signature: "hotel_room_close_standing_towel",
+    start_media_signature: "hotel_room_close_standing_towel_front",
   });
   const workflow = await loadRouterWorkflow();
 
@@ -555,7 +556,7 @@ test("router fast scene skip offer passes explicit feature discriminator", async
   assert.equal(result.character_i, 2);
   assert.equal(result.scene_mode, "fast");
   assert.equal(result.target_message_id, null);
-  assert.equal(result.media_signature, "hotel_room_close_standing_towel");
+  assert.equal(result.media_signature, "hotel_room_close_standing_towel_front");
   assert.deepEqual(
     workflow.connections?.["Need fast scene skip offer?"]?.main?.[0]?.map((entry) => entry.node),
     ["Prepare fast scene skip offer input"],
@@ -597,9 +598,9 @@ test("scene turn core media signature keeps out_of_reach distinct and sex requir
     previousHint: null,
   });
 
-  assert.equal(outOfReach.media_signature_preview, "hotel_room_out_of_reach_standing_towel");
-  assert.equal(close.media_signature_preview, "hotel_room_close_standing_towel");
-  assert.equal(touching.media_signature_preview, "hotel_room_close_standing_towel");
+  assert.equal(outOfReach.media_signature_preview, "hotel_room_out_of_reach_standing_towel_front");
+  assert.equal(close.media_signature_preview, "hotel_room_close_standing_towel_front");
+  assert.equal(touching.media_signature_preview, "hotel_room_close_standing_towel_front");
   assert.notEqual(outOfReach.media_signature_preview, close.media_signature_preview);
   assert.equal(sex.media_signature_preview, "hotel_room_sex_standing_naked_cowgirl");
   assert.equal(sexMissingPosition.media_signature_preview, null);
@@ -771,8 +772,10 @@ test("reward callback topology claims, answers callback, then routes the next ac
   const claim = nodes.find((node) => node.name === "Claim configured reward");
   const answer = nodes.find((node) => node.name === "Answer reward callback");
 
-  assert.equal(route?.parameters?.numberOutputs, 17);
-  assert.match(route?.parameters?.output ?? "", /handle_reward_claim/u);
+  const branch=/handle_reward_claim'\s*\?\s*(\d+)/u.exec(route?.parameters?.output??"");
+  assert.ok(branch,"reward dispatch branch");
+  assert.ok(Number(route?.parameters?.numberOutputs)>Number(branch[1]));
+  assert.deepEqual(workflow.connections?.["Route router action"]?.main?.[Number(branch[1])]?.map(item=>item.node),["Claim configured reward"]);
   assert.match(claim?.parameters?.url ?? "", /\/v1\/rewards\/claim-slot/u);
   assert.match(claim?.parameters?.body ?? "", /reward_slot/u);
   assert.equal(answer?.type, "n8n-nodes-base.telegram");
@@ -1068,8 +1071,10 @@ test("subscription offer prefixes free balances before choosing send or edit", a
   assert.match(String(formatter?.parameters?.jsCode ?? ""), /free_balance_text/u);
   assert.deepEqual(
     workflow.connections?.["Build subscription offer message"]?.main?.[0]?.map((entry) => entry.node),
-    ["Add free balances to subscription text"],
+    ["Build video-only panel markup"],
   );
+  assert.deepEqual(workflow.connections?.["Build video-only panel markup"]?.main?.[0]?.map(edge=>edge.node),["Route canonical photo UI target"]);
+  assert.deepEqual(workflow.connections?.["Route canonical photo UI target"]?.main?.[2]?.map(edge=>edge.node),["Add free balances to subscription text"]);
   assert.deepEqual(
     workflow.connections?.["Add free balances to subscription text"]?.main?.[0]?.map((entry) => entry.node),
     ["Subscription offer already sent?"],
@@ -1142,94 +1147,23 @@ test("feature payment reveal builder preserves entities and adds only hint itali
   });
 });
 
-test("subscription offer builder keeps text price-free and toggles only subscription rows", async () => {
-  const result = await runWorkflowCodeNode("Build subscription offer message", {
-    callback_data: "btn_toggle_stars",
-    selected_payment_source: "stars",
-    text: "Subscription body only",
-    payment_ui: {
-      pay_with_stars_button: "⭐ Оплатить звёздами",
-      pay_with_sbp_button: "Оплатить через СБП",
-      subscription_stars_plan_button: "{label} · ⭐ {amount}",
-      subscription_sbp_plan_button: "{label} · {amount} ₽",
-    },
-    payment_source_toggle_tokens: {
-      stars: "btn_toggle_stars",
-      sbp: "btn_toggle_sbp",
-    },
-    current_reply_markup: {
-      inline_keyboard: [
-        [{ text: "Разблокировать чат", callback_data: "btn_scene_unlock" }],
-        [
-          { text: "80 ₽ (СБП)", url: "https://pay.example/scene-sbp" },
-          { text: "⭐ 80", url: "https://t.me/scene-stars" },
-        ],
-        [{ text: "7 дней · 199 ₽", url: "https://pay.example/sub-7-sbp" }],
-        [{ text: "30 дней · 499 ₽", url: "https://pay.example/sub-30-sbp" }],
-        [{ text: "⭐ Оплатить звёздами", callback_data: "btn_toggle_stars" }],
-        [{ text: "Other", callback_data: "btn_other" }],
-      ],
-    },
-    subscription_offer_items: [
-      {
-        sku: "payment_plan_7",
-        payment_kind: "subscription",
-        sort_order: 1,
-        subscription_days: 7,
-        label: "7 дней",
-        payment_options: [
-          {
-            source: "sbp",
-            amount: 199,
-            currency: "RUB",
-            checkout_url: "https://pay.example/sub-7-sbp",
-          },
-          {
-            source: "stars",
-            amount: 100,
-            currency: "XTR",
-            checkout_url: "https://t.me/sub-7-stars",
-          },
-        ],
-      },
-      {
-        sku: "payment_plan_30",
-        payment_kind: "subscription",
-        sort_order: 2,
-        subscription_days: 30,
-        label: "30 дней",
-        payment_options: [
-          {
-            source: "sbp",
-            amount: 499,
-            currency: "RUB",
-            checkout_url: "https://pay.example/sub-30-sbp",
-          },
-          {
-            source: "stars",
-            amount: 300,
-            currency: "XTR",
-            checkout_url: "https://t.me/sub-30-stars",
-          },
-        ],
-      },
-    ],
-  });
-
-  assert.equal(result.text, "Subscription body only");
-  assert.deepEqual(result.reply_markup, {
-    inline_keyboard: [
-      [{ text: "Разблокировать чат", callback_data: "btn_scene_unlock" }],
-      [
-        { text: "80 ₽ (СБП)", url: "https://pay.example/scene-sbp" },
-        { text: "⭐ 80", url: "https://t.me/scene-stars" },
-      ],
-      [{ text: "7 дней · ⭐ 100", url: "https://t.me/sub-7-stars" }],
-      [{ text: "30 дней · ⭐ 300", url: "https://t.me/sub-30-stars" }],
-      [{ text: "Оплатить через СБП", callback_data: "btn_toggle_sbp" }],
-      [{ text: "Other", callback_data: "btn_other" }],
-    ],
-  });
+test("subscription root and payment use one renderer, retain AB metadata, and show discounts only on the payment step", async () => {
+  const product={feature_key:"base",label_key:"base",label:"Base",sku:"base",amount:100,currency:"RUB",callback_data:"choose_base",description:"Base plan"};
+  const ui={surface:"subscription",step:"root",products:[product],actions:{scene:"scene_token"},return_context:{kind:"subscription",message_id:777,text:"Subscription body"}};
+  const input={chat_id:101,text:"Subscription body",ab_test:{key:"subscription_offer",variant:"B"},commerce_ui:ui,
+    ux_copy:{commerce_ui:{scene_subscription:"Текущая сцена",back:"Назад",sbp:"СБП",stars:"Stars"}}};
+  const prepared=await runWorkflowCodeNode("Build subscription offer message",input);
+  const root=await runWorkflowCodeNode("Build video-only panel markup",prepared);
+  assert.deepEqual(root.ab_test,input.ab_test);assert.equal(root.text,"Subscription body");
+  assert.deepEqual(root.reply_markup,{inline_keyboard:[
+    [{text:"Base (100 ₽)",callback_data:"choose_base"}],[{text:"Текущая сцена",callback_data:"scene_token"}],
+  ]});
+  const payment=await runWorkflowCodeNode("Build video-only panel markup",{...input,commerce_ui:{...ui,step:"payment",actions:{back:"go_back"},
+    payment_options:[{source:"sbp",amount:100,original_amount:150,currency:"RUB",checkout_url:"https://pay.example/sbp"}]}});
+  assert.deepEqual(payment.reply_markup,{inline_keyboard:[[{text:"СБП · 100 ₽",url:"https://pay.example/sbp"}],[{text:"Назад",callback_data:"go_back"}]]});
+  const entities=payment.commerce_entities as {type:string;offset:number;length:number}[];
+  const strike=entities.find(e=>e.type==="strikethrough");assert.ok(strike);
+  assert.equal(String(payment.text).slice(strike.offset,strike.offset+strike.length),"150 ₽");
 });
 
 test("payment UI reveal topology answers callback and edits text or caption", async () => {

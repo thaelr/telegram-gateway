@@ -47,12 +47,12 @@ export type MediaActionDecision = {
 export function calculateMediaPriceRequired(input: {
   subscription_active: boolean;
   scene_access_active?: boolean;
-  delivered_in_scene: number;
+  free_photos_today: number;
   base_price_xtr: number;
 }): number {
   return input.subscription_active || input.scene_access_active === true
     ? 0
-    : input.delivered_in_scene < 3
+    : input.free_photos_today < config.DAILY_FREE_LIMITS_JSON.photos
       ? 0
       : input.base_price_xtr;
 }
@@ -222,14 +222,15 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   const callbackValid = context.callback_valid !== false;
   const subscriptionActive = context.subscription_active === true;
   const sceneAccessActive = context.scene_access_active === true;
-  const deliveredInScene = normalizeNonNegativeInteger(context.delivered_in_scene) ?? 0;
+  const dailyUsage = (normalizeNonNegativeInteger(context.free_photos_today) ?? 0)
+    + (normalizeNonNegativeInteger(context.pending_free_photos) ?? 0);
   const basePrice = normalizePositiveInteger(context.base_price_xtr) ?? 10;
   const photoSku = normalizeString(context.photo_sku);
   const forceDeliver = context.force_deliver_after_payment === true;
   const priceRequired = calculateMediaPriceRequired({
     subscription_active: subscriptionActive,
     scene_access_active: sceneAccessActive,
-    delivered_in_scene: deliveredInScene,
+    free_photos_today: dailyUsage,
     base_price_xtr: basePrice,
   });
   const targetMessageId = normalizePositiveInteger(context.target_message_id);
@@ -316,7 +317,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
             ? "subscription"
             : sceneAccessActive
               ? "scene_pass"
-            : deliveredInScene < 3
+            : dailyUsage < config.DAILY_FREE_LIMITS_JSON.photos
               ? "free"
               : "paid");
         logEventType =
@@ -347,7 +348,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
     });
   }
 
-  const deliveredAfter = deliveredInScene + (deliverUnlock ? 1 : 0);
+  const freeAfter = dailyUsage + (deliverUnlock && accessMode === "free" ? 1 : 0);
   const unseenAfter = Math.max(
     0,
     (normalizeNonNegativeInteger(context.unseen_available) ?? 0) - (deliverUnlock ? 1 : 0),
@@ -355,7 +356,7 @@ export function buildMediaAction(context: MediaContext): MediaActionDecision {
   const nextPrice = calculateMediaPriceRequired({
     subscription_active: subscriptionActive,
     scene_access_active: sceneAccessActive,
-    delivered_in_scene: deliveredAfter,
+    free_photos_today: freeAfter,
     base_price_xtr: basePrice,
   });
   const panelUnlockedAfter = panelUnlockedCount + (unlockedNewPhoto ? 1 : 0);

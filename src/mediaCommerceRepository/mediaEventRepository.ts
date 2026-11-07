@@ -1,5 +1,6 @@
 import type { MediaFinalizeResult } from "../mediaCommerceTypes.js";
 import { sql } from "../db.js";
+import { config } from "../config.js";
 import {
   asJsonValue,
   type FinalizeFreePhotoUnlockInput,
@@ -54,7 +55,8 @@ export class MediaEventRepository {
         ${input.fulfillment_invoice_token}::text,
         ${input.next_invoice_token}::text,
         ${input.next_invoice_link}::text,
-        ${input.price_required}::integer
+        ${input.price_required}::integer,
+        ${config.DAILY_FREE_LIMITS_JSON.photos}::integer
       )
     `;
 

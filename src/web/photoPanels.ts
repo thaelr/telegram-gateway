@@ -42,7 +42,7 @@ export class WebPhotoPanels {
    if(input.action==='photo_regen'){
     if(!state.active)throw new WebError(409,'stale_scene');
     if(!state.next)throw new WebError(409,'photo_unavailable');
-    const required=calculateMediaPriceRequired({subscription_active:state.context.subscription_active,scene_access_active:state.context.scene_access_active,delivered_in_scene:state.context.delivered_in_scene,base_price_xtr:state.plan.amount_xtr});
+    const required=calculateMediaPriceRequired({subscription_active:state.context.subscription_active,scene_access_active:state.context.scene_access_active,free_photos_today:(state.context.free_photos_today??0)+(state.context.pending_free_photos??0),base_price_xtr:state.plan.amount_xtr});
     const conditions={price:required===0?{amount:'0',currency:'RUB'}:state.plan.amount_rub==null?null:{amount:String(state.plan.amount_rub),currency:'RUB'},price_required:required};
     // The immutable panel and scene survive browsing. No catalog choice or URL
     // comes from the caller; the existing unlock/payment route grants access.
@@ -54,7 +54,7 @@ export class WebPhotoPanels {
     const selected=selectNavigatedPhoto(state.items,state.input.current_uuid,input.action);if(!selected)throw new WebError(404,'media_not_unlocked');
     result={...result,position:state.items.findIndex(item=>item.uuid===selected.uuid)+1,media_id:selected.uuid,photo_url:selected.photo_url,unlocked:true};
     await rows(tx,"SELECT set_config('app_private.media_source','web',true)");
-    const required=calculateMediaPriceRequired({subscription_active:state.context.subscription_active,scene_access_active:state.context.scene_access_active,delivered_in_scene:state.context.delivered_in_scene,base_price_xtr:state.plan.amount_xtr});
+    const required=calculateMediaPriceRequired({subscription_active:state.context.subscription_active,scene_access_active:state.context.scene_access_active,free_photos_today:(state.context.free_photos_today??0)+(state.context.pending_free_photos??0),base_price_xtr:state.plan.amount_xtr});
     await state.common.storePhotoEvent({...state.input,event_type:'media.photo.viewed.nav',uuid:selected.uuid,panel_message_id:Number(state.panel.panel_id),price_xtr:0,access_mode:'nav',action_kind:input.action,fulfillment_invoice_token:null,next_invoice_token:null,next_invoice_link:null,price_required:required});
    }
    await rows(tx,"INSERT INTO public.interaction_tokens(token,kind,chat_id,scene_session_id,turn_no,action_kind,status,payload_json) VALUES($1,'button_callback',$2,$3,$4,$5,'fulfilled',$6::text::jsonb)",[token,state.chat.chat_id,state.panel.scene_session_id,state.panel.turn_no,input.action,JSON.stringify({source:'web',fingerprint,response:result})]);

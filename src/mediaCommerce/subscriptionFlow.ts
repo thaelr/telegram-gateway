@@ -91,15 +91,16 @@ function buildPaymentInputRow(input: {
     : null;
   const types = getMediaCommerceCopy().product_types;
   const productTypes = types && typeof types === "object" && !Array.isArray(types) ? types as Record<string, unknown> : {};
-  const pass = input.payload_json.feature_key === "video_pass";
+  const sceneProduct = input.payload_json.feature_key === "video_pass" || input.payload_json.feature_key === "scene_unlock";
   const variant = input.payload_json.purchase_variant === "scene_unlock_upgrade";
-  const semantic = pass ? productTypes[variant ? "scene_unlock_upgrade" : "video_pass"] : null;
+  const semantic = sceneProduct ? productTypes[variant ? "scene_unlock_upgrade" : String(input.payload_json.feature_key)] : null;
   const copy = {
     ...(localized && typeof localized === "object" && !Array.isArray(localized) ? localized as Record<string, unknown> : {}),
     ...(semantic && typeof semantic === "object" && !Array.isArray(semantic) ? semantic as Record<string, unknown> : {}),
   };
   const localizedText = (key: string, fallback: string): string =>
-    typeof copy[key] === "string" && copy[key].trim() ? copy[key] : fallback;
+    (typeof copy[key] === "string" && copy[key].trim() ? copy[key] : fallback)
+      .replaceAll("{days}",String(sceneProduct ? config.SCENE_ACCESS_DAYS : input.payload_json.subscription_days ?? ""));
   const isStars = input.source === "stars";
   const amount = isStars ? input.plan.amount_xtr : input.plan.amount_rub;
   if (amount == null || !Number.isInteger(amount) || amount <= 0) {
@@ -117,7 +118,7 @@ function buildPaymentInputRow(input: {
     scene_session_id: input.scene_session_id,
     turn_no: input.turn_no,
     scene_turn_no: input.scene_turn_no,
-    payload_json: input.payload_json,
+    payload_json: sceneProduct ? {...input.payload_json,duration_days:config.SCENE_ACCESS_DAYS} : input.payload_json,
     action_kind: input.action_kind,
     sku: input.plan.sku,
     payment_source: input.source,
@@ -176,6 +177,9 @@ export function buildPaymentInputs(input: {
 }
 
 export function buildSceneUnlockPaymentInputs(input: {
+  user_id?:string|null;
+  commerce_origin?:Record<string,unknown>;
+  media_signature?:string|null;
   chat_id: number;
   scene_session_id: string;
   idempotency_key: string;
@@ -195,20 +199,22 @@ export function buildSceneUnlockPaymentInputs(input: {
   const payloadJson: InvoiceTokenPayload = {
     action_kind: "feature_payment",
     feature_key: "scene_unlock",
+    ...(input.user_id ? {user_id:input.user_id} : {}),
+    ...(input.commerce_origin ? {commerce_origin:input.commerce_origin} : {}),
     chat_id: input.chat_id,
     scene_session_id: input.scene_session_id,
     turn_no: null,
     scene_turn_no: null,
-    media_signature: null,
+    media_signature: input.media_signature ?? null,
     target_message_id: input.target_message_id ?? null,
     current_uuid: null,
     base_price_xtr: 0,
     requested_action: "scene_unlock_purchase",
     subscription_offer_reason: input.subscription_offer_reason ?? null,
-    turn_limit: input.turn_limit ?? config.TURN_LIMIT,
+    turn_limit: config.DAILY_FREE_LIMITS_JSON.messages,
     turns_today: input.turns_today ?? null,
     turn_limit_reset_text:
-      input.turn_limit_reset_text ?? config.TURN_LIMIT_RESET_TEXT,
+      config.TURN_LIMIT_RESET_TEXT,
     idempotency_key: input.idempotency_key,
     original_amount_xtr: input.plan.original_amount_xtr ?? input.plan.amount_xtr,
     original_amount_rub: input.plan.original_amount_rub ?? input.plan.amount_rub ?? null,

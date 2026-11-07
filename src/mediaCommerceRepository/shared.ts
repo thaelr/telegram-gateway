@@ -159,6 +159,8 @@ export type SceneAccessStatusInput = {
 };
 
 export type SceneAccessStatus = {
+  user_id?: string | null;
+  scene_access_payment_token?: string | null;
   chat_id: number | null;
   scene_session_id: string | null;
   active_scene_session_id: string | null;

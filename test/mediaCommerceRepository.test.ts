@@ -703,7 +703,7 @@ test("redeemFreePhotoUnlock delegates to media_redeem_free_photo_unlock", async 
 
   assert.equal(result?.redeemed, true);
   assert.match(calls[0]?.sql ?? "", /public\.media_redeem_free_photo_unlock\(/u);
-  assert.deepEqual(calls[0]?.values, ["photo-token", 101]);
+  assert.deepEqual(calls[0]?.values, ["photo-token", 101, 3]);
 });
 
 test("not-found free-action redeem keeps null payload as ordinary not-found", async () => {

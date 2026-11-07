@@ -148,6 +148,7 @@ async function withMaintenanceConfig<T>(
 }
 
 type MockRepository = {
+  authorizeDailyPhoto: () => Promise<{mode:'free',dispatchBy:string}>;
   loadAccountLanguage?: (
     chatId: number | null,
     sourceUserId: number | null,
@@ -333,6 +334,7 @@ function buildOfferStats(
     subscription_until: null,
     scene_access_active: false,
     delivered_in_scene: 0,
+    free_photos_today: 0,
     total_available: 4,
     unseen_available: 4,
     existing_panel_message_id: null,
@@ -397,6 +399,7 @@ function buildMediaContext(
     subscription_until: null,
     scene_access_active: false,
     delivered_in_scene: 0,
+    free_photos_today: 0,
     total_available: 4,
     unseen_available: 3,
     unlocked_items_json: [],
@@ -417,6 +420,7 @@ test("media action caps each panel at five new photos while keeping navigation",
   }));
   const fifthPhotoPayment = buildMediaAction(buildMediaContext({
     delivered_in_scene: 3,
+    free_photos_today: 3,
     panel_unlocked_count: 4,
     unlocked_items_json: unlockedItems.slice(0, 4),
     current_uuid: "u4",
@@ -428,6 +432,7 @@ test("media action caps each panel at five new photos while keeping navigation",
   }));
   const cappedRequest = buildMediaAction(buildMediaContext({
     delivered_in_scene: 3,
+    free_photos_today: 3,
     panel_unlocked_count: 5,
     unlocked_items_json: unlockedItems,
     current_uuid: "u5",
@@ -440,6 +445,7 @@ test("media action caps each panel at five new photos while keeping navigation",
   const cappedNavigation = buildMediaAction(buildMediaContext({
     action_kind: "photo_next",
     delivered_in_scene: 3,
+    free_photos_today: 3,
     panel_unlocked_count: 5,
     unlocked_items_json: unlockedItems,
     current_uuid: "u5",
@@ -822,6 +828,7 @@ function createRepository(
   const storedInvoiceRows = new Map<string, StoredInvoiceToken>();
 
   const repository: MockRepository = {
+    async authorizeDailyPhoto() { return {mode:'free',dispatchBy:new Date(Date.now()+90000).toISOString()}; },
     async loadOfferStats() {
       return buildOfferStats();
     },
@@ -1378,6 +1385,7 @@ test("prepare_offer does not create or reuse a paid photo invoice before click",
     async loadOfferStats() {
       return buildOfferStats({
         delivered_in_scene: 3,
+        free_photos_today: 3,
         unseen_available: 2,
       });
     },
@@ -1424,6 +1432,7 @@ test("prepare_offer adds neutral photo and scene unlock callbacks under paid pho
     async loadOfferStats() {
       return buildOfferStats({
         delivered_in_scene: 3,
+        free_photos_today: 3,
         unseen_available: 2,
       });
     },
@@ -1463,11 +1472,12 @@ test("prepare_offer adds neutral photo and scene unlock callbacks under paid pho
   assert.equal(result.token_rows?.[1]?.payload_json.action_button_text, "text");
 });
 
-test("prepare_offer does not read free scene unlock balance while rendering", async () => {
+test("prepare_offer reads bonus balance to distinguish a reward from paid photo and scene products", async () => {
   const { service, calls } = createRepository({
     async loadOfferStats() {
       return buildOfferStats({
         delivered_in_scene: 3,
+        free_photos_today: 3,
         unseen_available: 2,
       });
     },
@@ -1495,7 +1505,7 @@ test("prepare_offer does not read free scene unlock balance while rendering", as
   assert.equal(result.token_rows?.[1]?.action_kind, "free_scene_unlock");
   assert.equal(result.token_rows?.[1]?.payload_json.action_button_text, "text");
   assert.equal(calls.createStarsInvoice, 0);
-  assert.equal(calls.loadFreeCredits, 0);
+  assert.equal(calls.loadFreeCredits, 1);
 });
 
 test("prepare_offer suppresses the neutral scene unlock button when A/B disables it", async () => {
@@ -1534,6 +1544,7 @@ test("prepare_offer makes paid photos free after scene pass", async () => {
     async loadOfferStats() {
       return buildOfferStats({
         delivered_in_scene: 3,
+        free_photos_today: 3,
         unseen_available: 2,
         scene_access_active: true,
       });
@@ -1564,6 +1575,7 @@ test("prepare_offer defers active photo promotion pricing until click", async ()
       async loadOfferStats() {
         return buildOfferStats({
           delivered_in_scene: 3,
+          free_photos_today: 3,
           unseen_available: 2,
         });
       },
@@ -3736,7 +3748,7 @@ test("fulfilled free photo callback is an idempotent no-op", async () => {
 for (const scenario of [
   { name: "active subscription", context: { subscription_active: true }, accessMode: "subscription" },
   { name: "active scene access", context: { scene_access_active: true }, accessMode: "scene_pass" },
-  { name: "remaining base allowance", context: { delivered_in_scene: 2 }, accessMode: "free" },
+  { name: "remaining base allowance", context: { delivered_in_scene: 2, free_photos_today: 2 }, accessMode: "free" },
 ]) {
   test(`free photo callback does not consume credit with ${scenario.name}`, async () => {
     const payload = {
@@ -3903,6 +3915,7 @@ test("callback photo request returns next media step with neutral photo unlock",
     async loadMediaContext() {
       return buildMediaContext({
         delivered_in_scene: 3,
+        free_photos_today: 3,
         unlocked_items_json: [
           {
             uuid: "u1",
@@ -3986,6 +3999,7 @@ test("callback photo request unlocks through scene pass with zero price", async 
       return buildMediaContext({
         photo_sku: null,
         delivered_in_scene: 3,
+        free_photos_today: 3,
         scene_access_active: true,
         next_unseen_json: {
           uuid: "u2",
@@ -7031,7 +7045,9 @@ test("subscription_offer returns one scene unlock entry button regardless of fre
     undefined,
   );
   assert.equal(result.token_rows_inserted, 1);
-  assert.equal(calls.loadFreeCredits, 0);
+  assert.equal(calls.loadFreeCredits, 1);
+  assert.equal(config.MEDIA_VIDEO_ENABLED,false);
+  assert.equal(result.commerce_ui?.actions.bonus_scene,result.token_rows?.[0]?.token);
   assert.equal(calls.createStarsInvoice, 2);
 });
 
@@ -7076,7 +7092,8 @@ test("daily limit subscription_offer returns the same single scene unlock entry 
   );
   assert.equal(result.token_rows?.length, 1);
   assert.equal(result.token_rows?.[0]?.action_kind, "free_scene_unlock");
-  assert.equal(calls.loadFreeCredits, 0);
+  assert.equal(calls.loadFreeCredits, 1);
+  assert.equal(result.commerce_ui?.actions.bonus_scene,undefined);
   assert.equal(calls.createStarsInvoice, 2);
 });
 
@@ -7521,6 +7538,7 @@ test("prepare_offer uses stable neutral callback tokens for the same paid photo 
     async loadOfferStats() {
       return buildOfferStats({
         delivered_in_scene: 3,
+        free_photos_today: 3,
         unseen_available: 2,
       });
     },
@@ -7710,6 +7728,7 @@ test("callback photo request returns panel_text as caption_text", async () => {
         panel_text: "Original bot message for photo caption",
         panel_entities_json: [],
         delivered_in_scene: 0,
+        free_photos_today: 0,
         next_unseen_json: {
           uuid: "u2",
           photo_url: "https://cdn.test/u2.jpg",
@@ -7741,6 +7760,7 @@ test("callback photo request truncates caption_text over 1024 chars", async () =
         panel_text: longText,
         panel_entities_json: [{ type: "bold" }],
         delivered_in_scene: 0,
+        free_photos_today: 0,
         next_unseen_json: {
           uuid: "u2",
           photo_url: "https://cdn.test/u2.jpg",

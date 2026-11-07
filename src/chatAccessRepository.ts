@@ -398,7 +398,7 @@ export class ChatAccessRepository {
       active_scene AS (
         SELECT
           css.scene_session_id,
-          css.scene_access_unlocked_at IS NOT NULL AS scene_access_active
+          (SELECT e.scene_access_active FROM app_private.scene_entitlements(css.chat_id,css.scene_session_id) e) AS scene_access_active
         FROM public.chat_scene_sessions css
         JOIN target t
           ON css.chat_id = t.chat_id

@@ -18,4 +18,6 @@ export type WebProductPlan = {
  purchase_variant?: import('../mediaCommerce/plans.js').VideoPassVariant;
  discount_percent?: number;
  paid_scene_unlock_token?: string | null;
+ grant_cycle?: string | null;
+ duration_days?: number;
 };

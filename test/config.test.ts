@@ -35,6 +35,9 @@ const baselineActionPlans = [{
 
 const envKeys = [
   "DATABASE_URL",
+  "DAILY_FREE_LIMITS_JSON",
+  "TURN_LIMIT",
+  "BUSINESS_TIME_ZONE",
   "INTERNAL_API_KEY",
   "PUBLIC_OFFER_URL",
   "TG_BOT_TOKEN",
@@ -51,7 +54,7 @@ const envKeys = [
 
 let importId = 0;
 
-async function importConfigWith(overrides: Record<string, string>): Promise<void> {
+async function importConfigWith(overrides: Record<string, string>) {
   const previous = new Map<string, string | undefined>();
   for (const key of envKeys) {
     previous.set(key, process.env[key]);
@@ -74,7 +77,7 @@ async function importConfigWith(overrides: Record<string, string>): Promise<void
 
   try {
     importId += 1;
-    await import(`../src/config.js?config-test=${importId}`);
+    return (await import(`../src/config.js?config-test=${importId}`)).config;
   } finally {
     for (const [key, value] of previous) {
       if (value === undefined) {
@@ -85,6 +88,16 @@ async function importConfigWith(overrides: Record<string, string>): Promise<void
     }
   }
 }
+
+test('combined daily limits take precedence over legacy TURN_LIMIT and require Moscow calendar days',async()=>{
+  const legacy=await importConfigWith({TURN_LIMIT:'11'});
+  assert.deepEqual(legacy.DAILY_FREE_LIMITS_JSON,{messages:11,photos:3});
+  const modern=await importConfigWith({TURN_LIMIT:'ignored',DAILY_FREE_LIMITS_JSON:'{"messages":9,"photos":1}'});
+  assert.deepEqual(modern.DAILY_FREE_LIMITS_JSON,{messages:9,photos:1});
+  for(const raw of ['{"messages":0,"photos":1}','{"messages":2,"photos":1.5}','{"photos":2}'])
+    await assert.rejects(importConfigWith({DAILY_FREE_LIMITS_JSON:raw}));
+  await assert.rejects(importConfigWith({BUSINESS_TIME_ZONE:'UTC'}));
+});
 
 test("money JSON config rejects unknown fields and numeric strings", async () => {
   await assert.rejects(

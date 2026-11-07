@@ -1,3 +1,4 @@
+import { config } from "../config.js";
 import type { PaidInvoiceToken } from "../mediaCommerceTypes.js";
 import { parseStrictJsonObject } from "./shared.js";
 import type {
@@ -150,14 +151,15 @@ export class MediaPaymentRepository {
   ): Promise<SceneAccessStatus | null> {
     const rows = await this.query<SceneAccessStatus[]>`
       SELECT
-        cs.chat_id,
+        cs.chat_id, cs.user_id,
         COALESCE(${input.scene_session_id}::text, cs.active_scene_session_id) AS scene_session_id,
         cs.active_scene_session_id,
         (
           account.subscription_until IS NOT NULL
           AND account.subscription_until > now()
         ) AS subscription_active,
-        COALESCE(css.scene_access_unlocked_at IS NOT NULL, FALSE) AS scene_access_active,
+        COALESCE((SELECT e.scene_access_active FROM app_private.scene_entitlements(css.chat_id,css.scene_session_id) e), FALSE) AS scene_access_active,
+        css.scene_access_payment_token,
         (
           css.scene_session_id IS NOT NULL
           AND css.scene_session_id = cs.active_scene_session_id
@@ -246,7 +248,8 @@ export class MediaPaymentRepository {
       SELECT *
       FROM public.media_redeem_free_photo_unlock(
         ${token}::text,
-        ${chatId}::bigint
+        ${chatId}::bigint,
+        ${config.DAILY_FREE_LIMITS_JSON.photos}::integer
       )
     `;
 

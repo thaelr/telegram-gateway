@@ -37,20 +37,26 @@ const withLocalization=<T>(execute:()=>T)=>runWithMediaLocalization({
   commerceCopy:{},
 },execute);
 
-function setup(overrides:Partial<VideoContext>={}, paidSceneUnlockToken: string | null = null) {
+async function click(service:InstanceType<typeof MediaCommerceDecisionService>,token:string,panel=77) {
+  return service.evaluate({event_type:'callback_query.received',chat_id:1,telegram_chat_id:900,inbound_message_id:panel,callback_data:token});
+}
+function setup(overrides:Partial<VideoContext>={}, paidSceneUnlockToken: string | null = null,language:'ru'|'en'='ru') {
   const tokens=new Map<string,InteractionTokenRow>();
   const requests:unknown[]=[];
   let claimed=false;
   let currentDelivery=delivery;
   const invoices:unknown[]=[];
   const repo={
+    async loadAccountLanguage(){return language;},
+    async upsertInvoiceToken(row:Record<string,unknown>){invoices.push(row);return {...row,stored:true,status:'invoice_sent',invoice_link:'https://pay.test/'+row.token};},
     async upsertCallbackTokens(rows:InteractionTokenRow[]){rows.forEach(row=>tokens.set(row.token,row));return rows.length;},
     async loadCallbackToken(token:string){const row=tokens.get(token);return row ? {...row,found:true,requested_token:token} : null;},
     async loadMediaContext(){return {unlocked_items_json:[{uuid:photoId,photo_url:'https://private.test/photo'}]};},
     async loadPhotoByUuid(){return {photo_url:'https://private.test/photo'};},
     async upsertInvoiceTokens(rows:Record<string,unknown>[]){invoices.push(...rows);return rows.map(row=>({...row,stored:true,status:'invoice_sent',invoice_link:`https://pay.test/${row.token}`,checkout_url:`https://pay.test/${row.token}`}));},
     async loadAbTestAssignment(){return null;},
-    async loadSceneAccessStatus(){return {subscription_active:!!overrides.subscription_sku,scene_is_active:true,active_scene_session_id:'scene',scene_access_active:false};},
+    async loadFreeCredits(){return {free_scene_unlocks:0};},
+    async loadSceneAccessStatus(){return {subscription_active:!!overrides.subscription_sku,scene_is_active:true,active_scene_session_id:'scene',scene_access_active:!!paidSceneUnlockToken};},
   } as unknown as Repo;
   const videos={
     async context(){return {...context,...overrides};},
@@ -101,7 +107,8 @@ test('no matching video hides animate, Full and pass suppress the extra commerci
   for(const override of [{video:null},{panel_delivered:true},{delivery},{full_active:true},{video_pass_active:true}]){
     const {service}=setup(override);const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
     if('video'in override || 'panel_delivered'in override) assert.equal(result.video?.animate_callback_data,undefined);
-    assert.equal(result.video?.chat_offer_callback_data,undefined);
+    if('full_active' in override || 'video_pass_active' in override)assert.equal(result.commerce_ui?.actions.scene,undefined);
+    else assert.ok(result.commerce_ui?.actions.scene,'ordinary scene product remains available without a video');
   }
 });
 test('entitled click freezes video and original panel into a delivery without invoices',async()=>{
@@ -158,13 +165,15 @@ test('animate checkout snapshots the selected video; reveal replaces only known 
   const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
   const markup={inline_keyboard:[[{text:'Next',callback_data:'photo_next'}],[{text:'Video access',callback_data:prepared.video!.chat_offer_callback_data}],[{text:'Animate',callback_data:prepared.video!.animate_callback_data}]]};
   const result=await service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:prepared.video!.animate_callback_data!,raw_update:{callback_query:{message:{reply_markup:markup}}}});
-  assert.equal(result.operation,'video_ui_ready');assert.equal(result.video?.unlock_payment_options?.length,1);
-  assert.equal(result.video?.pass_price_rub,230);assert.equal(result.video?.pass_payment_options?.length,0);
-  assert.ok(result.video_control_tokens?.includes(prepared.video!.chat_offer_callback_data!));assert.ok(!result.video_control_tokens?.includes('photo_next'));
+  assert.deepEqual(result.commerce_ui?.products.map(p=>p.feature_key),['video_unlock','video_pass']);assert.equal(invoices.length,0);
+  const payment=await click(service,result.commerce_ui!.products[0]!.callback_data);
+  assert.equal(payment.commerce_ui?.step,'payment');assert.equal(payment.commerce_ui?.payment_options?.length,1);
   const snapshot=(invoices[0] as {payload_json:Record<string,unknown>}).payload_json;
   assert.equal(snapshot.video_id,videoId);assert.equal(snapshot.photo_message_id,77);assert.equal(snapshot.telegram_chat_id,900);
-  const pass=await service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:result.video!.pass_reveal_callback_data!,raw_update:{callback_query:{message:{reply_markup:markup}}}});
-  assert.equal(pass.video?.pass_payment_options?.length,1);assert.equal(pass.video?.unlock_payment_options?.length,1);
+  const back=await click(service,payment.commerce_ui!.actions.back!);
+  assert.deepEqual(back.commerce_ui?.products.map(p=>p.feature_key),['video_unlock','video_pass']);assert.equal(invoices.length,1);
+  const pass=await click(service,back.commerce_ui!.products[1]!.callback_data);
+  assert.equal(pass.commerce_ui?.payment_options?.[0]?.feature_key,'video_pass');
 });
 test('active Base uses nominal configured SKU and keeps existing subscription conditions',async()=>{
   const {service,invoices}=setup({subscription_sku:'base_long',subscription_until:'2099-01-01T00:00:00Z'});
@@ -178,7 +187,7 @@ test('stale photo callback cannot mint a payment for the previous photo',async()
   const {service,invoices}=setup({panel_media_signature:'new-signature'});
   const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'old-signature',panel_message_id:77});
   const result=await service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:prepared.video!.animate_callback_data!});
-  assert.equal(result.reason,'video_panel_changed');assert.equal(invoices.length,0);
+  assert.equal(result.reason,'commerce_screen_stale');assert.equal(invoices.length,0);
 });
 test('upgrade payment sources are independent when only RUB remains positive',()=>{
   const enabled=config.SBP_ENABLED;config.SBP_ENABLED=true;
@@ -191,8 +200,9 @@ test('standalone VideoPass reveal retains the animate callback',async()=>{
   const {service}=setup();const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
   const markup={inline_keyboard:[[{text:'Animate',callback_data:prepared.video!.animate_callback_data}],[{text:'Pass',callback_data:prepared.video!.chat_offer_callback_data}]]};
   const result=await service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:prepared.video!.chat_offer_callback_data!,raw_update:{callback_query:{message:{reply_markup:markup}}}});
-  assert.equal(result.video?.pass_payment_options?.length,1);assert.equal(result.video?.unlock_payment_options?.length,0);
-  assert.ok(result.video_keep_tokens?.includes(prepared.video!.animate_callback_data!));assert.ok(!result.video_control_tokens?.includes(prepared.video!.animate_callback_data!));
+  assert.equal(result.commerce_ui?.step,'scene');assert.deepEqual(result.commerce_ui?.products.map(p=>p.feature_key),['scene_unlock','video_pass']);
+  const back=await click(service,result.commerce_ui!.actions.back!);
+  assert.ok(back.commerce_ui?.actions.video);assert.ok(back.commerce_ui?.actions.scene);
 });
 
 test('scene offer uses separate upgrade prices, original amount and server-selected variant',async(t)=>{
@@ -206,15 +216,18 @@ test('scene offer uses separate upgrade prices, original amount and server-selec
   const upgraded=setup({},'paid-scene');
   const open={interaction_mode:'video_context' as const,chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77,current_uuid:photoId};
   const visible=await upgraded.service.evaluate(open);
-  assert.match(visible.video!.pass_button_text!,/101.*51.*50%/);
+  assert.ok(visible.commerce_ui?.actions.scene);
   const response=await upgraded.service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:visible.video!.chat_offer_callback_data!});
-  const option=response.video?.pass_payment_options?.[0];
+  const passProduct=response.commerce_ui!.products.find(p=>p.feature_key==='video_pass')!;
+  assert.equal(passProduct.duration_days,7);assert.equal(passProduct.amount,114);
+  const selected=await click(upgraded.service,passProduct.callback_data);
+  const option=selected.commerce_ui?.payment_options?.[0];
   assert.deepEqual([option?.amount,option?.original_amount,option?.discount_percent],[51,101,50]);
   const invoice=(upgraded.invoices as Array<{payload_json:Record<string,unknown>}>)[0]!.payload_json;
   assert.deepEqual([invoice.purchase_variant,invoice.original_amount,invoice.final_amount,invoice.currency,invoice.discount_percent,invoice.paid_scene_unlock_token,invoice.user_id,invoice.video_id,invoice.pass_only,invoice.promo_key],
     ['scene_unlock_upgrade',101,51,'XTR',50,'paid-scene','owner',null,true,null]);
   const concrete=await upgraded.service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:visible.video!.animate_callback_data!});
-  assert.ok(concrete.video?.pass_reveal_callback_data);
+  await click(upgraded.service,concrete.commerce_ui!.products.find(p=>p.feature_key==='video_pass')!.callback_data);
   const both=upgraded.invoices as Array<{token:string,payload_json:Record<string,unknown>}>;
   assert.equal(both.filter(row=>row.payload_json.feature_key==='video_pass'&&row.payload_json.video_id===videoId).length,1);
   assert.equal(new Set(both.map(row=>row.token)).size,both.length);
@@ -235,13 +248,13 @@ test('subscription command and daily paywall independently keep Scene Unlock and
         idempotency_key:'menu-'+reason,chat_id:1,scene_session_id:'scene',telegram_chat_id:900});
       assert.equal(menu.operation,'subscription_offer_ready');
       assert.ok(menu.token_rows?.some(item=>item.action_kind==='free_scene_unlock'));
-      assert.equal(!!menu.video?.chat_offer_callback_data,available);
+      assert.ok(menu.commerce_ui?.actions.scene);
       assert.ok(menu.subscription_offer_items?.some(item=>item.payment_kind==='subscription'));
-      if(!available)continue;
+      assert.ok(menu.commerce_ui?.products.some(p=>p.feature_key==='base'));
       const reveal=await service.evaluate({interaction_mode:'callback',event_type:'callback_query.received',chat_id:1,
         callback_data:menu.video!.chat_offer_callback_data!,inbound_message_id:91});
-      assert.equal(reveal.video?.pass_menu,true);assert.equal(reveal.target_message_id,91);
-      assert.equal(reveal.video?.pass_payment_options?.length,1);assert.equal(reveal.video?.unlock_payment_options?.length,0);
+      assert.equal(reveal.target_message_id,91);assert.equal(reveal.commerce_ui?.step,'scene');
+      assert.deepEqual(reveal.commerce_ui?.products.map(p=>p.feature_key),available?['scene_unlock','video_pass']:['scene_unlock']);
     }
   }
 });
@@ -251,4 +264,32 @@ test('Web chat with Base can still buy a VideoPass; active subscriptions remove 
   assert.equal(base.some(p=>p.feature_key==='scene_unlock'),false);assert.ok(base.some(p=>p.feature_key==='video_pass'));
   const full=await setup({subscription_sku:'full',subscription_until:'2099-01-01T00:00:00Z',full_active:true}).service.webProductPlans(1);
   assert.equal(full.some(p=>p.feature_key==='video_pass'||p.feature_key==='scene_unlock'),false);
+});
+
+test('photo checkout preserves the selected photo, quote and sibling intent for allowed RU and EN methods',async(t)=>{
+  const oldSbp=config.SBP_ENABLED,oldUrl=config.GATEWAY_PUBLIC_URL;
+  config.SBP_ENABLED=true;config.GATEWAY_PUBLIC_URL='https://merchant.invalid';
+  t.after(()=>{config.SBP_ENABLED=oldSbp;config.GATEWAY_PUBLIC_URL=oldUrl;});
+  for(const language of ['ru','en'] as const){
+    const {service,tokens,invoices}=setup({},null,language);
+    const row=(token:string,action_kind:string,payload_json:Record<string,unknown>):InteractionTokenRow=>({
+      token,action_kind,payload_json,kind:'button_callback',chat_id:1,scene_session_id:'scene',turn_no:2,status:'active',expires_at:null,
+    });
+    const photo=row('original','free_photo_unlock',{photo_sku:'photo',media_signature:'signature',target_message_id:77,current_uuid:photoId,
+      base_price_xtr:100,requested_action:'photo_regen'});
+    const open=row('select','commerce_photo_pay',{surface:'daily_photos',user_id:'owner',telegram_chat_id:900,target_message_id:77,
+      media_signature:'signature',source_photo:photoId,photo_token:photo.token});
+    tokens.set(photo.token,photo);tokens.set(open.token,open);
+    const payment=await click(service,open.token);
+    assert.equal(payment.commerce_ui?.step,'payment');
+    const options=payment.commerce_ui!.payment_options!;
+    assert.deepEqual(options.map(o=>o.source).sort(),language==='en'?['stars']:['sbp','stars']);
+    for(const opt of options){
+      const snapshot=(invoices as Array<{token:string,payload_json:Record<string,unknown>}>).find(row=>row.token===opt.token)!.payload_json;
+      assert.equal(snapshot.current_uuid,photoId);assert.equal(snapshot.target_message_id,77);assert.equal(snapshot.scene_session_id,'scene');
+      assert.equal(snapshot.idempotency_key,'photo-unlock-click:'+photo.token);
+      if(opt.source==='sbp'){assert.equal(opt.amount,230);assert.match(opt.checkout_url,/^https:\/\/merchant\.invalid\/v1\/pay\/sbp\//);}
+      else assert.equal(opt.amount,100);
+    }
+  }
 });

@@ -68,7 +68,7 @@ export class WebCommerceRepository {
  async getContext(userId:string,code:string){return this.context(this.query,userId,code);}
  async getOwned(userId:string,id:string):Promise<WebPurchase>{await this.recoverCreationLeases(userId,id);const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE user_id=$1 AND purchase_id=$2::uuid",[userId,id]))[0];if(!row)throw new WebError(404,'purchase_not_found');return asPurchase(row);}
  async getById(id:string):Promise<WebPurchase|null>{const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE purchase_id=$1::uuid",[id]))[0];return row?asPurchase(row):null;}
- async pendingFulfillments(limit=50):Promise<WebPurchase[]>{await this.recoverCreationLeases();return (await r(this.query,"SELECT * FROM app_private.web_purchases WHERE status IN ('paid','fulfillment_pending') AND error_code IS DISTINCT FROM 'duplicate_payment_requires_review' ORDER BY updated_at LIMIT $1",[Math.min(100,Math.max(1,limit))])).map(asPurchase);}
+ async pendingFulfillments(limit=50):Promise<WebPurchase[]>{await this.recoverCreationLeases();return (await r(this.query,"SELECT * FROM app_private.web_purchases WHERE status IN ('paid','fulfillment_pending') AND COALESCE(error_code,'') NOT IN ('duplicate_payment_requires_review','paid_scene_requires_review') ORDER BY updated_at LIMIT $1",[Math.min(100,Math.max(1,limit))])).map(asPurchase);}
  async findByClient(userId:string,clientId:string):Promise<WebPurchase|null>{const row=(await r(this.query,"SELECT p.* FROM app_private.web_purchases p JOIN public.interaction_tokens t ON t.token=p.payment_token WHERE p.user_id=$1 AND (p.client_id=$2 OR t.payload_json->'web_client_ids' ? $2)",[userId,clientId]))[0];return row?(row.status==='creating'?this.getOwned(userId,row.purchase_id):asPurchase(row)):null;}
  async getByProviderExternal(provider:string,id:string):Promise<WebPurchase|null>{const row=(await r(this.query,"SELECT * FROM app_private.web_purchases WHERE provider=$1 AND (external_payment_id=$2 OR external_invoice_id=$2)",[provider,id]))[0];return row?asPurchase(row):null;}
  async getEntitlements(userId:string){const columns=config.MEDIA_VIDEO_ENABLED?',subscription_tier,subscription_tier_sku':'';const row=(await r(this.query,"SELECT subscription_sku,subscription_until,entitlements_jsonb AS balances"+columns+" FROM public.users WHERE user_id=$1",[userId]))[0];if(!row)throw new WebError(401,'account_not_found');const active=Boolean(row.subscription_until&&new Date(row.subscription_until).getTime()>Date.now());const full=active&&row.subscription_tier==='full'&&row.subscription_tier_sku===row.subscription_sku;return {subscription_sku:row.subscription_sku,subscription_until:iso(row.subscription_until),balances:row.balances,subscription_active:active,subscription_tier:full?'full':'base',full_active:full};}
@@ -154,7 +154,7 @@ export class WebCommerceRepository {
     const balance=feature==='scene_unlock'?credits?.free_scene_unlocks:credits?.free_fast_scene_skips;
     if(!balance||balance<=0)return {available:false,fulfilled:false,feature_key:feature};
     const eventId=randomUUID();
-    const payload={source:'web',feature_key:feature,request_fingerprint:fingerprint,web_event_id:eventId,web_quote:quote};
+    const payload={source:'web',feature_key:feature,...(feature==='scene_unlock'?{duration_days:config.SCENE_ACCESS_DAYS}:{}),request_fingerprint:fingerprint,web_event_id:eventId,web_quote:quote};
     stored=(await r(tx,"INSERT INTO public.interaction_tokens(token,kind,chat_id,scene_session_id,turn_no,action_kind,payload_json) VALUES($1,'button_callback',$2,$3,$4,$5,$6::text::jsonb) RETURNING *",[token,c.chat_id,c.scene_session_id,c.turn_no,action,JSON.stringify(payload)]))[0]!;
    }
    const snapshot=stored.payload_json.web_quote as WebCommerceQuote;
@@ -232,7 +232,10 @@ export class WebCommerceRepository {
     else if(q.payload?.subscription_tier==='full')await r(tx,'SELECT public.media_activate_full_subscription($1,$2,$3,$4::integer,$5)',[p.payment_token,p.chat_id,q.sku,q.subscription_days,q.payload.subscription_change??'renew']);
     else await common.activateSubscription({payment_token:p.payment_token,chat_id:Number(p.chat_id),subscription_sku:q.sku,subscription_days:q.subscription_days});
    }else if(q.kind==='feature'&&(q.feature_key==='video_unlock'||q.feature_key==='video_pass')){
-    if(q.feature_key==='video_pass')await r(tx,'SELECT public.media_activate_video_pass($1,$2)',[p.payment_token,p.chat_id]);
+    if(q.feature_key==='video_pass'){
+     const [grant]=await r(tx,'SELECT public.media_activate_video_pass($1,$2) AS activated',[p.payment_token,p.chat_id]);
+     if(!Number(grant?.activated))return asPurchase((await r(tx,"UPDATE app_private.web_purchases SET status='fulfillment_pending',error_code='paid_scene_requires_review',updated_at=clock_timestamp() WHERE purchase_id=$1::uuid RETURNING *",[id]))[0]!);
+    }
     if(q.video_id){
      const prepare=(db:DB)=>this.videos.prepare({request_key:'paid:'+p.payment_token,payment_token:p.payment_token,chat_id:Number(p.chat_id)},db);
      // Keep a paid scene open when preparing the optional video fails. Recovery
@@ -249,7 +252,8 @@ export class WebCommerceRepository {
     }else if(q.feature_key==='video_unlock')throw new WebError(409,'missing_video_snapshot');
    }else if(q.kind==='feature'&&q.feature_key==='scene_unlock'){
     if(!q.scene_session_id)throw new WebError(409,'missing_scene');
-    await common.activateSceneAccess({payment_token:p.payment_token,chat_id:Number(p.chat_id),scene_session_id:q.scene_session_id,scene_access_sku:q.sku});
+    const grant=await common.activateSceneAccess({payment_token:p.payment_token,chat_id:Number(p.chat_id),scene_session_id:q.scene_session_id,scene_access_sku:q.sku});
+    if(!grant)return asPurchase((await r(tx,"UPDATE app_private.web_purchases SET status='fulfillment_pending',error_code='paid_scene_requires_review',updated_at=clock_timestamp() WHERE purchase_id=$1::uuid RETURNING *",[id]))[0]!);
    }else if(q.kind==='photo'){
     if(!q.media_id||!q.media_signature||!q.panel_id)throw new WebError(409,'missing_media_snapshot');
     await common.storePhotoEvent({chat_id:Number(p.chat_id),scene_session_id:q.scene_session_id,turn_no:q.turn_no,scene_turn_no:q.scene_turn_no,event_type:'media.photo.unlocked.paid',media_signature:q.media_signature,uuid:q.media_id,panel_message_id:q.panel_id,price_xtr:q.amount_xtr??0,access_mode:'paid',action_kind:'photo_request',fulfillment_invoice_token:p.payment_token,next_invoice_token:null,next_invoice_link:null,price_required:0});
@@ -303,7 +307,7 @@ export class WebCommerceRepository {
    const ctx=await common.loadMediaContext(input);
    const next=ctx.next_unseen_json as Record<string,unknown>|null;
    if(!next||next.uuid!==mediaId)throw new WebError(409,'media_context_stale');
-   const required=calculateMediaPriceRequired({subscription_active:ctx.subscription_active===true,scene_access_active:ctx.scene_access_active===true,delivered_in_scene:ctx.delivered_in_scene,base_price_xtr:quote.amount_xtr??1});
+   const required=calculateMediaPriceRequired({subscription_active:ctx.subscription_active===true,scene_access_active:ctx.scene_access_active===true,free_photos_today:(ctx.free_photos_today??0)+(ctx.pending_free_photos??0),base_price_xtr:quote.amount_xtr??1});
    await r(tx,"SELECT set_config('app_private.media_source','web',true)");
    if(required===0){
     const mode=ctx.subscription_active?'subscription':ctx.scene_access_active?'scene_pass':'free';

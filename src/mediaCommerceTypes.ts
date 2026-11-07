@@ -138,7 +138,20 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
   ab_test?: AbTestContext | null;
 }
 
+export type CommerceSurface = 'photo'|'daily_photos'|'subscription'|'daily_messages';
+export type CommerceProduct = {
+  feature_key:string; sku:string; purchase_variant?:string; duration_days?:number; valid_until?:string|null;
+  label_key:string; label?:string; amount:number; currency:'XTR'|'RUB'; callback_data:string; title:string; description:string;
+};
+export type CommerceUi = {
+  surface:CommerceSurface; step:'root'|'scene'|'video'|'payment'; products:CommerceProduct[]; actions:{video?:string;scene?:string;back?:string;bonus_scene?:string;bonus_photo?:string};
+  payment_options?:MediaPaymentOption[];
+  return_context:{message_id:number|null;kind:'photo'|'subscription';text?:string|null;entities?:unknown[];
+    reply_markup?:unknown;allowed_callback_data?:string[];allowed_urls?:string[]};
+};
+
 export interface MediaCommerceDecisionResponse {
+  commerce_ui?:CommerceUi;
   language?: string;
   ux_copy?: unknown;
   video?: import('./videoCommerce.js').VideoUi;
@@ -186,6 +199,9 @@ export interface MediaCommerceDecisionResponse {
   photo_sku?: string | null;
   base_price_xtr?: number | null;
   price_required?: number | null;
+  free_photos_today?: number;
+  daily_photo_limit?: number;
+  photo_dispatch_by?: string;
   has_media_offer?: boolean;
   token_rows?: InteractionTokenRow[];
   token_rows_prepared?: number | null;
@@ -284,6 +300,8 @@ export interface MediaOfferStats {
   subscription_sku: string | null;
   subscription_until: string | null;
   delivered_in_scene: number;
+  free_photos_today?: number;
+  pending_free_photos?: number;
   total_available: number;
   unseen_available: number;
   existing_panel_message_id: number | null;
@@ -357,6 +375,8 @@ export interface MediaContext {
   subscription_until: string | null;
   scene_access_active: boolean;
   delivered_in_scene: number;
+  free_photos_today?: number;
+  pending_free_photos?: number;
   total_available: number;
   unseen_available: number;
   panel_unlocked_count?: number | null;

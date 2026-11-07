@@ -77,7 +77,8 @@ export class MediaCatalogRepository {
         ${input.media_signature}::text,
         ${input.scene_turn_no}::integer,
         ${input.base_price_xtr}::integer,
-        ${input.should_offer}::boolean
+        ${input.should_offer}::boolean,
+        ${config.DAILY_FREE_LIMITS_JSON.photos}::integer
       )
     `;
 
@@ -131,7 +132,8 @@ export class MediaCatalogRepository {
         ${input.paid_access_mode}::text,
         ${input.callback_valid}::boolean,
         ${input.panel_text}::text,
-        ${sql.json(asJsonValue(input.panel_entities_json ?? []))}
+        ${sql.json(asJsonValue(input.panel_entities_json ?? []))},
+        ${config.DAILY_FREE_LIMITS_JSON.photos}::integer
       )
     `;
 

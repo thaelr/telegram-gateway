@@ -15,6 +15,7 @@ type Repository = ConstructorParameters<typeof MediaCommerceDecisionService>[0];
 
 function strictService(calls: string[], assignment?: unknown) {
   const repository = new Proxy({}, { get(_target, property) {
+    if (property === "loadSceneAccessStatus") return async () => { calls.push(String(property)); return null; };
     if (property === "loadAbTestAssignment") return async () => { calls.push(String(property)); return assignment; };
     return () => { throw new Error(`Unexpected persistence action: ${String(property)}`); };
   } }) as Repository;
@@ -48,5 +49,5 @@ test("Web account experiment overrides follow shared promotion precedence and hi
   assert.equal(plans.find((p) => p.sku === "subscription")?.amount_rub, 750);
   assert.equal(plans.find((p) => p.sku === "subscription")?.subscription_days, 20);
   assert.equal(plans.some((p) => p.sku === "unlock"), false);
-  assert.deepEqual(calls, ["loadAbTestAssignment"]);
+  assert.deepEqual(calls, ["loadAbTestAssignment","loadSceneAccessStatus"]);
 });
