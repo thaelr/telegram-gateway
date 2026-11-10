@@ -1,6 +1,6 @@
-import type { AbTestContext } from "./abTesting.js";
+import type { AbTestContext } from "./modules/experiments/abTesting.js";
 
-export type { AbTestAssignment, AbTestContext } from "./abTesting.js";
+export type { AbTestAssignment, AbTestContext } from "./modules/experiments/abTesting.js";
 
 export type MediaCommerceRoute =
   | "prepare_offer"
@@ -141,6 +141,7 @@ export interface InvoiceTokenPayload extends Record<string, unknown> {
 export type CommerceSurface = 'photo'|'daily_photos'|'subscription'|'daily_messages';
 export type CommerceProduct = {
   feature_key:string; sku:string; purchase_variant?:string; duration_days?:number; valid_until?:string|null;
+  prices?: Array<Pick<MediaPaymentOption, 'source'|'amount'|'currency'|'original_amount'|'discount_percent'>>;
 label_key:string; label?:string; amount:number; original_amount?:number|null; currency:'XTR'|'RUB'; callback_data:string; title:string; description:string;};
 export type CommerceUi = {
   surface:CommerceSurface; step:'root'|'scene'|'video'|'payment'; products:CommerceProduct[]; actions:{video?:string;scene?:string;back?:string;bonus_scene?:string;bonus_photo?:string};
@@ -153,7 +154,7 @@ export interface MediaCommerceDecisionResponse {
   commerce_ui?:CommerceUi;
   language?: string;
   ux_copy?: unknown;
-  video?: import('./videoCommerce.js').VideoUi;
+  video?: import('./modules/media/videoRepository.js').VideoUi;
   video_panel_reconcile?: boolean;
   video_control_tokens?: string[];
   video_keep_tokens?: string[];

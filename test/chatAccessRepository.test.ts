@@ -46,12 +46,26 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
   },
 ]);
 
-const { ChatAccessRepository } = await import("../src/chatAccessRepository.js");
+const { ChatAccessRepository } = await import("../src/application/chatAccessRepository.js");
 
 type QueryCall = {
   strings: string[];
   values: unknown[];
 };
+
+function withDailyUsage(query: ConstructorParameters<typeof ChatAccessRepository>[0]) {
+  assert.ok(query);
+  return Object.assign(query, {
+    unsafe: async (statement: string, values: unknown[]) => {
+      assert.match(statement, /app_private\.message_admissions/u);
+      assert.match(statement, /WHERE user_id=\$1/u);
+      assert.doesNotMatch(statement, /chat_turns/u);
+      assert.equal(values[0], 'u00000ab');
+      assert.equal(values[1], 'Europe/Moscow');
+      return [{ used: 0 }];
+    },
+  }) as ConstructorParameters<typeof ChatAccessRepository>[0];
+}
 
 function buildAccessContext(overrides: Partial<AccessContext> = {}): AccessContext {
   return {
@@ -97,7 +111,7 @@ test("creates the Telegram routing state and loads its access context", async ()
     return Promise.resolve([expected]);
   }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
 
-  const repository = new ChatAccessRepository(query);
+  const repository = new ChatAccessRepository(withDailyUsage(query));
   const result = await repository.ensureAndLoadAccessContext(
     999001,
     "telegram",
@@ -141,7 +155,7 @@ test("resolves an existing active character dialogue and keeps Telegram delivery
     return Promise.resolve(responses[calls.length - 1] ?? []);
   }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
 
-  const result = await new ChatAccessRepository(query).ensureAndLoadAccessContext(
+  const result = await new ChatAccessRepository(withDailyUsage(query)).ensureAndLoadAccessContext(
     999001,
     "telegram",
     777001,
@@ -182,7 +196,7 @@ test("creates a missing character dialogue through the active-chat unique index"
     return Promise.resolve(responses[calls.length - 1] ?? []);
   }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
 
-  const result = await new ChatAccessRepository(query).ensureAndLoadAccessContext(
+  const result = await new ChatAccessRepository(withDailyUsage(query)).ensureAndLoadAccessContext(
     999001,
     "telegram",
     777001,
@@ -223,7 +237,7 @@ test("resolves a reset callback target without overwriting Telegram selection", 
     return Promise.resolve(responses[calls.length - 1] ?? []);
   }) as unknown as ConstructorParameters<typeof ChatAccessRepository>[0];
 
-  const result = await new ChatAccessRepository(query).ensureAndLoadAccessContext(
+  const result = await new ChatAccessRepository(withDailyUsage(query)).ensureAndLoadAccessContext(
     999001,
     "telegram",
     777001,

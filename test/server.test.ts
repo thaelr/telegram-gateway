@@ -56,9 +56,9 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
 
 const { buildApp } = await import("../src/server.js");
 const { MediaCommerceDecisionService, MediaCommerceOperationError } = await import(
-  "../src/mediaCommerceDecisionService.js"
+  "../src/application/mediaCommerceDecision.js"
 );
-const { UnknownPhotoSkuError } = await import("../src/mediaCommerce/plans.js");
+const { UnknownPhotoSkuError } = await import("../src/modules/products/plans.js");
 
 test("media-commerce endpoint rejects missing internal api key", async (t) => {
   let called = false;

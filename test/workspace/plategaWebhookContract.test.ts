@@ -60,10 +60,11 @@ async function loadWorkflow(): Promise<Workflow> {
 
 async function loadWorkflowRaw(): Promise<string> {
   const workflowPath = path.resolve(
-    process.cwd(),
+    import.meta.dirname,
     "..",
     "..",
-    "Актуальные",
+    "..",
+    "Dialogue-Engine-n8n-Flow",
     "RUS Media Commerce Flow v4.json",
   );
   return readFile(workflowPath, "utf8");
@@ -71,7 +72,7 @@ async function loadWorkflowRaw(): Promise<string> {
 
 async function loadSbpMigration(name: string): Promise<string> {
   const migrationPath = path.resolve(
-    process.cwd(),
+    import.meta.dirname,
     "..",
     "..",
     "..",
@@ -132,10 +133,11 @@ test("Stars payload migration provides a unique payload lookup without exposing 
 
 async function loadRouterWorkflow(): Promise<Workflow> {
   const workflowPath = path.resolve(
-    process.cwd(),
+    import.meta.dirname,
     "..",
     "..",
-    "Актуальные",
+    "..",
+    "Dialogue-Engine-n8n-Flow",
     "RUS Telegram Update Router v8 TS.json",
   );
   return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
@@ -159,23 +161,19 @@ async function loadRouterWorkflowNodeCode(nodeName: string): Promise<string> {
 
 async function loadSceneTurnWorkflow(): Promise<Workflow> {
   const workflowPath = path.resolve(
-    process.cwd(),
+    import.meta.dirname,
     "..",
     "..",
-    "Актуальные",
+    "..",
+    "Dialogue-Engine-n8n-Flow",
     "Engine Scene Turn Core prod.v1.json",
   );
   return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
 }
 
 async function loadBroadcastWorkflow(): Promise<Workflow> {
-  const workflowPath = path.resolve(
-    process.cwd(),
-    "..",
-    "..",
-    "Дополнительные",
-    "n8n_telegram_broadcast_template.json",
-  );
+  const workflowPath = process.env.BROADCAST_WORKFLOW_PATH;
+  if (!workflowPath) throw new Error('BROADCAST_WORKFLOW_PATH is required for the optional broadcast contract');
   return JSON.parse(await readFile(workflowPath, "utf8")) as Workflow;
 }
 
@@ -778,7 +776,9 @@ test("reward callback topology claims, answers callback, then routes the next ac
   assert.deepEqual(workflow.connections?.["Route router action"]?.main?.[Number(branch[1])]?.map(item=>item.node),["Claim configured reward"]);
   assert.match(claim?.parameters?.url ?? "", /\/v1\/rewards\/claim-slot/u);
   assert.match(claim?.parameters?.body ?? "", /reward_slot/u);
-  assert.equal(answer?.type, "n8n-nodes-base.telegram");
+  assert.equal(answer?.type, "n8n-nodes-base.httpRequest");
+  assert.match(answer?.parameters?.url ?? "", /answerCallbackQuery/u);
+  assert.match(answer?.parameters?.body ?? "", /callback_query_id/u);
   assert.deepEqual(
     workflow.connections?.["Claim configured reward"]?.main?.[0]?.map((item) => item.node),
     ["Answer reward callback"],
@@ -1081,7 +1081,8 @@ test("subscription offer prefixes free balances before choosing send or edit", a
   );
 });
 
-test("broadcast registers the campaign grant before sending a stable reward callback", async () => {
+test("broadcast registers the campaign grant before sending a stable reward callback", async (t) => {
+  if (!process.env.BROADCAST_WORKFLOW_PATH) return t.skip('NOT RUN: broadcast template is outside these repositories; set BROADCAST_WORKFLOW_PATH');
   const workflow = await loadBroadcastWorkflow();
   const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
   const grant = nodes.find((entry) => entry.name === "Зарегистрировать reward grant");
@@ -1150,7 +1151,7 @@ test("feature payment reveal builder preserves entities and adds only hint itali
 test("subscription root and payment use one renderer, retain AB metadata, and show discounts only on the payment step", async () => {
   const product={feature_key:"base",label_key:"base",label:"Base",sku:"base",amount:100,currency:"RUB",callback_data:"choose_base",description:"Base plan"};
   const ui={surface:"subscription",step:"root",products:[product],actions:{scene:"scene_token"},return_context:{kind:"subscription",message_id:777,text:"Subscription body"}};
-  const input={chat_id:101,text:"Subscription body",ab_test:{key:"subscription_offer",variant:"B"},commerce_ui:ui,
+  const input={chat_id:101,language:"ru",text:"Subscription body",ab_test:{key:"subscription_offer",variant:"B"},commerce_ui:ui,
     ux_copy:{commerce_ui:{scene_subscription:"Текущая сцена",back:"Назад",sbp:"СБП",stars:"Stars"}}};
   const prepared=await runWorkflowCodeNode("Build subscription offer message",input);
   const root=await runWorkflowCodeNode("Build video-only panel markup",prepared);
@@ -1160,7 +1161,7 @@ test("subscription root and payment use one renderer, retain AB metadata, and sh
   ]});
   const payment=await runWorkflowCodeNode("Build video-only panel markup",{...input,commerce_ui:{...ui,step:"payment",actions:{back:"go_back"},
     payment_options:[{source:"sbp",amount:100,original_amount:150,currency:"RUB",checkout_url:"https://pay.example/sbp"}]}});
-  assert.deepEqual(payment.reply_markup,{inline_keyboard:[[{text:"СБП · 100 ₽",url:"https://pay.example/sbp"}],[{text:"Назад",callback_data:"go_back"}]]});
+  assert.deepEqual(payment.reply_markup,{inline_keyboard:[[{text:"СБП · 1̶5̶0̶ ₽ → 100 ₽",url:"https://pay.example/sbp"}],[{text:"Назад",callback_data:"go_back"}]]});
   const entities=payment.commerce_entities as {type:string;offset:number;length:number}[];
   const strike=entities.find(e=>e.type==="strikethrough");assert.ok(strike);
   assert.equal(String(payment.text).slice(strike.offset,strike.offset+strike.length),"150 ₽");
@@ -1198,6 +1199,17 @@ test("payment UI reveal topology answers callback and edits text or caption", as
   );
   assert.deepEqual(
     workflow.connections?.["Build feature payment options reveal"]?.main?.[0]?.map((entry) => entry.node),
+    ["Build video-only panel markup"],
+  );
+  assert.deepEqual(
+    workflow.connections?.["Build video-only panel markup"]?.main?.[0]?.map((entry) => entry.node),
+    ["Route canonical photo UI target"],
+  );
+  const canonicalRoute = nodes.find((entry) => entry.name === "Route canonical photo UI target");
+  const featureBranch = /render_target === 'feature_payment'\s*\?\s*(\d+)/u.exec(canonicalRoute?.parameters?.output ?? "");
+  assert.ok(featureBranch, "feature payment passes through the shared presentation policy");
+  assert.deepEqual(
+    workflow.connections?.["Route canonical photo UI target"]?.main?.[Number(featureBranch[1])]?.map((entry) => entry.node),
     ["Route feature payment edit target"],
   );
   assert.deepEqual(

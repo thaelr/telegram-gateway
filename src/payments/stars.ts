@@ -73,7 +73,7 @@ export class TelegramStarsPaymentAdapter implements StarsInvoiceClient {
 
     try {
       response = await fetch(
-        `https://api.telegram.org/bot${config.TG_BOT_TOKEN}/createInvoiceLink`,
+        `${config.TELEGRAM_API_BASE_URL}/bot${config.TG_BOT_TOKEN}/createInvoiceLink`,
         {
           method: "POST",
           headers: {

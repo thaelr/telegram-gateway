@@ -1,3 +1,5 @@
+import { telegramStatus, issueTelegramChallenge, telegramChallenge, completeTelegramLink } from '../modules/accounts/linkIdentity.js';
+import { businessResult } from './featureResult.js';
 import { sql } from '../db.js';
 import { WebError, type WebRepositoryContract } from './types.js';
 import { WEB_HISTORY_CTE } from './history.js';
@@ -10,26 +12,15 @@ async function rows(db: DB, query: string, values: (string | number | null)[] = 
 }
 const iso = (value: unknown): string => value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();
 const localized = (column: string, parameter: string) => `COALESCE(NULLIF(${column}->>${parameter},''),NULLIF(${column}->>'ru',''),NULLIF(${column}->>'en',''),'')`;
-function businessResult(row: Row | undefined): Record<string, any> {
-  const result = row?.result;
-  if (!result || typeof result !== 'object') throw new WebError(500, 'internal_error');
-  if (result.status === 'error') {
-    const codes: Record<string, [number, string]> = {
-      campaign_not_active: [409, 'campaign_not_active'], candidate_not_found: [404, 'candidate_not_found'],
-      vote_conflict: [409, 'vote_conflict'], account_not_found: [401, 'account_not_found'],
-      telegram_link_expired: [410, 'telegram_link_expired'], telegram_link_used: [409, 'telegram_link_used'],
-      telegram_identity_conflict: [409, 'telegram_account_conflict'], telegram_proof_reused: [409, 'telegram_proof_reused'],
-      subscription_conflict: [409, 'subscription_conflict'], identity_conflict: [409, 'identity_conflict'],
-      account_busy: [409, 'account_busy'],
-    };
-    const [status, code] = codes[String(result.code)] ?? [500, 'internal_error'];
-    throw new WebError(status, code);
-  }
-  return result;
-}
+
 
 export class WebFeaturesRepository implements WebFeaturesRepositoryContract {
-  constructor(private readonly repository: WebRepositoryContract, private readonly query: typeof sql = sql) {}
+  constructor(private readonly repository: WebRepositoryContract, private readonly query: typeof sql = sql) {
+    this.telegramStatus = telegramStatus.bind(null, query);
+    this.issueTelegramChallenge = issueTelegramChallenge.bind(null, query);
+    this.telegramChallenge = telegramChallenge.bind(null, query);
+    this.completeTelegramLink = completeTelegramLink.bind(null, query);
+  }
 
   async publications(userId: string, before?: string, limit = 30): Promise<PublicationPage> {
     const locale = (await this.repository.getMe(userId)).language ?? 'ru';
@@ -96,39 +87,11 @@ export class WebFeaturesRepository implements WebFeaturesRepositoryContract {
     });
   }
 
-  async telegramStatus(userId: string) {
-    const identity = (await rows(this.query, "SELECT external_id FROM public.user_identities WHERE user_id=$1 AND provider='telegram' ORDER BY linked_at LIMIT 1", [userId]))[0];
-    return { linked: Boolean(identity), telegram_user_id: identity?.external_id ?? null };
-  }
+  readonly telegramStatus;
 
-  async issueTelegramChallenge(userId: string, authUserId: string, hash: string) {
-    const result = (await rows(this.query, `INSERT INTO app_private.web_telegram_link_challenges(challenge_hash,user_id,auth_user_id,expires_at)
-      SELECT $3::text,$1::varchar,$2::text,now()+interval '10 minutes' WHERE EXISTS(SELECT 1 FROM public.user_identities WHERE user_id=$1::varchar AND provider='supabase' AND external_id=$2::text)
-      RETURNING expires_at::text`, [userId, authUserId, hash]))[0];
-    if (!result) throw new WebError(401, 'account_not_found');
-    return { expires_at: iso(result.expires_at) };
-  }
+  readonly issueTelegramChallenge;
 
-  async telegramChallenge(userId: string, authUserId: string, hash: string): Promise<LinkChallenge> {
-    const challenge = (await rows(this.query, `SELECT user_id,auth_user_id,expires_at::text,consumed_at::text,linked_user_id
-      FROM app_private.web_telegram_link_challenges WHERE challenge_hash=$1 AND auth_user_id=$2
-      AND (user_id=$3 OR (consumed_at IS NOT NULL AND linked_user_id=$3))`, [hash, authUserId, userId]))[0];
-    if (!challenge || (!challenge.consumed_at && Date.parse(challenge.expires_at) <= Date.now())) throw new WebError(410, 'telegram_link_expired');
-    return challenge as LinkChallenge;
-  }
+  readonly telegramChallenge;
 
-  async completeTelegramLink(userId: string, authUserId: string, hash: string, telegramId: string, proofHash: string) {
-    let row: Row | undefined;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      row = (await rows(this.query,
-        'SELECT app_private.web_complete_telegram_link($1::varchar,$2::text,$3::text,$4::text,$5::text) AS result',
-        [userId, authUserId, hash, telegramId, proofHash]))[0];
-      if (row?.result?.code !== 'account_busy' || attempt === 2) break;
-      // SQL explicitly reports this only before any state change. Preserve proof.
-      await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
-    }
-    const result = businessResult(row);
-    if (result.status !== 'linked' || typeof result.user_id !== 'string') throw new WebError(500, 'internal_error');
-    return { linked: true as const, user_id: result.user_id };
-  }
+  readonly completeTelegramLink;
 }

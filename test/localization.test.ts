@@ -139,16 +139,16 @@ test("language repository reads raw metadata without risky SQL casts", async () 
   assert.doesNotMatch(localizationRepositorySource, /'_language'[^\n]*::integer/u);
 });
 
-test("payment methods use exact locale policy, ignore unknown providers and keep Telegram Stars", async () => {
+test("Telegram providers are locale-independent while Web keeps its exact locale policy", async () => {
   const service = new LocalizationService(new MemoryStore({
     "ru:payment_methods": { telegram: ["sbp", "unknown", "stars"], web: ["unknown", "sbp"] },
   }), testTelegramRuntimeSettings);
 
   assert.deepEqual(await service.getPaymentMethods("ru", "telegram"), ["sbp", "stars"]);
   assert.deepEqual(await service.getPaymentMethods("ru", "web"), ["sbp"]);
-  assert.deepEqual(await service.getPaymentMethods("en", "telegram"), ["stars"]);
+  assert.deepEqual(await service.getPaymentMethods("en", "telegram"), ["sbp", "stars"]);
   assert.deepEqual(await service.getPaymentMethods("en", "web"), []);
-  assert.deepEqual(await service.getPaymentMethods("not_a_locale", "telegram"), ["stars"]);
+  assert.deepEqual(await service.getPaymentMethods("not_a_locale", "telegram"), ["sbp", "stars"]);
   assert.deepEqual(await service.getPaymentMethods("not_a_locale", "web"), []);
 });
 
@@ -170,7 +170,7 @@ test("NOWPayments is admitted by the EN Web policy while Telegram keeps its exis
     "ru:payment_methods": { telegram: ["sbp", "stars"], web: ["sbp"] },
   }), testTelegramRuntimeSettings);
   assert.deepEqual(await service.getPaymentMethods("en", "web"), ["nowpayments"]);
-  assert.deepEqual(await service.getPaymentMethods("en", "telegram"), ["stars"]);
+  assert.deepEqual(await service.getPaymentMethods("en", "telegram"), ["sbp", "stars"]);
   assert.deepEqual(await service.getPaymentMethods("ru", "web"), ["sbp"]);
 });
 

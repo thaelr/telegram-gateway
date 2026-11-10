@@ -1,12 +1,12 @@
 import { config } from '../config.js';
-import { MediaCommerceDecisionService } from '../mediaCommerceDecisionService.js';
-import { MediaCommerceRepository } from '../mediaCommerceRepository.js';
+import { MediaCommerceDecisionService } from '../application/mediaCommerceDecision.js';
+import { MediaCommerceRepository } from '../application/mediaCommerceRepository.js';
 import { NowPaymentsProvider } from '../payments/nowpayments.js';
 import { PaymentProviderRegistry, SbpProvider, StarsProvider } from '../payments/providers.js';
 import { SbpPaymentAdapter } from '../payments/sbp.js';
 import { TelegramStarsPaymentAdapter } from '../payments/stars.js';
 import { WebCommerceService } from './commerce.js';
-import { WebCommerceRepository } from './commerceRepository.js';
+import { WebCommerceRepository } from '../modules/commerce/webPurchaseRepository.js';
 import type { WebRepositoryContract } from './types.js';
 import type { LocalizationService } from '../localization.js';
 

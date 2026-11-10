@@ -156,14 +156,16 @@ export class LocalizationService {
     locale: string | null | undefined,
     channel: PaymentChannel,
   ): Promise<ConfiguredPaymentMethod[]> {
+    // Telegram's localized payment_methods namespace is presentation policy,
+    // not provider eligibility. Commerce applies runtime flags and quote prices.
+    if (channel === "telegram") return ["sbp", "stars"];
     const dictionary = await this.getExactNamespace(locale, "payment_methods");
     const configured = dictionary?.[channel];
     const methods = Array.isArray(configured)
-      ? configured.filter((value): value is ConfiguredPaymentMethod => value === "stars" || value === "sbp" || (channel === "web" && value === "nowpayments"))
+      ? configured.filter((value): value is ConfiguredPaymentMethod => value === "sbp" || value === "nowpayments")
       : [];
     const unique = [...new Set(methods)];
-    if (channel === "telegram" && !unique.includes("stars")) unique.push("stars");
-    return channel === "telegram" ? unique : unique.filter((value) => value !== "stars");
+    return unique;
   }
 
   async getTelegramCopy(locale: string | null | undefined): Promise<TelegramUxCopy> {

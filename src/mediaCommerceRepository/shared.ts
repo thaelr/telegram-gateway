@@ -1,5 +1,5 @@
 import type { JSONValue } from "postgres";
-import type { AbTestAssignment, AbTestContext } from "../abTesting.js";
+import type { AbTestAssignment, AbTestContext } from "../modules/experiments/abTesting.js";
 import { sql } from "../db.js";
 import {
   parseJsonArray as parseLenientJsonArray,

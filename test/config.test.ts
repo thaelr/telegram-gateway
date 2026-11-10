@@ -41,6 +41,7 @@ const envKeys = [
   "INTERNAL_API_KEY",
   "PUBLIC_OFFER_URL",
   "TG_BOT_TOKEN",
+  "TELEGRAM_API_BASE_URL",
   "TELEGRAM_CHARACTER_GALLERY_ORDER_JSON",
   "TELEGRAM_CHARACTER_VOTE_URL",
   "MEDIA_SUBSCRIPTION_PLANS_JSON",
@@ -97,6 +98,29 @@ test('combined daily limits take precedence over legacy TURN_LIMIT and require M
   for(const raw of ['{"messages":0,"photos":1}','{"messages":2,"photos":1.5}','{"photos":2}'])
     await assert.rejects(importConfigWith({DAILY_FREE_LIMITS_JSON:raw}));
   await assert.rejects(importConfigWith({BUSINESS_TIME_ZONE:'UTC'}));
+});
+
+test("Telegram API base defaults to the Cloudflare proxy and rejects public HTTP", async () => {
+  const defaults = await importConfigWith({});
+  assert.equal(
+    defaults.TELEGRAM_API_BASE_URL,
+    "https://midnight-telegram-proxy.shenko-nik.workers.dev",
+  );
+
+  const normalized = await importConfigWith({
+    TELEGRAM_API_BASE_URL: "https://telegram-proxy.example///",
+  });
+  assert.equal(normalized.TELEGRAM_API_BASE_URL, "https://telegram-proxy.example");
+
+  const localMock = await importConfigWith({
+    TELEGRAM_API_BASE_URL: "http://telegram-mock:8080/",
+  });
+  assert.equal(localMock.TELEGRAM_API_BASE_URL, "http://telegram-mock:8080");
+
+  await assert.rejects(
+    importConfigWith({ TELEGRAM_API_BASE_URL: "http://telegram.example.com" }),
+    /TELEGRAM_API_BASE_URL requires HTTPS/u,
+  );
 });
 
 test("money JSON config rejects unknown fields and numeric strings", async () => {

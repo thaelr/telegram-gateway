@@ -11,7 +11,7 @@ const testPlan={sku:'fixture',amount_xtr:10,amount_rub:100,title:'Fixture',descr
 process.env.MEDIA_SUBSCRIPTION_PLANS_JSON=JSON.stringify([{...testPlan,days:30}]);
 process.env.MEDIA_PHOTO_PLANS_JSON=JSON.stringify([testPlan]);
 process.env.MEDIA_ACTION_PLANS_JSON=JSON.stringify([{...testPlan,feature_key:'scene_unlock'}]);
-const {WebRepository}=await import('../src/web/repository.js');
+const {WebRepository}=await import('../src/modules/chats/webRepository.js');
 
 test('browser CORS preflight permits only configured origins and required headers without bypassing bearer authorization',async(t)=>{
  const app=Fastify();t.after(()=>app.close());registerWebCors(app,['https://frontend.example']);

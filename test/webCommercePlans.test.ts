@@ -9,8 +9,8 @@ process.env.MEDIA_SUBSCRIPTION_PLANS_JSON = JSON.stringify([{ ...plan, days: 14 
 process.env.MEDIA_PHOTO_PLANS_JSON = JSON.stringify([{ ...plan, sku: "photo", amount_xtr: 10, amount_rub: 100 }]);
 process.env.MEDIA_ACTION_PLANS_JSON = JSON.stringify([{ ...plan, sku: "unlock", feature_key: "scene_unlock", amount_xtr: 80, amount_rub: 400 }]);
 const { config } = await import("../src/config.js");
-const { MediaCommerceDecisionService } = await import("../src/mediaCommerceDecisionService.js");
-const { resolveSubscriptionPlans, resolvePhotoPlanBySku, resolveActionPlanByFeatureKey } = await import("../src/mediaCommerce/plans.js");
+const { MediaCommerceDecisionService } = await import("../src/application/mediaCommerceDecision.js");
+const { resolveSubscriptionPlans, resolvePhotoPlanBySku, resolveActionPlanByFeatureKey } = await import("../src/modules/products/plans.js");
 type Repository = ConstructorParameters<typeof MediaCommerceDecisionService>[0];
 
 function strictService(calls: string[], assignment?: unknown) {

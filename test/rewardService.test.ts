@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { RewardService, RewardUnavailableError } from "../src/rewardService.js";
+import { RewardService, RewardUnavailableError } from "../src/modules/access/rewardService.js";
 import type {
   RewardClaimResult,
   RewardDefinition,
   RewardGrantClaimResult,
   RewardSlot,
-} from "../src/rewardTypes.js";
+} from "../src/modules/access/rewardTypes.js";
 
 const claimResult = (status: RewardClaimResult["status"]): RewardClaimResult => ({
   chat_id: 42,

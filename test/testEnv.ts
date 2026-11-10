@@ -170,6 +170,7 @@ export function installTestEnv(): void {
   process.env.PUBLIC_OFFER_URL ??= "https://offer.example/terms";
   process.env.GATEWAY_PUBLIC_URL ??= "https://gateway.example";
   process.env.TG_BOT_TOKEN ??= "test-telegram-bot-token";
+  process.env.TELEGRAM_API_BASE_URL ??= "https://midnight-telegram-proxy.shenko-nik.workers.dev";
   process.env.MAINTENANCE_MODE ??= "false";
   process.env.MAINTENANCE_ALLOWED_USER_IDS_JSON ??= "[]";
   process.env.TELEGRAM_CHARACTER_GALLERY_ORDER_JSON ??= JSON.stringify(

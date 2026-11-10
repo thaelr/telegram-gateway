@@ -12,7 +12,8 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --import tsx \"test/*.test.ts\"",
-    "test:workspace": "node --test --import tsx \"test/workspace/*.test.ts\""
+    "test:workspace": "node --test --import tsx \"test/workspace/*.test.ts\"",
+    "test:db": "node -e \"if (!process.env.TEST_DATABASE_URL) { console.error('TEST_DATABASE_URL is required for SQL integration tests'); process.exit(1); }\" && node --test --test-concurrency=1 --import tsx test/dailyPhotoDatabase.integration.ts test/telegramVideoDatabase.integration.ts test/webVideoDatabase.integration.ts test/webQueueDatabase.integration.ts test/webFeaturesDatabase.integration.ts test/messageQuota.test.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

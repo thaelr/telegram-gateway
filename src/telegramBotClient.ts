@@ -49,7 +49,7 @@ function messageIdFrom(value: unknown): number {
 export class TelegramBotClient implements TelegramNavigationTransport {
   constructor(
     private readonly timeoutMs = TELEGRAM_UX_TIMEOUT_MS,
-    private readonly apiBaseUrl = `https://api.telegram.org/bot${config.TG_BOT_TOKEN}`,
+    private readonly apiBaseUrl = `${config.TELEGRAM_API_BASE_URL}/bot${config.TG_BOT_TOKEN}`,
   ) {}
 
   private async request(method: string, body: Record<string, unknown>): Promise<TelegramResult> {

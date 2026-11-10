@@ -95,3 +95,5 @@ export function encodeHistoryCursor(row:HistoryRow):string {
  // Preserve PostgreSQL microseconds in the cursor; Date.toISOString truncates them.
  return Buffer.from(JSON.stringify([2,row.created_text,row.id])).toString('base64url');
 }
+
+export function iso(value: unknown): string | null { return value == null ? null : value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }

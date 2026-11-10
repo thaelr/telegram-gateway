@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { sql } from '../db.js';
 import { config } from '../config.js';
 import { isInternalApiAuthorized } from '../internalApiAuth.js';
-import { MediaCommerceRepository } from '../mediaCommerceRepository.js';
+import { MediaCommerceRepository } from '../application/mediaCommerceRepository.js';
 import type { WebCommerceService } from './commerce.js';
 import { WebError } from './types.js';
 

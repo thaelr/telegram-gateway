@@ -5,7 +5,7 @@ import path from "node:path";
 
 async function loadMigration(): Promise<string> {
   return readFile(path.resolve(
-    process.cwd(), "..", "..", "..", "MP-DB", "supabase", "migrations",
+    import.meta.dirname, "..", "..", "..", "MP-DB", "supabase", "migrations",
     "20260922100000_payment_attempt_lifecycle.sql",
   ), "utf8");
 }

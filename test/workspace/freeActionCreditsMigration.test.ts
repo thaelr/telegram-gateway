@@ -5,9 +5,11 @@ import path from "node:path";
 
 async function loadFreeCreditsMigration(): Promise<string> {
   const migrationPath = path.resolve(
-    process.cwd(),
+    import.meta.dirname,
     "..",
     "..",
+    "..",
+    "MP-DB",
     "supabase",
     "migrations",
     "20260909_free_action_credits.sql",

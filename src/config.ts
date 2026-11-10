@@ -1,11 +1,12 @@
 import { z } from "zod";
-import { loadExperimentConfigsFromEnv } from "./abTesting.js";
+import { loadExperimentConfigsFromEnv } from "./modules/experiments/abTesting.js";
 import { characterGalleryOrderSchema } from "./telegramUxCopy.js";
 export type { TelegramUxCopy } from "./telegramUxCopy.js";
 
 const positiveIntegerSchema = z.number().int().positive();
 const telegramUserIdSchema = z.number().int().positive().safe();
 const maintenanceTextDefault = "У нас технические работы, они займут 10-15 минут. Извини за неудобства";
+const telegramApiBaseUrlDefault = "https://midnight-telegram-proxy.shenko-nik.workers.dev";
 
 const invoicePlanSchema = z.object({
   sku: z.string().min(1),
@@ -224,6 +225,15 @@ const rawEnvSchema = z.object({
   GATEWAY_PUBLIC_URL: z.string().trim().optional(),
   RAILWAY_PUBLIC_DOMAIN: z.string().trim().optional(),
   TG_BOT_TOKEN: z.string().min(1),
+  TELEGRAM_API_BASE_URL: z.string().trim().url()
+    .refine((value) => {
+      const url = new URL(value);
+      const localHttpHosts = new Set(["localhost", "127.0.0.1", "[::1]", "telegram-mock"]);
+      return !url.username && !url.password && !url.search && !url.hash
+        && (url.protocol === "https:" || (url.protocol === "http:" && localHttpHosts.has(url.hostname)));
+    }, "TELEGRAM_API_BASE_URL requires HTTPS or a local test HTTP host without credentials, query, or hash")
+    .default(telegramApiBaseUrlDefault)
+    .transform((value) => value.replace(/\/+$/u, "")),
   SBP_ENABLED: z
     .string()
     .optional()

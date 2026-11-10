@@ -5,14 +5,14 @@ import path from "node:path";
 
 async function loadMigration(): Promise<string> {
   return readFile(path.resolve(
-    process.cwd(), "..", "..", "..", "MP-DB", "supabase", "migrations",
+    import.meta.dirname, "..", "..", "..", "MP-DB", "supabase", "migrations",
     "20260912110000_reward_system_and_free_photo_unlocks.sql",
   ), "utf8");
 }
 
 async function loadSnapshotMigration(): Promise<string> {
   return readFile(path.resolve(
-    process.cwd(), "..", "..", "..", "MP-DB", "supabase", "migrations",
+    import.meta.dirname, "..", "..", "..", "MP-DB", "supabase", "migrations",
     "20260912120000_reward_grant_snapshots.sql",
   ), "utf8");
 }

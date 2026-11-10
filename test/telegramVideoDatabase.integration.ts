@@ -13,7 +13,7 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
   process.env.MEDIA_PHOTO_PLANS_JSON=JSON.stringify([{...plan,sku:'tg_photo'}]);
   process.env.MEDIA_ACTION_PLANS_JSON=JSON.stringify([{...plan,sku:'tg_scene',feature_key:'scene_unlock'},{...plan,sku:'tg_video',feature_key:'video_unlock'},{...plan,sku:'tg_pass',feature_key:'video_pass',scene_unlock_upgrade:{amount_xtr:79,amount_rub:333,discount_percent:50}}]);
   const [{MediaCommerceDecisionService},{MediaCommerceRepository},{VideoCommerceRepository},{WebRepository}]=await Promise.all([
-    import('../src/mediaCommerceDecisionService.js'),import('../src/mediaCommerceRepository.js'),import('../src/videoCommerce.js'),import('../src/web/repository.js')]);
+    import('../src/application/mediaCommerceDecision.js'),import('../src/application/mediaCommerceRepository.js'),import('../src/modules/media/videoRepository.js'),import('../src/modules/chats/webRepository.js')]);
   const db=postgres(url,{max:5,prepare:false,onnotice:()=>{}});t.after(()=>db.end());
   const accounts=new WebRepository(db),videos=new VideoCommerceRepository(db),repo=new MediaCommerceRepository(db);
   let signed=0;

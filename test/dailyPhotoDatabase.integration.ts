@@ -15,7 +15,7 @@ test('three ordinary free receipts survive a same-day scene reset', async t => {
   process.env.MEDIA_PHOTO_PLANS_JSON=JSON.stringify([plan]);
   process.env.MEDIA_SUBSCRIPTION_PLANS_JSON=JSON.stringify([{...plan,sku:'daily-base',days:30}]);
   const [{MediaCommerceDecisionService},{MediaCommerceRepository}] = await Promise.all([
-    import('../src/mediaCommerceDecisionService.js'),import('../src/mediaCommerceRepository.js')
+    import('../src/application/mediaCommerceDecision.js'),import('../src/application/mediaCommerceRepository.js')
   ]);
   const db = postgres(url.href,{max:2,onnotice:()=>{}});
   t.after(() => db.end());
@@ -36,23 +36,30 @@ test('three ordinary free receipts survive a same-day scene reset', async t => {
     {async getTelegramCopy(){return testTelegramUxCopy;}}).evaluate({interaction_mode:'prepare_offer',
     chat_id:chatId,scene_session_id:two,turn_no:4,scene_turn_no:0,base_price_xtr:12,media_signature:hint,should_offer:false});
   assert.equal(result.price_required,12,'a scene reset must not restore free photos');
-  await t.test('message usage follows the Moscow date and selected dialogue, excluding commands',async()=>{
-    const {ChatAccessRepository}=await import('../src/chatAccessRepository.js');
+  await t.test('accepted message usage follows the Moscow date and is shared across characters and channels',async()=>{
+    const {ChatAccessRepository}=await import('../src/application/chatAccessRepository.js');
+    const {loadDailyMessageUsage}=await import('../src/modules/access/messageQuota.js');
     const access=new ChatAccessRepository(db);
     const transport=parseInt(randomUUID().slice(0,8),16)+10_000_000;
     const load=(character:number)=>access.ensureAndLoadAccessContext(transport,'telegram',transport,'Europe/Moscow',character,true);
     const first=await load(1);
-    const scene=randomUUID();
-    await db`INSERT INTO chat_scene_sessions(chat_id,character_i,scene_session_id) VALUES(${first.chat_id},1,${scene})`;
-    for(const [i,[type,ms]] of ([['text',-1],['text',0],['command',1]] as const).entries()){
-      await db`INSERT INTO chat_turns(chat_id,scene_session_id,n,message_type,created_at)
-        VALUES(${first.chat_id},${scene},${i+1},${type},
+    const second=await load(2);
+    assert.ok(first.user_id);
+    assert.equal(first.user_id,second.user_id);
+    for(const [source,chat,ms] of [['telegram',first.chat_id,-1],['telegram',first.chat_id,0],['web',second.chat_id,1]] as const){
+      await db`INSERT INTO app_private.message_admissions(source,message_key,user_id,chat_id,accepted_at)
+        VALUES(${source},${randomUUID()},${first.user_id},${chat},
         ((now() AT TIME ZONE 'Europe/Moscow')::date::timestamp AT TIME ZONE 'Europe/Moscow')+
         ${ms}::int*interval '1 millisecond')`;
     }
-    assert.equal((await load(1)).turns_today,1);
-    assert.equal((await load(2)).turns_today,0);
-    assert.equal((await load(1)).turns_today,1);
+    const [boundary]=await db`SELECT
+      (((now() AT TIME ZONE 'Europe/Moscow')::date::timestamp AT TIME ZONE 'Europe/Moscow')-interval '1 millisecond')::text AS before,
+      ((now() AT TIME ZONE 'Europe/Moscow')::date::timestamp AT TIME ZONE 'Europe/Moscow')::text AS midnight`;
+    assert.equal(await loadDailyMessageUsage(db,first.user_id,'Europe/Moscow',boundary!.before),1);
+    assert.equal(await loadDailyMessageUsage(db,first.user_id,'Europe/Moscow',boundary!.midnight),2);
+    assert.equal(await loadDailyMessageUsage(db,first.user_id,'UTC',boundary!.midnight),3);
+    assert.equal((await load(1)).turns_today,2);
+    assert.equal((await load(2)).turns_today,2);
   });
   await t.test('Moscow midnight counts confirmed ordinary unlocks once and excludes credit, paid and subscription', async () => {
     const uuid=randomUUID(),day1='2030-01-14T20:59:59.999Z',day2='2030-01-14T21:00:00.000Z';

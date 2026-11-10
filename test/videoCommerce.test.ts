@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { installTestEnv, testTelegramUxCopy } from './testEnv.js';
-import type { VideoContext, VideoDelivery } from '../src/videoCommerce.js';
+import type { VideoContext, VideoDelivery } from '../src/modules/media/videoRepository.js';
 import type { InteractionTokenRow } from '../src/mediaCommerceTypes.js';
 installTestEnv();
 process.env.MEDIA_VIDEO_ENABLED='true';
@@ -11,9 +11,9 @@ process.env.MEDIA_PHOTO_PLANS_JSON=JSON.stringify([{...plan,sku:'photo'}]);
 process.env.MEDIA_ACTION_PLANS_JSON=JSON.stringify([{...plan,sku:'unlock',feature_key:'scene_unlock'},{...plan,sku:'video',feature_key:'video_unlock'},{...plan,sku:'pass',feature_key:'video_pass'}]);
 process.env.SBP_ENABLED='false';
 const {config}=await import('../src/config.js');
-const {calculateFullUpgrade,roundUpgradePrice,resolveSubscriptionPlans}=await import('../src/mediaCommerce/plans.js');
-const {MediaCommerceDecisionService}=await import('../src/mediaCommerceDecisionService.js');
-const {buildSubscriptionPaymentInputs}=await import('../src/mediaCommerce/subscriptionFlow.js');
+const {calculateFullUpgrade,roundUpgradePrice,resolveSubscriptionPlans}=await import('../src/modules/products/plans.js');
+const {MediaCommerceDecisionService}=await import('../src/application/mediaCommerceDecision.js');
+const {buildSubscriptionPaymentInputs,getPaymentPrices}=await import('../src/modules/commerce/subscriptionFlow.js');
 const {runWithMediaLocalization}=await import('../src/mediaLocalization.js');
 type Repo=ConstructorParameters<typeof MediaCommerceDecisionService>[0];
 type VideoRepo=NonNullable<ConstructorParameters<typeof MediaCommerceDecisionService>[3]>;
@@ -44,13 +44,14 @@ async function click(service:InstanceType<typeof MediaCommerceDecisionService>,t
   return service.evaluate({event_type:'callback_query.received',chat_id:1,telegram_chat_id:900,inbound_message_id:panel,callback_data:token});
 }
 function setup(overrides:Partial<VideoContext>={}, paidSceneUnlockToken: string | null = null,language:'ru'|'en'='ru') {
+  let currentLanguage=language;
   const tokens=new Map<string,InteractionTokenRow>();
   const requests:unknown[]=[];
   let claimed=false;
   let currentDelivery=delivery;
   const invoices:unknown[]=[];
   const repo={
-    async loadAccountLanguage(){return language;},
+    async loadAccountLanguage(){return currentLanguage;},
     async upsertInvoiceToken(row:Record<string,unknown>){invoices.push(row);return {...row,stored:true,status:'invoice_sent',invoice_link:'https://pay.test/'+row.token};},
     async upsertCallbackTokens(rows:InteractionTokenRow[]){rows.forEach(row=>tokens.set(row.token,row));return rows.length;},
     async loadCallbackToken(token:string){const row=tokens.get(token);return row ? {...row,found:true,requested_token:token} : null;},
@@ -74,7 +75,7 @@ function setup(overrides:Partial<VideoContext>={}, paidSceneUnlockToken: string 
   } as unknown as VideoRepo;
   const service=new MediaCommerceDecisionService(repo,{async createStarsInvoice(){throw Error('Unexpected Stars call');}},null,videos,
     async()=> 'https://private.test/signed',localization);
-  return {service,tokens,requests,invoices};
+  return {service,tokens,requests,invoices,setLanguage(value:'ru'|'en'){currentLanguage=value;}};
 }
 
 test('upgrade uses nominal Base separately per currency, no remaining-term factor',()=>{
@@ -211,6 +212,7 @@ test('upgrade payment sources are independent when only RUB remains positive',()
   try {return withLocalization(()=>{const rows=buildSubscriptionPaymentInputs({chat_id:1,idempotency_key:'rub-only',subscription_offer_reason:'subscription_command',turn_limit:20,
     turns_today:2,turn_limit_reset_text:'midnight',sort_order:1,plan:{...plan,amount_xtr:0,amount_rub:99,sku:'full',days:30,tier:'full',subscription_change:'upgrade',upgrade_base_sku:'base'}});
     assert.equal(rows.length,1);assert.equal(rows[0]!.payment_source,'sbp');assert.equal(rows[0]!.amount,99);
+    assert.deepEqual(getPaymentPrices({amount_xtr:0,amount_rub:0}),[],'zero-price providers are not fabricated');
   });} finally {config.SBP_ENABLED=enabled;}
 });
 test('standalone VideoPass reveal retains the animate callback',async()=>{
@@ -226,7 +228,9 @@ test('scene offer uses separate upgrade prices, original amount and server-selec
   const pass=config.MEDIA_ACTION_PLANS_JSON.find(item=>item.feature_key==='video_pass')!;
   const old=pass.scene_unlock_upgrade;
   const oldPromos=config.MEDIA_PROMOTIONS_JSON;
-  t.after(()=>{pass.scene_unlock_upgrade=old;config.MEDIA_PROMOTIONS_JSON=oldPromos;});
+  const oldSbp=config.SBP_ENABLED;
+  config.SBP_ENABLED=true;
+  t.after(()=>{pass.scene_unlock_upgrade=old;config.MEDIA_PROMOTIONS_JSON=oldPromos;config.SBP_ENABLED=oldSbp;});
   config.MEDIA_PROMOTIONS_JSON=[{promo_key:'test-pass',starts_at:'2000-01-01T00:00:00Z',ends_at:'2099-01-01T00:00:00Z',
     items:[{sku:pass.sku,promo_amount_xtr:10,promo_amount_rub:20}]}];
   pass.scene_unlock_upgrade={amount_xtr:101,amount_rub:227,discount_percent:50};
@@ -236,17 +240,27 @@ test('scene offer uses separate upgrade prices, original amount and server-selec
   assert.ok(visible.commerce_ui?.actions.scene);
   const response=await upgraded.service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:visible.video!.chat_offer_callback_data!});
   const passProduct=response.commerce_ui!.products.find(p=>p.feature_key==='video_pass')!;
-  assert.equal(passProduct.duration_days,7);assert.equal(passProduct.amount,114);
+  assert.equal(passProduct.duration_days,7);assert.deepEqual([passProduct.amount,passProduct.currency],[114,'RUB']);
+  assert.deepEqual(passProduct.prices?.map(p=>[p.source,p.amount,p.original_amount,p.currency,p.discount_percent]),
+    [['sbp',114,227,'RUB',50],['stars',51,101,'XTR',50]]);
+  assert.equal(upgraded.invoices.length,0,'root prices do not create invoice attempts');
+  upgraded.setLanguage('en');
   const selected=await click(upgraded.service,passProduct.callback_data);
-  const option=selected.commerce_ui?.payment_options?.[0];
+  assert.equal(selected.language,'en');
+  assert.deepEqual(selected.commerce_ui?.products[0]?.prices,passProduct.prices);
+  assert.deepEqual([selected.commerce_ui?.products[0]?.amount,selected.commerce_ui?.products[0]?.currency],[51,'XTR']);
+  const option=selected.commerce_ui?.payment_options?.find(p=>p.source==='stars');
   assert.deepEqual([option?.amount,option?.original_amount,option?.discount_percent],[51,101,50]);
-  const invoice=(upgraded.invoices as Array<{payload_json:Record<string,unknown>}>)[0]!.payload_json;
+  const invoice=(upgraded.invoices as Array<{token:string,payload_json:Record<string,unknown>}>).find(row=>row.token===option!.token)!.payload_json;
   assert.deepEqual([invoice.purchase_variant,invoice.original_amount,invoice.final_amount,invoice.currency,invoice.discount_percent,invoice.paid_scene_unlock_token,invoice.user_id,invoice.video_id,invoice.pass_only,invoice.promo_key],
     ['scene_unlock_upgrade',101,51,'XTR',50,'paid-scene','owner',null,true,null]);
+  const back=await click(upgraded.service,selected.commerce_ui!.actions.back!);
+  assert.deepEqual(back.commerce_ui?.products.find(p=>p.feature_key==='video_pass')?.prices,passProduct.prices);
+  assert.equal(back.scene_session_id,'scene');
   const concrete=await upgraded.service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:visible.video!.animate_callback_data!});
   await click(upgraded.service,concrete.commerce_ui!.products.find(p=>p.feature_key==='video_pass')!.callback_data);
   const both=upgraded.invoices as Array<{token:string,payload_json:Record<string,unknown>}>;
-  assert.equal(both.filter(row=>row.payload_json.feature_key==='video_pass'&&row.payload_json.video_id===videoId).length,1);
+  assert.equal(both.filter(row=>row.payload_json.feature_key==='video_pass'&&row.payload_json.video_id===videoId).length,2);
   assert.equal(new Set(both.map(row=>row.token)).size,both.length);
   const products=await upgraded.service.webProductPlans(1);
   assert.deepEqual(products.filter(p=>p.feature_key==='video_pass').map(p=>[p.amount_rub,p.original_amount_rub,p.purchase_variant]),[[114,227,'scene_unlock_upgrade']]);
@@ -300,13 +314,43 @@ test('photo checkout preserves the selected photo, quote and sibling intent for 
     const payment=await click(service,open.token);
     assert.equal(payment.commerce_ui?.step,'payment');
     const options=payment.commerce_ui!.payment_options!;
-    assert.deepEqual(options.map(o=>o.source).sort(),language==='en'?['stars']:['sbp','stars']);
+    assert.deepEqual(options.map(o=>o.source).sort(),['sbp','stars']);
+    assert.deepEqual(payment.commerce_ui!.products[0]!.prices?.slice().sort((a,b)=>a.source.localeCompare(b.source)).map(p=>[p.source,p.amount,p.currency]),
+      [['sbp',230,'RUB'],['stars',100,'XTR']]);
     for(const opt of options){
       const snapshot=(invoices as Array<{token:string,payload_json:Record<string,unknown>}>).find(row=>row.token===opt.token)!.payload_json;
       assert.equal(snapshot.current_uuid,photoId);assert.equal(snapshot.target_message_id,77);assert.equal(snapshot.scene_session_id,'scene');
       assert.equal(snapshot.idempotency_key,'photo-unlock-click:'+photo.token);
       if(opt.source==='sbp'){assert.equal(opt.amount,230);assert.match(opt.checkout_url,/^https:\/\/merchant\.invalid\/v1\/pay\/sbp\//);}
       else assert.equal(opt.amount,100);
+    }
+  }
+});
+
+test('root and payment prices exclude disabled SBP or absent RUB for either Telegram locale',async(t)=>{
+  const oldSbp=config.SBP_ENABLED,oldPlans=config.MEDIA_ACTION_PLANS_JSON;
+  t.after(()=>{config.SBP_ENABLED=oldSbp;config.MEDIA_ACTION_PLANS_JSON=oldPlans;});
+  for(const unavailable of ['disabled','missing-rub'] as const){
+    config.SBP_ENABLED=unavailable!=='disabled';
+    config.MEDIA_ACTION_PLANS_JSON=oldPlans.map(plan=>({...plan,
+      ...(unavailable==='missing-rub'?{amount_rub:null}:{}),
+    }));
+    for(const language of ['ru','en'] as const){
+      const {service,invoices}=setup({},null,language);
+      const panel=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,
+        scene_session_id:'scene',media_signature:'signature',panel_message_id:77,current_uuid:photoId});
+      const offer=await click(service,panel.video!.chat_offer_callback_data!);
+      assert.ok(offer.commerce_ui!.products.length>0);
+      for(const product of offer.commerce_ui!.products){
+        assert.deepEqual(product.prices?.map(p=>p.source),['stars']);
+        assert.equal(product.currency,'XTR');
+      }
+      assert.equal(invoices.length,0);
+      const product=offer.commerce_ui!.products.find(p=>p.feature_key==='video_pass')!;
+      const payment=await click(service,product.callback_data);
+      assert.deepEqual(payment.commerce_ui?.payment_options?.map(p=>p.source),['stars']);
+      const amounts=(prices:typeof product.prices)=>prices?.map(p=>[p.source,p.amount,p.original_amount,p.currency,p.discount_percent??0]);
+      assert.deepEqual(amounts(payment.commerce_ui?.products[0]?.prices),amounts(product.prices));
     }
   }
 });

@@ -34,12 +34,12 @@ const {
   buildTelegramInvoicePayload,
   TELEGRAM_INVOICE_PAYLOAD_MAX_BYTES,
 } = await import("../src/mediaCommerce/utils.js");
-const { buildPhotoInvoiceInput } = await import("../src/mediaCommerce/mediaAction.js");
+const { buildPhotoInvoiceInput } = await import("../src/modules/commerce/photoInvoice.js");
 const {
   buildFeaturePaymentInputs,
   buildSceneUnlockPaymentInputs,
   buildSubscriptionPaymentInputs,
-} = await import("../src/mediaCommerce/subscriptionFlow.js");
+} = await import("../src/modules/commerce/subscriptionFlow.js");
 const { config } = await import("../src/config.js");
 const { runWithMediaLocalization } = await import("../src/mediaLocalization.js");
 

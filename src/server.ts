@@ -9,23 +9,23 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { sql } from "./db.js";
 import { safeErrorCode, safeLogSerializers } from './safeLogging.js';
-import { ChatAccessRepository } from "./chatAccessRepository.js";
-import { AccessDecisionService } from "./accessDecisionService.js";
-import { MediaCommerceRepository } from "./mediaCommerceRepository.js";
+import { ChatAccessRepository } from "./application/chatAccessRepository.js";
+import { AccessDecisionService } from "./application/telegramRouterDecision.js";
+import { MediaCommerceRepository } from "./application/mediaCommerceRepository.js";
 import {
   MediaCommerceDecisionService,
   MediaCommerceOperationError,
-} from "./mediaCommerceDecisionService.js";
+} from "./application/mediaCommerceDecision.js";
 import { mediaCommerceRequestSchema } from "./mediaCommerce/requestSchema.js";
 import { isInternalApiAuthorized } from "./internalApiAuth.js";
 import { runWithRequestContext } from "./requestContext.js";
 import { LocalizationService } from "./localization.js";
 import { LocalizationRepository } from "./localizationRepository.js";
-import { RewardRepository } from "./rewardRepository.js";
-import { RewardService, RewardUnavailableError } from "./rewardService.js";
+import { RewardRepository } from "./modules/access/rewardRepository.js";
+import { RewardService, RewardUnavailableError } from "./modules/access/rewardService.js";
 import { SupabaseAuthVerifier } from "./web/auth.js";
 import { registerWebRoutes, type WebRoutesOptions } from "./web/routes.js";
-import { WebRepository } from "./web/repository.js";
+import { WebRepository } from "./modules/chats/webRepository.js";
 import { createWebDeliveryTransport, WebDeliveryWorker } from "./web/delivery.js";
 import { registerWebCors } from './web/cors.js';
 import { registerWebFeatures } from './web/features.js';

@@ -40,19 +40,24 @@ const {
   TelegramStarsInvoiceError,
   TelegramStarsPaymentAdapter,
 } = await import("../src/payments/stars.js");
+const { TelegramBotClient } = await import("../src/telegramBotClient.js");
+const { config } = await import("../src/config.js");
 
 test("TelegramStarsPaymentAdapter returns invoice link on successful response", async () => {
   const adapter = new TelegramStarsPaymentAdapter();
   const originalFetch = globalThis.fetch;
+  let requestUrl: string | null = null;
 
-  globalThis.fetch = async () =>
-    new Response(JSON.stringify({
+  globalThis.fetch = async (input) => {
+    requestUrl = String(input);
+    return new Response(JSON.stringify({
       ok: true,
       result: "https://t.me/invoice-success",
     }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
+  };
 
   try {
     const result = await adapter.createStarsInvoice({
@@ -64,6 +69,31 @@ test("TelegramStarsPaymentAdapter returns invoice link on successful response", 
     });
 
     assert.equal(result.invoice_link, "https://t.me/invoice-success");
+    assert.equal(
+      requestUrl,
+      `${config.TELEGRAM_API_BASE_URL}/bot${config.TG_BOT_TOKEN}/createInvoiceLink`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("TelegramBotClient routes UX calls through the configured Telegram proxy", async () => {
+  const client = new TelegramBotClient();
+  const originalFetch = globalThis.fetch;
+  let requestUrl: string | null = null;
+
+  globalThis.fetch = async (input) => {
+    requestUrl = String(input);
+    return Response.json({ ok: true, result: { message_id: 321 } });
+  };
+
+  try {
+    assert.equal(await client.sendMessage({ chat_id: 123, text: "hello" }), 321);
+    assert.equal(
+      requestUrl,
+      `${config.TELEGRAM_API_BASE_URL}/bot${config.TG_BOT_TOKEN}/sendMessage`,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

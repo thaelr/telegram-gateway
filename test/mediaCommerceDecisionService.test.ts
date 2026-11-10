@@ -103,11 +103,11 @@ const {
   MediaCommerceDecisionService,
   MediaCommerceOperationError,
   buildPaymentOption,
-} = await import("../src/mediaCommerceDecisionService.js");
-const { buildMediaAction } = await import("../src/mediaCommerce/mediaAction.js");
-const { toPaidInvoiceToken } = await import("../src/mediaCommerce/paymentFlow.js");
+} = await import("../src/application/mediaCommerceDecision.js");
+const { buildMediaAction } = await import("../src/modules/media/mediaAction.js");
+const { toPaidInvoiceToken } = await import("../src/modules/commerce/paymentFlow.js");
 const { buildSubscriptionPaymentInputs } = await import(
-  "../src/mediaCommerce/subscriptionFlow.js"
+  "../src/modules/commerce/subscriptionFlow.js"
 );
 const { MediaRepositoryContractError } = await import(
   "../src/mediaCommerceRepository/errors.js"
@@ -119,7 +119,7 @@ const { TelegramStarsInvoiceError } = await import("../src/payments/stars.js");
 const {
   buildAssignment,
   loadExperimentConfigsFromEnv,
-} = await import("../src/abTesting.js");
+} = await import("../src/modules/experiments/abTesting.js");
 
 function withTestMediaLocalization<T>(execute: () => T): T {
   return runWithMediaLocalization({
@@ -2612,7 +2612,7 @@ test("asynchronous commerce resolves UX copy from the saved account language", a
   assert.equal((result.ux_copy as typeof englishCopy).payment_errors.stale, "English stale callback");
 });
 
-test("EN payment policy filters SBP before token creation and localizes Telegram invoice payload", async () => {
+test("EN presentation policy does not remove allowed SBP tokens and invoice text stays localized", async () => {
   const previousEnabled = config.SBP_ENABLED;
   const previousActionPlans = config.MEDIA_ACTION_PLANS_JSON;
   config.SBP_ENABLED = true;
@@ -2655,7 +2655,9 @@ test("EN payment policy filters SBP before token creation and localizes Telegram
       interaction_mode: "feature_offer",
       feature_key: "fast_scene_skip",
     }));
-    assert.deepEqual(result.payment_options?.map((option) => option.source), ["stars"]);
+    assert.deepEqual(result.payment_options?.map((option) => option.source), ["sbp", "stars"]);
+    assert.deepEqual(result.payment_options?.map((option) => [option.source, option.amount, option.currency]),
+      [["sbp", 80, "RUB"], ["stars", 50, "XTR"]]);
     assert.equal(calls.createSbpPayment, 0);
     const invoiceInput = calls.createStarsInvoiceInputs[0] as Record<string, unknown>;
     assert.deepEqual({ ...invoiceInput, payload: undefined }, {
@@ -2666,14 +2668,17 @@ test("EN payment policy filters SBP before token creation and localizes Telegram
       amount_xtr: 50,
     });
     assert.match(String(invoiceInput.payload), /^stars_[0-9a-f]{64}$/u);
-    assert.equal(result.payment_options?.[0]?.button_text, "English button 50");
+    assert.equal(result.payment_options?.find(option=>option.source==='stars')?.button_text, "English button 50");
   } finally {
     config.SBP_ENABLED = previousEnabled;
     config.MEDIA_ACTION_PLANS_JSON = previousActionPlans;
   }
 });
 
-test("feature payment reveal callback returns payment options without creating checkout", async () => {
+test("feature payment reveal callback returns payment options without creating checkout", async (t) => {
+  const oldSbp=config.SBP_ENABLED;
+  config.SBP_ENABLED=true;
+  t.after(()=>{config.SBP_ENABLED=oldSbp;});
   const chatId = 101;
   const invoiceRows = [
     buildStoredInvoiceToken({
@@ -6452,7 +6457,7 @@ test("subscription_offer returns SBP default source and toggle callback tokens w
   }
 });
 
-test("subscription_offer uses Stars first when payment policy orders Stars before SBP", async () => {
+test("localized provider order cannot restrict the server subscription quote set", async () => {
   const previousEnabled = config.SBP_ENABLED;
   const previousSubscriptionPlans = config.MEDIA_SUBSCRIPTION_PLANS_JSON;
   config.SBP_ENABLED = true;
@@ -6491,10 +6496,10 @@ test("subscription_offer uses Stars first when payment policy orders Stars befor
     }));
 
     assert.equal(result.operation, "subscription_offer_ready");
-    assert.equal(result.selected_payment_source, "stars");
+    assert.equal(result.selected_payment_source, "sbp");
     assert.deepEqual(
       result.subscription_offer_items?.[0]?.payment_options.map((option) => option.source),
-      ["stars", "sbp"],
+      ["sbp", "stars"],
     );
   } finally {
     config.SBP_ENABLED = previousEnabled;
@@ -6624,7 +6629,11 @@ test("maintenance blocks SBP redirect before checkout creation", async () => {
   });
 });
 
-test("subscription payment source toggle callback reuses stored offer data", async () => {
+test("subscription refresh and language changes reuse stored quotes while runtime flags still apply", async (t) => {
+  const oldSbp=config.SBP_ENABLED;
+  config.SBP_ENABLED=true;
+  t.after(()=>{config.SBP_ENABLED=oldSbp;});
+  let language:'ru'|'en'='ru';
   const chatId = 101;
   const invoiceRows = [
     buildStoredInvoiceToken({
@@ -6668,6 +6677,7 @@ test("subscription payment source toggle callback reuses stored offer data", asy
     }),
   ];
   const { service, calls } = createRepository({
+    async loadAccountLanguage(){return language;},
     async loadCallbackToken(token, chatId) {
       calls.loadCallbackTokenArgs.push({ token, chatId });
       return buildLoadedCallbackToken({
@@ -6728,6 +6738,18 @@ test("subscription payment source toggle callback reuses stored offer data", asy
   assert.equal(calls.loadMediaContext, 0);
   assert.equal(calls.createStarsInvoice, 0);
   assert.equal(calls.createSbpPayment, 0);
+  language='en';
+  const english=await service.evaluate(buildRequest({interaction_mode:null,event_type:'callback_query.received',
+    callback_data:'btn_toggle_stars',inbound_message_id:777,chat_id:chatId}));
+  assert.equal(english.language,'en');
+  assert.deepEqual(english.subscription_offer_items,result.subscription_offer_items);
+  assert.deepEqual(english.subscription_invoice_tokens,result.subscription_invoice_tokens);
+  config.SBP_ENABLED=false;
+  const disabled=await service.evaluate(buildRequest({interaction_mode:null,event_type:'callback_query.received',
+    callback_data:'btn_toggle_stars',inbound_message_id:777,chat_id:chatId}));
+  assert.deepEqual(disabled.subscription_offer_items?.[0]?.payment_options.map(option=>option.source),['stars']);
+  assert.equal(calls.createStarsInvoice,0);
+  assert.equal(calls.createSbpPayment,0);
 });
 
 test("subscription payment source toggle callback rejects stale active offer", async () => {

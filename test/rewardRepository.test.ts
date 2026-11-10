@@ -17,7 +17,7 @@ process.env.MEDIA_ACTION_PLANS_JSON = JSON.stringify([{
   title: "text", description: "text", label: "text", button_text: "text",
 }]);
 
-const { RewardRepository } = await import("../src/rewardRepository.js");
+const { RewardRepository } = await import("../src/modules/access/rewardRepository.js");
 
 test("claimReward delegates all reward types to the atomic database function", async () => {
   const calls: string[] = [];

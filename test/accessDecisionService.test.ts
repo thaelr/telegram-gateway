@@ -59,7 +59,7 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
   },
 ]);
 
-const { AccessDecisionService } = await import("../src/accessDecisionService.js");
+const { AccessDecisionService } = await import("../src/application/telegramRouterDecision.js");
 const { config } = await import("../src/config.js");
 
 type RepositoryCall = {
@@ -99,6 +99,7 @@ type DismissCall = {
 };
 
 type MockRepository = {
+  admitMessage: (userId: string, chatId: number, messageKey: string, timeZone: string, limit: number) => Promise<{allowed: boolean; turnsToday: number; subscriptionActive: boolean; sceneAccessActive: boolean}>;
   calls: RepositoryCall[];
   languageCalls: LanguageCall[];
   navigationCalls: Array<NavigationCall | ResumeNavigationCall>;
@@ -227,6 +228,7 @@ function createService(
     languageCalls,
     navigationCalls,
     dismissCalls,
+    async admitMessage(_userId, _chatId, _messageKey, _timeZone, limit) { return { allowed: context.subscription_active || context.scene_access_active || context.turns_today < limit, turnsToday: context.turns_today, subscriptionActive: context.subscription_active, sceneAccessActive: context.scene_access_active }; },
     async ensureAndLoadAccessContext(
       chatId,
       source,

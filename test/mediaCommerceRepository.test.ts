@@ -47,10 +47,10 @@ process.env.MEDIA_ACTION_PLANS_JSON ??= JSON.stringify([
 ]);
 
 const { MediaCommerceRepository } = await import(
-  "../src/mediaCommerceRepository.js"
+  "../src/application/mediaCommerceRepository.js"
 );
 const { ChatAccessRepository } = await import(
-  "../src/chatAccessRepository.js"
+  "../src/application/chatAccessRepository.js"
 );
 const { MediaRepositoryContractError } = await import(
   "../src/mediaCommerceRepository/errors.js"

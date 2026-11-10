@@ -11,7 +11,7 @@ const {
   findActiveExperiment,
   loadExperimentConfigsFromEnv,
   toAbTestContext,
-} = await import("../src/abTesting.js");
+} = await import("../src/modules/experiments/abTesting.js");
 
 const experimentJson = {
   key: "subscription_offer",

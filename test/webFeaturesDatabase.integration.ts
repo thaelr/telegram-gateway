@@ -12,7 +12,7 @@ test('Web feature repositories use the actual isolated SQL contracts',async t=>{
  process.env.MEDIA_SUBSCRIPTION_PLANS_JSON=JSON.stringify([{...invoice,sku:'test_base',days:30}]);
  process.env.MEDIA_PHOTO_PLANS_JSON=JSON.stringify([{...invoice,sku:'test_photo'}]);
  process.env.MEDIA_ACTION_PLANS_JSON=JSON.stringify([{...invoice,sku:'test_skip',feature_key:'fast_scene_skip'}]);
- const [{WebRepository},{WebFeaturesRepository},{linkHash}]=await Promise.all([import('../src/web/repository.js'),import('../src/web/featuresRepository.js'),import('../src/web/telegramLink.js')]);
+ const [{WebRepository},{WebFeaturesRepository},{linkHash}]=await Promise.all([import('../src/modules/chats/webRepository.js'),import('../src/web/featuresRepository.js'),import('../src/web/telegramLink.js')]);
  const db=postgres(url,{max:6,prepare:false,onnotice:()=>{}});t.after(()=>db.end());
  const accounts=new WebRepository(db),features=new WebFeaturesRepository(accounts,db);
  const owner=async()=>{const authId=randomUUID();const p=await accounts.bootstrap({auth_user_id:authId,is_anonymous:true,display_name:'Neutral test',locale:'en'});await accounts.updateMe(p.user_id,{language:'en'});await accounts.confirmAge(p.user_id);await accounts.acceptTerms(p.user_id);return {id:p.user_id,authId};};
@@ -124,7 +124,7 @@ test('Web feature repositories use the actual isolated SQL contracts',async t=>{
   assert.equal((await accounts.getChat(web.id,webChat.chat_code)).scene_session_id,webScene);
   assert.ok(!(await accounts.history(web.id,webChat.chat_code)).messages.some(message=>message.text==='Legacy neutral history'));
   assert.equal((await accounts.getMe(web.id)).subscription_sku,'test_base');assert.equal((await accounts.getMe(legacy!.user_id)).subscription_until,null);
-  const {ChatAccessRepository}=await import('../src/chatAccessRepository.js');const telegram=new ChatAccessRepository(db);
+  const {ChatAccessRepository}=await import('../src/application/chatAccessRepository.js');const telegram=new ChatAccessRepository(db);
   const menu=await telegram.ensureAndLoadAccessContext(Number(telegramId),'telegram',Number(telegramId),'UTC');
   assert.equal(menu.user_id,web.id);assert.equal(menu.subscription_active,true);assert.equal(menu.character_i,null);assert.equal(menu.active_scene_exists,false);
   const dialogue=await telegram.ensureAndLoadAccessContext(Number(telegramId),'telegram',Number(telegramId),'UTC',1,true);

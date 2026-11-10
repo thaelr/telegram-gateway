@@ -6,6 +6,29 @@ The gateway receives normalized Telegram events, loads the current user state, a
 
 The service makes business decisions and updates access- and commerce-related state in PostgreSQL. Actions in Telegram are performed through n8n: workflows send messages, images, invoices, and update the interface based on gateway responses.
 
+## Internal ownership
+
+The backend is one modular application. Existing operations live under
+`src/modules/`: `accounts`, `chats`, `access`, `products`, `commerce`, `media`,
+and `experiments`. Rewards belong to Access. `src/application` composes the
+Telegram contracts; `src/web` keeps HTTP, presentation and delivery adapters.
+Existing injected repository contracts remain available while their operations
+delegate to the owning modules. Transactions pass the same connection through
+these calls; module boundaries do not create new transactions or RPCs.
+
+Message admission uses one daily quota per internal `user_id`, across characters
+and Telegram/Web. Each unique accepted message records one receipt in
+`app_private.message_admissions`, including messages later grouped by debounce.
+Retries reuse their receipt; commands and rejected messages do not consume it.
+The existing subscription and scene exemptions remain in effect.
+
+This version requires MP-DB migration
+`20261109123611_shared_daily_message_quota.sql` before admission traffic starts.
+For a later deployment, drain the old admission path around migration/backfill
+and switching Gateway: an old instance does not write the new receipt journal.
+Engine, debounce, payment RPCs and Telegram workflow contracts are unchanged.
+Moving Telegram UI choices to a new capabilities contract is a separate change.
+
 ## Access and routing
 
 ### `/v1/router-decision`

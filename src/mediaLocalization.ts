@@ -30,9 +30,9 @@ export function getMediaUxCopy(): TelegramUxCopy {
 }
 
 export function getMediaPaymentMethods(): Array<"stars" | "sbp"> {
-  const methods=storage.getStore()?.paymentMethods ??
-    (config.SBP_ENABLED ? ["sbp","stars"] as const : ["stars"] as const);
-  return methods.filter(method=>(getMediaLanguage()!=='en'||method==='stars') && (method!=='sbp'||config.SBP_ENABLED));
+  // Server capabilities are independent of locale and Telegram presentation.
+  // The renderer may hide an allowed method; it cannot enable a disabled one.
+  return config.SBP_ENABLED ? ["sbp", "stars"] : ["stars"];
 }
 
 export function getMediaCommerceCopy(): Record<string, unknown> {
