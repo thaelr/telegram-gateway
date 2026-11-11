@@ -857,7 +857,21 @@ base={
       }
     }
     if(!products.length)return stale();
-    const ui:CommerceUi={surface,step:stage,products,actions,return_context:root};
+    let directVideoPaymentOptions:MediaPaymentOption[]|undefined;
+    const directVideoProduct=stage==='video'&&action!=='commerce_pay'
+      ? products.find(item=>item.feature_key==='video_unlock' && item.prices?.length===1)
+      : undefined;
+    if(directVideoProduct&&unlockPlan){
+      const directKey=createHash('sha256').update(JSON.stringify([base.chat_id,base.scene_session_id,messageId,stage,
+        directVideoProduct.feature_key,directVideoProduct.purchase_variant,offer.video_pass_payment_token??null,
+        unlockPlan.amount_xtr,unlockPlan.amount_rub??null,uuid,snap.media_signature])).digest('hex').slice(0,24);
+      const opened=await this.evaluateVideoCallback({...base,current_uuid:uuid,media_signature:snap.media_signature},
+        {...payload,chosen_feature:'video_unlock',video_purchase_key:directKey});
+      const options=opened.operation==='video_ui_ready'?opened.video?.unlock_payment_options??[]:[];
+      if(options.length===1&&options[0]?.checkout_url)directVideoPaymentOptions=options;
+    }
+    const ui:CommerceUi={surface,step:stage,products,actions,return_context:root,
+      ...(directVideoPaymentOptions?{payment_options:directVideoPaymentOptions}:{})};
     if(action==='commerce_pay'){
       const product=products.find(item=>item.feature_key===payload.feature_key);
       const plan=product?.feature_key==='scene_unlock'?scenePlan:product?.feature_key==='video_unlock'?unlockPlan:pass;
@@ -878,7 +892,9 @@ base={
         options=product.feature_key==='video_pass'?opened.video?.pass_payment_options??[]:opened.video?.unlock_payment_options??[];
       }
       if(!options.length)return stale();
-      ui.products=[{...product,prices:paymentOptionPrices(options)}];ui.step='payment';ui.payment_options=options;
+      ui.products=[{...product,prices:paymentOptionPrices(options)},
+        ...products.filter(item=>item.callback_data!==product.callback_data)];
+      ui.step='payment';ui.payment_options=options;
       await this.repository.upsertCallbackTokens([back]);
     }else await this.repository.upsertCallbackTokens(rows);
     return {...base,operation:'video_ui_ready' as const,commerce_ui:ui,reason:'commerce_'+ui.step};
