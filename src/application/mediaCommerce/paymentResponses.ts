@@ -109,6 +109,18 @@ export function buildPaymentOption(row: StoredInvoiceToken): MediaPaymentOption 
     sort_order: normalizeNonNegativeInteger(payload.sort_order) ?? 100,
     subscription_days:
       normalizePositiveInteger(payload.subscription_days) ?? null,
+    subscription_tier:
+      payload.subscription_tier === "base" || payload.subscription_tier === "full"
+        ? payload.subscription_tier
+        : null,
+    subscription_change:
+      payload.subscription_change === "upgrade" || payload.subscription_change === "renew"
+        ? payload.subscription_change
+        : null,
+    upgrade_base_sku: normalizeString(
+      typeof payload.upgrade_base_sku === "string" ? payload.upgrade_base_sku : null,
+    ),
+    upgrade_discount_percent: normalizeNonNegativeInteger(payload.upgrade_discount_percent),
     original_amount:
       paymentSource === "sbp"
         ? normalizePositiveInteger(payload.original_amount_rub)
@@ -169,6 +181,18 @@ export function buildOfferItem(rows: StoredInvoiceToken[]): MediaOfferItem | nul
     sort_order: normalizeNonNegativeInteger(payload.sort_order) ?? 100,
     subscription_days:
       normalizePositiveInteger(payload.subscription_days) ?? null,
+    subscription_tier:
+      payload.subscription_tier === "base" || payload.subscription_tier === "full"
+        ? payload.subscription_tier
+        : null,
+    subscription_change:
+      payload.subscription_change === "upgrade" || payload.subscription_change === "renew"
+        ? payload.subscription_change
+        : null,
+    upgrade_base_sku: normalizeString(
+      typeof payload.upgrade_base_sku === "string" ? payload.upgrade_base_sku : null,
+    ),
+    upgrade_discount_percent: normalizeNonNegativeInteger(payload.upgrade_discount_percent),
     promo_key:
       normalizeString(
         typeof payload.promo_key === "string"

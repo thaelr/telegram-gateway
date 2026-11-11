@@ -118,9 +118,9 @@ test('no matching video hides animate, Full and pass suppress the extra commerci
   for(const override of [{video:null},{panel_delivered:true},{delivery},{full_active:true},{video_pass_active:true}]){
     const {service,tokens}=setup(override);const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
     if('video'in override || 'panel_delivered'in override) assert.equal(result.video?.animate_callback_data,undefined);
-    if('full_active' in override || 'video_pass_active' in override)assert.equal(result.commerce_ui?.actions.scene,undefined);
+    if('full_active' in override)assert.equal(result.commerce_ui?.actions.scene,undefined);
     else {
-      assert.ok(result.commerce_ui?.actions.scene,'ordinary scene product remains available without a video');
+      assert.ok(result.commerce_ui?.actions.scene,'scene commerce remains available when at least one independent product exists');
       assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.action_kind,'commerce_scene');
     }
     if(override.video===null)assert.equal(result.commerce_ui?.actions.video,undefined);
@@ -252,6 +252,32 @@ test('scene subscription catalog reuses promotions, A/B overrides and active Bas
   assert.deepEqual(upgrade.map(product=>product.sku),['full']);
   assert.deepEqual([upgrade[0]?.subscription_change,upgrade[0]?.upgrade_base_sku],['upgrade','base_long']);
   assert.equal(active.invoices.length,0);
+});
+
+test('scene subscription entry prepares the existing offer and returns through an authorized scene callback',async()=>{
+  const opened=setup();
+  const panel=await opened.service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,
+    scene_session_id:'scene',panel_message_id:77,panel_text:'Original panel'});
+  const scene=await click(opened.service,panel.commerce_ui!.actions.scene!);
+  const entry=scene.commerce_ui!.actions.subscriptions!;
+  assert.equal(opened.tokens.get(entry)?.action_kind,'commerce_subscriptions');
+  assert.equal(opened.invoices.length,0);
+
+  const menu=await click(opened.service,entry);
+  assert.equal(menu.operation,'subscription_offer_ready');assert.equal(menu.source,'commerce_subscriptions');
+  assert.equal(menu.target_message_id,77);assert.equal(menu.panel_text,'Original panel');
+  assert.deepEqual(menu.subscription_offer_items?.map(item=>item.sku),['base','base_long','full']);
+  assert.ok(menu.commerce_ui?.actions.scene);assert.equal(opened.invoices.length,3);
+  const back=await click(opened.service,menu.commerce_ui!.actions.scene!);
+  assert.equal(back.commerce_ui?.step,'scene');assert.ok(back.commerce_ui?.actions.subscriptions);
+
+  const upgradeOnly=setup({video:null,subscription_sku:'base_long',subscription_until:'2099-01-01T00:00:00Z'});
+  const upgradePanel=await upgradeOnly.service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,
+    scene_session_id:'scene',panel_message_id:77});
+  assert.ok(upgradePanel.commerce_ui?.actions.scene,'subscription-only catalog must remain reachable');
+  const upgradeScene=await click(upgradeOnly.service,upgradePanel.commerce_ui!.actions.scene!);
+  assert.deepEqual(upgradeScene.commerce_ui?.products.filter(product=>product.subscription_tier).map(product=>product.sku),['full']);
+  assert.ok(upgradeScene.commerce_ui?.actions.subscriptions);assert.equal(upgradeOnly.invoices.length,0);
 });
 
 test('scene offer uses separate upgrade prices, original amount and server-selected variant',async(t)=>{

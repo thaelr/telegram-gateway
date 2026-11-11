@@ -71,6 +71,10 @@ export interface MediaPaymentOption {
   scene_session_id?: string | null;
   sort_order?: number | null;
   subscription_days?: number | null;
+  subscription_tier?: "base" | "full" | null;
+  subscription_change?: "upgrade" | "renew" | null;
+  upgrade_base_sku?: string | null;
+  upgrade_discount_percent?: number | null;
   original_amount?: number | null;
   discount_percent?: number;
   promo_key?: string | null;
@@ -88,6 +92,10 @@ export interface MediaOfferItem {
   scene_session_id?: string | null;
   sort_order?: number | null;
   subscription_days?: number | null;
+  subscription_tier?: "base" | "full" | null;
+  subscription_change?: "upgrade" | "renew" | null;
+  upgrade_base_sku?: string | null;
+  upgrade_discount_percent?: number | null;
   promo_key?: string | null;
   title: string;
   description: string;
@@ -146,7 +154,7 @@ export type CommerceProduct = {
   prices?: Array<Pick<MediaPaymentOption, 'source'|'amount'|'currency'|'original_amount'|'discount_percent'>>;
 label_key:string; label?:string; amount:number; original_amount?:number|null; currency:'XTR'|'RUB'; callback_data?:string; title:string; description:string;};
 export type CommerceUi = {
-  surface:CommerceSurface; step:'root'|'scene'|'video'|'payment'; products:CommerceProduct[]; actions:{video?:string;scene?:string;back?:string;bonus_scene?:string;bonus_photo?:string};
+  surface:CommerceSurface; step:'root'|'scene'|'video'|'payment'; products:CommerceProduct[]; actions:{video?:string;scene?:string;subscriptions?:string;back?:string;bonus_scene?:string;bonus_photo?:string};
   payment_options?:MediaPaymentOption[];
   return_context:{message_id:number|null;kind:'photo'|'subscription';text?:string|null;entities?:unknown[];
     reply_markup?:unknown;allowed_callback_data?:string[];allowed_urls?:string[]};

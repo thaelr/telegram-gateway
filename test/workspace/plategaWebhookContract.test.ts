@@ -1148,23 +1148,125 @@ test("feature payment reveal builder preserves entities and adds only hint itali
   });
 });
 
-test("subscription root and payment use one renderer, retain AB metadata, and show discounts only on the payment step", async () => {
-  const product={feature_key:"base",label_key:"base",label:"Base",sku:"base",amount:100,currency:"RUB",callback_data:"choose_base",description:"Base plan"};
-  const ui={surface:"subscription",step:"root",products:[product],actions:{scene:"scene_token"},return_context:{kind:"subscription",message_id:777,text:"Subscription body"}};
-  const input={chat_id:101,language:"ru",text:"Subscription body",ab_test:{key:"subscription_offer",variant:"B"},commerce_ui:ui,
-    ux_copy:{commerce_ui:{scene_subscription:"Текущая сцена",back:"Назад",sbp:"СБП",stars:"Stars"}}};
-  const prepared=await runWorkflowCodeNode("Build subscription offer message",input);
-  const root=await runWorkflowCodeNode("Build video-only panel markup",prepared);
-  assert.deepEqual(root.ab_test,input.ab_test);assert.equal(root.text,"Subscription body");
-  assert.deepEqual(root.reply_markup,{inline_keyboard:[
-    [{text:"Base (100 ₽)",callback_data:"choose_base"}],[{text:"Текущая сцена",callback_data:"scene_token"}],
-  ]});
-  const payment=await runWorkflowCodeNode("Build video-only panel markup",{...input,commerce_ui:{...ui,step:"payment",actions:{back:"go_back"},
-    payment_options:[{source:"sbp",amount:100,original_amount:150,currency:"RUB",checkout_url:"https://pay.example/sbp"}]}});
-  assert.deepEqual(payment.reply_markup,{inline_keyboard:[[{text:"СБП · 1̶5̶0̶ ₽ → 100 ₽",url:"https://pay.example/sbp"}],[{text:"Назад",callback_data:"go_back"}]]});
-  const entities=payment.commerce_entities as {type:string;offset:number;length:number}[];
-  const strike=entities.find(e=>e.type==="strikethrough");assert.ok(strike);
-  assert.equal(String(payment.text).slice(strike.offset,strike.offset+strike.length),"150 ₽");
+test("subscription command and Media Commerce share localized tariff rendering", async (t) => {
+  const ux_copy = {
+    commerce_ui: {
+      scene_subscription: "Текущая сцена",
+      subscription_back: "← Назад",
+      subscription_pay_stars: "Оплатить Stars",
+      subscription_pay_sbp: "Оплатить СБП",
+      subscription_plan_base_14: "Midnight · 14 дней",
+      subscription_plan_base_30: "Midnight · 30 дней",
+      subscription_plan_full_30_compact: "Midnight+ · 30 д. + видеобезлимит",
+      subscription_upgrade_full: "Апгрейд до Midnight+ · видеобезлимит",
+    },
+    payment_ui: {
+      commerce_price_with_label: "{label} · {price}",
+      commerce_discount_suffix: " -{percent}%",
+      commerce_compact_promo_price: "{struck_original}→{amount}{currency}",
+    },
+  };
+  const payment_options = [
+    { source: "sbp", amount: 100, currency: "RUB", checkout_url: "https://pay.example/base-sbp" },
+    { source: "stars", amount: 60, currency: "XTR", checkout_url: "https://t.me/base-stars" },
+  ];
+  const offers = [{
+    payment_kind: "subscription",
+    sku: "base_14",
+    subscription_tier: "base",
+    subscription_days: 14,
+    payment_options,
+  }];
+  const commerce_ui = {
+    surface: "subscription",
+    step: "root",
+    products: [],
+    actions: { scene: "scene_token" },
+    return_context: { kind: "subscription", message_id: 777, text: "Subscription body" },
+  };
+  const base = {
+    chat_id: 101,
+    language: "ru",
+    text: "Subscription body",
+    commerce_ui,
+    ux_copy,
+    subscription_offer_items: offers,
+    selected_payment_source: "sbp",
+    payment_source_toggle_tokens: { stars: "use_stars", sbp: "use_sbp" },
+  };
+
+  await t.test("RU /subscription shows SBP prices, a Stars toggle and scene unlock without Back", async () => {
+    const prepared = await runWorkflowCodeNode("Build subscription offer message", base);
+    const result = await runWorkflowCodeNode("Build video-only panel markup", prepared);
+    const rows = (result.reply_markup as {inline_keyboard:Array<Array<Record<string, unknown>>>}).inline_keyboard;
+    assert.deepEqual(rows, [
+      [{ text: "Midnight · 14 дней · 100 ₽", url: "https://pay.example/base-sbp", style: "primary" }],
+      [{ text: "Оплатить Stars", callback_data: "use_stars" }],
+      [{ text: "Текущая сцена", callback_data: "scene_token" }],
+    ]);
+  });
+
+  await t.test("Media Commerce uses the same tariffs but returns to unlock offers", async () => {
+    const result = await runWorkflowCodeNode("Build video-only panel markup", {
+      ...base,
+      source: "commerce_subscriptions",
+    });
+    const rows = (result.reply_markup as {inline_keyboard:Array<Array<Record<string, unknown>>>}).inline_keyboard;
+    assert.deepEqual(rows.slice(0, 2), [
+      [{ text: "Midnight · 14 дней · 100 ₽", url: "https://pay.example/base-sbp", style: "primary" }],
+      [{ text: "Оплатить Stars", callback_data: "use_stars" }],
+    ]);
+    assert.deepEqual(rows.at(-1), [{ text: "← Назад", callback_data: "scene_token" }]);
+    assert.equal(rows.some(row => row.some(button => button.text === "Текущая сцена")), false);
+  });
+
+  await t.test("EN exposes only Gateway-authorized Stars links without a payment toggle", async () => {
+    const result = await runWorkflowCodeNode("Build video-only panel markup", {
+      ...base,
+      language: "en",
+      source: "commerce_subscriptions",
+      selected_payment_source: "sbp",
+    });
+    const rows = (result.reply_markup as {inline_keyboard:Array<Array<Record<string, unknown>>>}).inline_keyboard;
+    assert.equal(rows[0]?.[0]?.url, "https://t.me/base-stars");
+    assert.equal(rows.some(row => row.some(button => button.callback_data === "use_sbp" || button.callback_data === "use_stars")), false);
+  });
+
+  await t.test("upgrade uses the Gateway amount and only a real promo adds strike and primary priority", async () => {
+    const upgrade = {
+      payment_kind: "subscription",
+      sku: "full_upgrade",
+      subscription_tier: "full",
+      subscription_change: "upgrade",
+      subscription_days: 30,
+      payment_options: [{
+        source: "sbp",
+        amount: 150,
+        original_amount: 300,
+        currency: "RUB",
+        checkout_url: "https://pay.example/upgrade-sbp",
+      }],
+    };
+    const withoutPromo = await runWorkflowCodeNode("Build video-only panel markup", {
+      ...base,
+      subscription_offer_items: [...offers, upgrade],
+    });
+    const plainRows = (withoutPromo.reply_markup as {inline_keyboard:Array<Array<Record<string, unknown>>>}).inline_keyboard;
+    assert.equal(plainRows[1]?.[0]?.text, "Апгрейд до Midnight+ · видеобезлимит · 150 ₽");
+    assert.equal(String(plainRows[1]?.[0]?.text).includes("→"), false);
+
+    const withPromo = await runWorkflowCodeNode("Build video-only panel markup", {
+      ...base,
+      subscription_offer_items: [...offers, {
+        ...upgrade,
+        promo_key: "upgrade_promo",
+        payment_options: upgrade.payment_options.map(option => ({...option, promo_key: "upgrade_promo"})),
+      }],
+    });
+    const promoRows = (withPromo.reply_markup as {inline_keyboard:Array<Array<Record<string, unknown>>>}).inline_keyboard;
+    assert.equal(promoRows[1]?.[0]?.text, "Апгрейд до Midnight+ · видеобезлимит · 3̶0̶0̶→150 ₽");
+    assert.equal(promoRows[1]?.[0]?.style, "primary");
+  });
 });
 
 test("payment UI reveal topology answers callback and edits text or caption", async () => {
