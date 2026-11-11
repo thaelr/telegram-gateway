@@ -42,6 +42,11 @@ type MediaLocalizationReader = {
 type PaymentUiActionKind =
   | "reveal_feature_payment_options"
   | "subscription_payment_source_toggle";
+type SubscriptionCatalogPlan = ReturnType<typeof resolveSubscriptionPlans>[number] & {
+  subscription_change?:'upgrade';
+  upgrade_base_sku?:string;
+  upgrade_discount_percent?:number;
+};
 const FREE_CALLBACK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function replaceCount(template: string, count: number): string {
@@ -565,6 +570,46 @@ currency:price.currency,prices,callback_data:token,
             title:title.replaceAll('{days}',String(duration??'')),description:description.replaceAll('{days}',String(duration??''))};
   }
 
+  private async availableSubscriptionPlans(chatId:number,sceneSessionId:string|null,params:SubscriptionOfferExperimentParams) {
+    let plans:SubscriptionCatalogPlan[]=applySubscriptionPlanOverrides(resolveSubscriptionPlans(),params);
+    let context:VideoContext|null=null;
+    let activeSku:string|null=null;
+    let nominal:typeof config.MEDIA_SUBSCRIPTION_PLANS_JSON[number]|undefined;
+    if(config.MEDIA_VIDEO_ENABLED){
+      context=await this.videos.context({chat_id:chatId,scene_session_id:sceneSessionId});
+      activeSku=context.subscription_sku;
+      const active=activeSku&&context.subscription_until&&Date.parse(context.subscription_until)>Date.now();
+      if(active){
+        nominal=config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(plan=>plan.sku===activeSku);
+        if(context.full_active)plans=[];
+        else plans=!context.video_pass_active&&nominal
+          ? plans.filter(plan=>plan.tier==='full').flatMap(plan=>{
+            const quote=calculateFullUpgrade(plan,nominal!,config.MEDIA_UPGRADE_DISCOUNT_PERCENT);
+            if(quote.amount_xtr<=0&&(quote.amount_rub==null||quote.amount_rub<=0||!config.SBP_ENABLED))return [];
+            return [{...plan,...quote,amount_rub:quote.amount_rub&&quote.amount_rub>0?quote.amount_rub:null,
+              subscription_change:'upgrade' as const,upgrade_base_sku:nominal!.sku,
+              upgrade_discount_percent:config.MEDIA_UPGRADE_DISCOUNT_PERCENT,
+              description:renderUx(getMediaUxCopy().video?.full_upgrade_description,{description:plan.description})}];
+          }) : [];
+      }
+    }
+    return {plans,context,activeSku,nominal};
+  }
+
+  private subscriptionCommerceItem(plan:Awaited<ReturnType<MediaCommerceDecisionService['availableSubscriptionPlans']>>['plans'][number],
+    selectedSource?:PaymentSource|null):CommerceProduct|null {
+    const prices=getPaymentPrices(plan);
+    const preferred=getMediaLanguage()==='en'||selectedSource==='stars'?'stars':'sbp';
+    const price=prices.find(item=>item.source===preferred)??prices[0];
+    if(!price)return null;
+    const tier=plan.tier==='full'?'full':'base';
+    return {feature_key:tier,sku:plan.sku,subscription_tier:tier,duration_days:plan.days,
+      subscription_change:plan.subscription_change,upgrade_base_sku:plan.upgrade_base_sku,
+      upgrade_discount_percent:plan.upgrade_discount_percent,promo_key:plan.promo_key,
+      label_key:tier,label:plan.label,title:plan.title,description:plan.description,
+      amount:price.amount,original_amount:price.original_amount,currency:price.currency,prices};
+  }
+
   private async commerceRoot(base:MediaCommerceDecisionResponse,surface:CommerceSurface,ctx?:VideoContext|null,
     root?:CommerceUi['return_context']) {
     if(!base.chat_id)return base;
@@ -741,8 +786,9 @@ base={
     if(stage==='video' && ctx && (ctx.delivery || ctx.full_active || ctx.video_pass_active)){
       return this.evaluateVideoCallback({...base,current_uuid:uuid},payload);
     }
+    const abParams=(await resolveAbTestSelection(this.repository,base.chat_id!,'subscription_offer'))?.params??{};
     const scenePlan=!offer.subscription_active&&!offer.scene_access_active && stage==='scene'
-      ? applySceneUnlockOverride(resolveActionPlanByFeatureKey('scene_unlock'),(await resolveAbTestSelection(this.repository, base.chat_id!,'subscription_offer'))?.params??{}) : null;
+      ? applySceneUnlockOverride(resolveActionPlanByFeatureKey('scene_unlock'),abParams) : null;
     const unlockPlan=stage==='video'&&hasVideo?resolveActionPlanByFeatureKey('video_unlock'):null;
     const pass=hasVideo && !offer.full_active && !offer.video_pass_active?resolveVideoPassPlan(offer.paid_scene_unlock_token):null;
     const back=this.videoToken(base,'commerce_back',{...snap,back_step:action==='commerce_pay'?stage:'root'});
@@ -763,6 +809,13 @@ base={
   base.selected_payment_source
 );
       if(item){rows.push(row);products.push(item);}
+    }
+    if(stage==='scene'){
+      const subscriptions=await this.availableSubscriptionPlans(base.chat_id!,base.scene_session_id??null,abParams);
+      products.push(...subscriptions.plans.flatMap(plan=>{
+        const item=this.subscriptionCommerceItem(plan,base.selected_payment_source);
+        return item?[item]:[];
+      }));
     }
     if(!products.length)return stale();
     const ui:CommerceUi={surface,step:stage,products,actions:{back:back.token},return_context:root};
@@ -2675,18 +2728,13 @@ token_rows_prepared: sceneEntryRows.length,
       && inActiveScene
       && activeSceneSessionId
       && abParams.scene_unlock?.enabled !== false;
-    let subscriptionPlans = applySubscriptionPlanOverrides(
-      resolveSubscriptionPlans(),
-      abParams,
-    );
-    let videoSubscriptionContext: VideoContext | null = null;
-    if (config.MEDIA_VIDEO_ENABLED) {
-      videoSubscriptionContext = await this.videos.context({chat_id:chatId,scene_session_id:requestSceneSessionId});
-      const activeSku = videoSubscriptionContext.subscription_sku;
-      const active = activeSku && videoSubscriptionContext.subscription_until && Date.parse(videoSubscriptionContext.subscription_until)>Date.now();
-      if (active) {
-        const nominal = config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(plan=>plan.sku === activeSku);
-        const title = nominal?.title ?? activeSku;
+    const availableSubscriptions=await this.availableSubscriptionPlans(chatId,requestSceneSessionId,abParams);
+    const subscriptionPlans=availableSubscriptions.plans;
+    const videoSubscriptionContext=availableSubscriptions.context;
+    if(videoSubscriptionContext&&availableSubscriptions.activeSku&&videoSubscriptionContext.subscription_until&&
+      Date.parse(videoSubscriptionContext.subscription_until)>Date.now()){
+        const nominal=availableSubscriptions.nominal;
+        const title = nominal?.title ?? availableSubscriptions.activeSku;
         offerText = [
           title,
           nominal?.description ?? '',
@@ -2695,20 +2743,9 @@ token_rows_prepared: sceneEntryRows.length,
         ].filter(Boolean).join('\n');
         if (videoSubscriptionContext.full_active) {
           offerText += '\n' + renderUx(getMediaUxCopy().video?.full_benefits);
-          subscriptionPlans = [];
         } else {
           offerText += '\n' + renderUx(getMediaUxCopy().video?.base_benefits);
-          subscriptionPlans = !videoSubscriptionContext.video_pass_active && nominal
-            ? subscriptionPlans.filter(plan=>plan.tier === 'full').flatMap(plan=>{
-              const quote = calculateFullUpgrade(plan,nominal,config.MEDIA_UPGRADE_DISCOUNT_PERCENT);
-              if(quote.amount_xtr <= 0 && (quote.amount_rub == null || quote.amount_rub <= 0 || !config.SBP_ENABLED)) return [];
-              return [{...plan,...quote,amount_rub:quote.amount_rub && quote.amount_rub>0 ? quote.amount_rub : null,
-                subscription_change:'upgrade' as const,upgrade_base_sku:nominal.sku,
-                upgrade_discount_percent:config.MEDIA_UPGRADE_DISCOUNT_PERCENT,
-                description:renderUx(getMediaUxCopy().video?.full_upgrade_description,{description:plan.description})}];
-            }) : [];
         }
-      }
     }
     const invoiceInputs = subscriptionPlans.flatMap((plan, index) =>
       buildSubscriptionPaymentInputs({

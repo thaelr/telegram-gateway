@@ -160,7 +160,7 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
       const select=async(token:string,key:string)=>{const stage=await click(token);
         const product=stage.commerce_ui!.products.find(p=>p.feature_key===key);
         assert.ok(product,language+' '+key+' product: '+stage.reason);
-        return click(product.callback_data);};
+        return click(product.callback_data!);};
       const check=async(key:string,response:Awaited<ReturnType<typeof click>>)=>{
         assert.equal(response.commerce_ui?.step,'payment',language+' '+key+' '+response.reason);
         const options=response.commerce_ui!.payment_options!;
@@ -193,11 +193,11 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
       const back=await click(sceneStep.commerce_ui!.actions.back!);
       assert.ok(back.commerce_ui?.actions.scene);assert.ok(back.commerce_ui?.actions.video);
       const wrong=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram+1,
-        callback_data:sceneStep.commerce_ui!.products[0]!.callback_data,inbound_message_id:f.panel+1});
+        callback_data:sceneStep.commerce_ui!.products[0]!.callback_data!,inbound_message_id:f.panel+1});
       assert.equal(wrong.operation,'noop');
       const after=await db`SELECT count(*)::int AS n FROM public.interaction_tokens WHERE chat_id=${f.chatId} AND kind='invoice_payload'`;
       assert.equal(after[0]!.n,before[0]!.n,'stage 1, back and foreign click never create a payment attempt');
-      for(const key of ['base','full'])await check(key,await click(menu.commerce_ui!.products.find(p=>p.feature_key===key)!.callback_data));
+      for(const key of ['base','full'])await check(key,await click(menu.commerce_ui!.products.find(p=>p.feature_key===key)!.callback_data!));
       await check('scene_unlock',await select(f.initial.commerce_ui!.actions.scene!,'scene_unlock'));
       await check('video_pass',await select(f.initial.commerce_ui!.actions.scene!,'video_pass'));
       await check('video_unlock',await select(f.initial.commerce_ui!.actions.video!,'video_unlock'));
@@ -221,7 +221,7 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
       assert.equal(stale.precheckout_ok,false);assert.equal(stale.reason,'video_invoice_stale');
       await db`UPDATE public.users SET subscription_sku='tg_base',subscription_until=now()+interval '1 day',subscription_tier='base',subscription_tier_sku='tg_base' WHERE user_id=${f.userId}`;
       const renewed=await subscription();
-      const full=await click(renewed.commerce_ui!.products.find(p=>p.feature_key==='full')!.callback_data);
+      const full=await click(renewed.commerce_ui!.products.find(p=>p.feature_key==='full')!.callback_data!);
       const [fullRow]=await db`SELECT payload_json FROM public.interaction_tokens WHERE token=${full.commerce_ui!.payment_options![0]!.token}`;
       assert.equal(fullRow!.payload_json.subscription_change,'upgrade');await check('base to full',full);
     }
