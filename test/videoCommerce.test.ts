@@ -194,14 +194,15 @@ test('animate checkout snapshots the selected video; reveal replaces only known 
   assert.equal(invoices.length,1,'the existing direct one-time video checkout remains the only eager exception');
   const beforeSelected=invoices.length;
   const payment=await click(service,result.commerce_ui!.products.find(product=>product.feature_key==='video_unlock')!.callback_data!);
-  assert.equal(payment.commerce_ui?.step,'payment');assert.equal(payment.commerce_ui?.payment_options?.length,1);
+  assert.equal(payment.commerce_ui?.step,'payment');assert.equal(payment.commerce_ui?.payment_origin_step,'video');
+  assert.equal(payment.commerce_ui?.payment_options?.length,1);
   const snapshot=(invoices[0] as {payload_json:Record<string,unknown>}).payload_json;
   assert.equal(snapshot.video_id,videoId);assert.equal(snapshot.photo_message_id,77);assert.equal(snapshot.telegram_chat_id,900);
   const back=await click(service,payment.commerce_ui!.actions.back!);
   assert.deepEqual(back.commerce_ui?.products.map(p=>p.feature_key),
     ['scene_unlock','video_unlock','video_pass','base','base','full']);assert.ok(invoices.length>=beforeSelected);
   const pass=await click(service,back.commerce_ui!.products.find(product=>product.feature_key==='video_pass')!.callback_data!);
-  assert.equal(pass.commerce_ui?.payment_options?.[0]?.feature_key,'video_pass');
+  assert.equal(pass.commerce_ui?.payment_origin_step,'video');assert.equal(pass.commerce_ui?.payment_options?.[0]?.feature_key,'video_pass');
 });
 test('active Base uses nominal configured SKU and keeps existing subscription conditions',async()=>{
   const {service,invoices}=setup({subscription_sku:'base_long',subscription_until:'2099-01-01T00:00:00Z'});
@@ -235,6 +236,8 @@ test('standalone VideoPass reveal retains the animate callback',async()=>{
   assert.deepEqual(subscriptions.map(p=>[p.sku,p.subscription_tier,p.duration_days]),[['base','base',7],['base_long','base',60],['full','full',30]]);
   assert.deepEqual(subscriptions[0]?.prices?.map(p=>[p.source,p.amount,p.original_amount]),[['stars',100,100]]);
   assert.equal(invoices.length,0,'catalog lookup must not prepare invoice attempts');
+  const chatPass=await click(service,result.commerce_ui!.products.find(product=>product.feature_key==='scene_unlock')!.callback_data!);
+  assert.equal(chatPass.commerce_ui?.payment_origin_step,'scene');
   const back=await click(service,result.commerce_ui!.actions.back!);
   assert.ok(back.commerce_ui?.actions.video);assert.ok(back.commerce_ui?.actions.scene);
 });
@@ -318,6 +321,7 @@ test('scene offer uses separate upgrade prices, original amount and server-selec
     inbound_message_id:77,callback_data:passProduct.callback_data!,raw_update:{callback_query:{from:{id:900},
       message:{message_id:77,reply_markup:selectedMarkup}}}});
   assert.equal(selected.language,'en');
+  assert.equal(selected.commerce_ui?.payment_origin_step,'scene');
   assert.deepEqual(selected.commerce_ui?.return_context.reply_markup,selectedMarkup);
   assert.equal(selected.commerce_ui?.products.find(product=>product.feature_key==='video_pass')?.callback_data,passProduct.callback_data);
   for(const product of selected.commerce_ui?.products??[]){
@@ -391,6 +395,7 @@ test('photo checkout preserves the selected photo, quote and sibling intent for 
     tokens.set(photo.token,photo);tokens.set(open.token,open);
     const payment=await click(service,open.token);
     assert.equal(payment.commerce_ui?.step,'payment');
+    assert.equal(payment.commerce_ui?.payment_origin_step,undefined);
     const options=payment.commerce_ui!.payment_options!;
     assert.deepEqual(options.map(o=>o.source).sort(),['sbp','stars']);
     assert.deepEqual(payment.commerce_ui!.products[0]!.prices?.slice().sort((a,b)=>a.source.localeCompare(b.source)).map(p=>[p.source,p.amount,p.currency]),

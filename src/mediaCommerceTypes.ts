@@ -156,6 +156,7 @@ label_key:string; label?:string; amount:number; original_amount?:number|null; cu
 export type CommerceUi = {
   surface:CommerceSurface; step:'root'|'scene'|'video'|'payment'; products:CommerceProduct[]; actions:{video?:string;scene?:string;subscriptions?:string;back?:string;bonus_scene?:string;bonus_photo?:string};
   payment_options?:MediaPaymentOption[];
+  payment_origin_step?:'scene'|'video';
   return_context:{message_id:number|null;kind:'photo'|'subscription';text?:string|null;entities?:unknown[];
     reply_markup?:unknown;allowed_callback_data?:string[];allowed_urls?:string[]};
 };

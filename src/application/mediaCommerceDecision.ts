@@ -928,7 +928,7 @@ base={
       if(!options.length)return stale();
       ui.products=[{...product,prices:paymentOptionPrices(options)},
         ...products.filter(item=>item.callback_data!==product.callback_data)];
-      ui.step='payment';ui.payment_options=options;
+      ui.step='payment';ui.payment_options=options;ui.payment_origin_step=stage;
       await this.repository.upsertCallbackTokens(rows);
     }else await this.repository.upsertCallbackTokens(rows);
     return {...base,operation:'video_ui_ready' as const,commerce_ui:ui,reason:'commerce_'+ui.step};
