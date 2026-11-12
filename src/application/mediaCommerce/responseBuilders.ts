@@ -62,6 +62,8 @@ export function buildBaseResponse(
     offer_message_id: normalizePositiveInteger(input.offer_message_id),
     subscription_invoice_tokens: input.subscription_invoice_tokens ?? null,
     source: normalizeString(input.source),
+    ...(input.commerce_capabilities_version===1?{commerce_capabilities_version:1 as const}:{}),
+    ...(normalizeString(input.ui_origin)?{ui_origin:normalizeString(input.ui_origin)}:{}),
     update_id: normalizePositiveInteger(input.update_id),
     panel_message_id: normalizePositiveInteger(input.panel_message_id),
     panel_text: normalizeString(input.panel_text),

@@ -86,6 +86,8 @@ export const mediaCommerceRequestSchema = z.object({
     .nullable()
     .optional(),
   source: z.string().trim().nullable().optional(),
+  commerce_capabilities_version: z.literal(1).optional(),
+  ui_origin: z.string().trim().min(1).nullable().optional(),
   update_id: positiveIntegerInputSchema.nullable().optional(),
 });
 

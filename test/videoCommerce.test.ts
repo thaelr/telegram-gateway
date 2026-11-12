@@ -116,6 +116,53 @@ test('video context creates only callback metadata, with independent open-chat o
   assert.equal(tokens.get(result.commerce_ui.actions.video!)?.payload_json.action_button_text,null);
   assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.payload_json.action_button_text,null);
 });
+test('capabilities v1 exposes independent products, refresh and selected purchase without changing legacy',async()=>{
+  const {service,tokens,invoices}=setup();
+  const request={interaction_mode:'video_context' as const,chat_id:1,telegram_chat_id:900,scene_session_id:'scene',
+    media_signature:'signature',current_uuid:photoId,panel_message_id:77};
+  const legacy=await service.evaluate(request);
+  assert.equal(legacy.commerce_capabilities,undefined);
+  const result=await service.evaluate({...request,commerce_capabilities_version:1 as const,ui_origin:'media_panel'});
+  const capabilities=result.commerce_capabilities!;
+  assert.deepEqual(capabilities.context,{origin:'media_panel',kind:'photo',scene_session_id:'scene',message_id:77,
+    current_uuid:photoId,media_signature:'signature'});
+  assert.equal(tokens.get(capabilities.controls.refresh!)?.action_kind,'commerce_ui_refresh');
+  const actionProducts=capabilities.products.filter(product=>['scene_unlock','video_unlock','video_pass'].includes(product.feature_key));
+  assert.deepEqual(actionProducts.map(product=>[product.feature_key,product.purchase_context]),[
+    ['scene_unlock','access_only'],['video_unlock','access_and_video'],['video_pass','access_only'],['video_pass','access_and_video'],
+  ]);
+  for(const product of actionProducts)assert.equal(tokens.get(product.callback_data!)?.action_kind,'commerce_pay');
+  assert.ok(capabilities.products.every(product=>product.callback_data||product.payment_options?.length));
+  for(const product of capabilities.products.filter(product=>product.subscription_tier)){
+    assert.equal(tokens.get(product.callback_data!)?.action_kind,'commerce_subscriptions');
+  }
+  assert.equal(invoices.length,0);
+  const subscription=capabilities.products.find(product=>product.subscription_tier)!;
+  const selectedSubscription=await click(service,subscription.callback_data!);
+  assert.equal(selectedSubscription.commerce_capabilities?.selected_purchase?.sku,subscription.sku);
+  assert.ok(selectedSubscription.commerce_capabilities?.selected_purchase?.payment_options.length);
+  assert.ok(selectedSubscription.commerce_capabilities?.products.some(product=>product.feature_key==='video_unlock'));
+
+  const invoicesBeforeRefresh=invoices.length;
+  const refreshed=await click(service,capabilities.controls.refresh!);
+  assert.equal(refreshed.operation,'video_ui_ready');assert.equal(refreshed.commerce_capabilities?.version,1);
+  assert.equal(invoices.length,invoicesBeforeRefresh,'refresh must not create payment attempts');
+  const accessOnly=capabilities.products.find(product=>product.feature_key==='video_pass'&&product.purchase_context==='access_only')!;
+  const selected=await click(service,accessOnly.callback_data!);
+  assert.deepEqual([selected.commerce_capabilities?.selected_purchase?.feature_key,
+    selected.commerce_capabilities?.selected_purchase?.purchase_context],['video_pass','access_only']);
+  assert.ok(selected.commerce_capabilities?.selected_purchase?.payment_options.length);
+  assert.ok(selected.commerce_capabilities?.products.some(product=>product.feature_key==='video_unlock'));
+  const stale=await click(service,capabilities.controls.refresh!,78);
+  assert.equal(stale.operation,'noop');assert.equal(stale.callback_valid,false);
+
+  const unavailable=await setup({video:null}).service.evaluate({...request,commerce_capabilities_version:1});
+  assert.equal(unavailable.commerce_capabilities?.products.some(product=>
+    product.feature_key==='video_unlock'||product.feature_key==='video_pass'),false);
+  const entitled=await setup({full_active:true}).service.evaluate({...request,commerce_capabilities_version:1});
+  assert.equal(entitled.commerce_capabilities?.products.some(product=>
+    ['scene_unlock','video_unlock','video_pass'].includes(product.feature_key)),false);
+});
 test('no matching video hides animate, Full and pass suppress the extra commercial offer',async()=>{
   for(const override of [{video:null},{panel_delivered:true},{delivery},{full_active:true},{video_pass_active:true}]){
     const {service,tokens}=setup(override);const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
@@ -292,6 +339,25 @@ test('scene subscription entry prepares the existing offer and returns through a
   const upgradeScene=await click(upgradeOnly.service,upgradePanel.commerce_ui!.actions.scene!);
   assert.deepEqual(upgradeScene.commerce_ui?.products.filter(product=>product.subscription_tier).map(product=>product.sku),['full']);
   assert.ok(upgradeScene.commerce_ui?.actions.subscriptions);assert.equal(upgradeOnly.invoices.length,0);
+});
+
+test('capabilities v1 keeps subscription choices and scene context separate',async()=>{
+  const active=setup();
+  const scene=await active.service.evaluate({interaction_mode:'subscription_offer',subscription_offer_reason:'subscription_command',
+    idempotency_key:'cap-scene',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',commerce_capabilities_version:1,ui_origin:'active_chat'});
+  assert.equal(scene.commerce_capabilities?.context.kind,'subscription');
+  assert.equal(scene.commerce_capabilities?.context.scene_session_id,'scene');
+  assert.ok(scene.commerce_capabilities?.controls.subscriptions);
+  assert.deepEqual(scene.commerce_capabilities?.products.filter(product=>product.subscription_tier).map(product=>product.sku),
+    ['base','base_long','full']);
+  assert.ok(scene.commerce_capabilities?.products.filter(product=>product.subscription_tier).every(product=>product.callback_data));
+
+  const global=setup();
+  const noScene=await global.service.evaluate({interaction_mode:'subscription_offer',subscription_offer_reason:'subscription_command',
+    idempotency_key:'cap-global',chat_id:1,telegram_chat_id:900,commerce_capabilities_version:1,ui_origin:'global_menu'});
+  assert.equal(noScene.commerce_capabilities?.context.scene_session_id,null);
+  assert.equal(noScene.commerce_capabilities?.products.some(product=>product.feature_key==='scene_unlock'||product.feature_key==='video_pass'),false);
+  assert.ok(noScene.commerce_capabilities?.products.some(product=>product.subscription_tier));
 });
 
 test('scene offer uses separate upgrade prices, original amount and server-selected variant',async(t)=>{

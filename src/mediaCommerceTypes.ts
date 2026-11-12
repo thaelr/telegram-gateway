@@ -160,9 +160,22 @@ export type CommerceUi = {
   return_context:{message_id:number|null;kind:'photo'|'subscription';text?:string|null;entities?:unknown[];
     reply_markup?:unknown;allowed_callback_data?:string[];allowed_urls?:string[]};
 };
+export type CommerceCapabilitiesV1 = {
+  version:1;
+  context:{origin:string|null;kind:'photo'|'subscription'|'daily_messages';scene_session_id:string|null;
+    message_id:number|null;current_uuid:string|null;media_signature:string|null};
+  controls:{refresh?:string;photo?:{intent:'get'|'more';callback_data:string};photo_prev?:string;photo_next?:string;
+    video_request?:string;subscriptions?:string;bonus_scene?:string;bonus_photo?:string};
+  products:Array<CommerceProduct&{purchase_context?:'access_only'|'access_and_video';payment_options?:MediaPaymentOption[]}>;
+  selected_purchase?:{feature_key:string;sku:string;purchase_variant?:string;
+    purchase_context?:'access_only'|'access_and_video';payment_options:MediaPaymentOption[]};
+};
 
 export interface MediaCommerceDecisionResponse {
   commerce_ui?:CommerceUi;
+  commerce_capabilities?:CommerceCapabilitiesV1;
+  commerce_capabilities_version?:1;
+  ui_origin?:string|null;
   language?: string;
   ux_copy?: unknown;
   video?: import('./modules/media/videoRepository.js').VideoUi;

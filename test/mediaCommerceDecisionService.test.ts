@@ -1378,6 +1378,14 @@ test("prepare_offer returns callback offer for free media", async () => {
   assert.notEqual(first.token_rows?.[0]?.token, second.token_rows?.[0]?.token);
   assert.equal(first.token_rows?.[1]?.action_kind, "free_scene_unlock");
   assert.equal(first.token_rows?.[1]?.payload_json.action_button_text, "text");
+  assert.equal(first.commerce_capabilities, undefined);
+
+  const capabilities = await service.evaluate(buildRequest({commerce_capabilities_version:1,ui_origin:"active_chat"}));
+  assert.equal(capabilities.commerce_capabilities?.context.origin,"active_chat");
+  assert.equal(capabilities.commerce_capabilities?.controls.photo?.intent,"get");
+  assert.equal(capabilities.commerce_capabilities?.controls.photo?.callback_data,
+    capabilities.token_rows?.find(row=>row.action_kind==="photo_request")?.token);
+
 });
 
 test("prepare_offer does not create or reuse a paid photo invoice before click", async () => {
@@ -3960,6 +3968,7 @@ test("callback photo request returns next media step with neutral photo unlock",
       event_type: "callback_query.received",
       callback_data: "btn_token",
       callback_query_id: "cbq-2",
+      commerce_capabilities_version:1,
     }),
   );
 
@@ -3979,6 +3988,9 @@ test("callback photo request returns next media step with neutral photo unlock",
       ?.payload_json.photo_sku,
     "payment_media_1",
   );
+  assert.equal(result.commerce_capabilities?.controls.photo?.intent,"more");
+  assert.equal(result.commerce_capabilities?.controls.photo?.callback_data,
+    result.token_rows?.find(row=>row.action_kind==="free_photo_unlock")?.token);
   assert.equal(calls.createStarsInvoice, 0);
 });
 
