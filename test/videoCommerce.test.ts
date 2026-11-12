@@ -108,6 +108,8 @@ test('video context creates only callback metadata, with independent open-chat o
   const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
   assert.equal(result.video?.available,true);assert.ok(result.video?.animate_callback_data);assert.ok(result.video?.chat_offer_callback_data);assert.equal(invoices.length,0);
   assert.ok(result.commerce_ui?.actions.video);assert.ok(result.commerce_ui?.actions.scene);
+  assert.deepEqual(result.commerce_ui?.products.map(product=>product.feature_key),
+    ['scene_unlock','video_unlock','video_pass','base','base','full']);
   assert.notEqual(result.commerce_ui.actions.video,result.commerce_ui.actions.scene);
   assert.equal(tokens.get(result.commerce_ui.actions.video!)?.action_kind,'video_request');
   assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.action_kind,'commerce_scene');
@@ -124,6 +126,9 @@ test('no matching video hides animate, Full and pass suppress the extra commerci
       assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.action_kind,'commerce_scene');
     }
     if(override.video===null)assert.equal(result.commerce_ui?.actions.video,undefined);
+    if(override.video===null||override.panel_delivered||override.delivery||override.full_active||override.video_pass_active){
+      assert.equal(result.commerce_ui?.products.some(product=>product.feature_key==='video_unlock'||product.feature_key==='video_pass'),false);
+    }
   }
 });
 test('entitled click freezes video and original panel into a delivery without invoices',async()=>{
@@ -184,14 +189,18 @@ test('animate checkout snapshots the selected video; reveal replaces only known 
   const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
   const markup={inline_keyboard:[[{text:'Next',callback_data:'photo_next'}],[{text:'Video access',callback_data:prepared.video!.chat_offer_callback_data}],[{text:'Animate',callback_data:prepared.video!.animate_callback_data}]]};
   const result=await service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:prepared.video!.animate_callback_data!,raw_update:{callback_query:{message:{reply_markup:markup}}}});
-  assert.deepEqual(result.commerce_ui?.products.map(p=>p.feature_key),['video_unlock','video_pass']);assert.equal(invoices.length,0);
-  const payment=await click(service,result.commerce_ui!.products[0]!.callback_data!);
+  assert.deepEqual(result.commerce_ui?.products.map(p=>p.feature_key),
+    ['scene_unlock','video_unlock','video_pass','base','base','full']);
+  assert.equal(invoices.length,1,'the existing direct one-time video checkout remains the only eager exception');
+  const beforeSelected=invoices.length;
+  const payment=await click(service,result.commerce_ui!.products.find(product=>product.feature_key==='video_unlock')!.callback_data!);
   assert.equal(payment.commerce_ui?.step,'payment');assert.equal(payment.commerce_ui?.payment_options?.length,1);
   const snapshot=(invoices[0] as {payload_json:Record<string,unknown>}).payload_json;
   assert.equal(snapshot.video_id,videoId);assert.equal(snapshot.photo_message_id,77);assert.equal(snapshot.telegram_chat_id,900);
   const back=await click(service,payment.commerce_ui!.actions.back!);
-  assert.deepEqual(back.commerce_ui?.products.map(p=>p.feature_key),['video_unlock','video_pass']);assert.equal(invoices.length,1);
-  const pass=await click(service,back.commerce_ui!.products[1]!.callback_data!);
+  assert.deepEqual(back.commerce_ui?.products.map(p=>p.feature_key),
+    ['scene_unlock','video_unlock','video_pass','base','base','full']);assert.ok(invoices.length>=beforeSelected);
+  const pass=await click(service,back.commerce_ui!.products.find(product=>product.feature_key==='video_pass')!.callback_data!);
   assert.equal(pass.commerce_ui?.payment_options?.[0]?.feature_key,'video_pass');
 });
 test('active Base uses nominal configured SKU and keeps existing subscription conditions',async()=>{
@@ -220,7 +229,8 @@ test('standalone VideoPass reveal retains the animate callback',async()=>{
   const {service,invoices}=setup();const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
   const markup={inline_keyboard:[[{text:'Animate',callback_data:prepared.video!.animate_callback_data}],[{text:'Pass',callback_data:prepared.video!.chat_offer_callback_data}]]};
   const result=await service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:prepared.video!.chat_offer_callback_data!,raw_update:{callback_query:{message:{reply_markup:markup}}}});
-  assert.equal(result.commerce_ui?.step,'scene');assert.deepEqual(result.commerce_ui?.products.map(p=>p.feature_key),['scene_unlock','video_pass','base','base','full']);
+  assert.equal(result.commerce_ui?.step,'scene');assert.deepEqual(result.commerce_ui?.products.map(p=>p.feature_key),
+    ['scene_unlock','video_unlock','video_pass','base','base','full']);
   const subscriptions=result.commerce_ui!.products.filter(p=>p.subscription_tier);
   assert.deepEqual(subscriptions.map(p=>[p.sku,p.subscription_tier,p.duration_days]),[['base','base',7],['base_long','base',60],['full','full',30]]);
   assert.deepEqual(subscriptions[0]?.prices?.map(p=>[p.source,p.amount,p.original_amount]),[['stars',100,100]]);
@@ -267,9 +277,10 @@ test('scene subscription entry prepares the existing offer and returns through a
   assert.equal(menu.operation,'subscription_offer_ready');assert.equal(menu.source,'commerce_subscriptions');
   assert.equal(menu.target_message_id,77);assert.equal(menu.panel_text,'Original panel');
   assert.deepEqual(menu.subscription_offer_items?.map(item=>item.sku),['base','base_long','full']);
-  assert.ok(menu.commerce_ui?.actions.scene);assert.equal(opened.invoices.length,3);
-  const back=await click(opened.service,menu.commerce_ui!.actions.scene!);
-  assert.equal(back.commerce_ui?.step,'scene');assert.ok(back.commerce_ui?.actions.subscriptions);
+  assert.ok(menu.commerce_ui?.actions.back);assert.equal(opened.tokens.get(menu.commerce_ui!.actions.back!)?.action_kind,'commerce_back');
+  assert.equal(opened.invoices.length,3);
+  const back=await click(opened.service,menu.commerce_ui!.actions.back!);
+  assert.equal(back.commerce_ui?.step,'root');assert.ok(back.commerce_ui?.actions.video);assert.ok(back.commerce_ui?.actions.scene);
 
   const upgradeOnly=setup({video:null,subscription_sku:'base_long',subscription_until:'2099-01-01T00:00:00Z'});
   const upgradePanel=await upgradeOnly.service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,
@@ -301,8 +312,17 @@ test('scene offer uses separate upgrade prices, original amount and server-selec
     [['sbp',114,227,'RUB',50],['stars',51,101,'XTR',50]]);
   assert.equal(upgraded.invoices.length,0,'root prices do not create invoice attempts');
   upgraded.setLanguage('en');
-  const selected=await click(upgraded.service,passProduct.callback_data!);
+  const selectedMarkup={inline_keyboard:[[{text:'Legacy URL',url:'https://legacy.example/checkout'}],
+    [{text:'Selected',callback_data:passProduct.callback_data}]]};
+  const selected=await upgraded.service.evaluate({event_type:'callback_query.received',chat_id:1,telegram_chat_id:900,
+    inbound_message_id:77,callback_data:passProduct.callback_data!,raw_update:{callback_query:{from:{id:900},
+      message:{message_id:77,reply_markup:selectedMarkup}}}});
   assert.equal(selected.language,'en');
+  assert.deepEqual(selected.commerce_ui?.return_context.reply_markup,selectedMarkup);
+  assert.equal(selected.commerce_ui?.products.find(product=>product.feature_key==='video_pass')?.callback_data,passProduct.callback_data);
+  for(const product of selected.commerce_ui?.products??[]){
+    if(product.callback_data&&product.callback_data!==passProduct.callback_data)assert.ok(upgraded.tokens.has(product.callback_data));
+  }
   assert.deepEqual(selected.commerce_ui?.products[0]?.prices,passProduct.prices);
   assert.deepEqual([selected.commerce_ui?.products[0]?.amount,selected.commerce_ui?.products[0]?.currency],[51,'XTR']);
   const option=selected.commerce_ui?.payment_options?.find(p=>p.source==='stars');
