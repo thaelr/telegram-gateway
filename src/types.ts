@@ -178,6 +178,7 @@ export interface AccessContext {
   active_scene_session_id: string | null;
   active_scene_exists: boolean;
   scene_access_active: boolean;
+  video_pass_active: boolean;
   free_fast_scene_skips: number;
   free_scene_unlocks: number;
   free_photo_unlocks: number;

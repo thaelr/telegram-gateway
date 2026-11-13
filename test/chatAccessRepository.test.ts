@@ -84,6 +84,7 @@ function buildAccessContext(overrides: Partial<AccessContext> = {}): AccessConte
     active_scene_session_id: null,
     active_scene_exists: false,
     scene_access_active: false,
+    video_pass_active: false,
     free_fast_scene_skips: 0,
     free_scene_unlocks: 0,
     free_photo_unlocks: 0,

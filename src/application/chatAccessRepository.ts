@@ -27,6 +27,7 @@ type AccessContextRow = {
   active_scene_session_id: string | null;
   active_scene_exists: boolean;
   scene_access_active: boolean;
+  video_pass_active: boolean;
   turns_today: number;
   scene_turn_no: number;
   selected_character_i: number | null;
@@ -326,11 +327,14 @@ export class ChatAccessRepository {
       active_scene AS (
         SELECT
           css.scene_session_id,
-          (SELECT e.scene_access_active FROM app_private.scene_entitlements(css.chat_id,css.scene_session_id) e) AS scene_access_active
+          entitlements.scene_access_active,
+          entitlements.video_pass_active
         FROM public.chat_scene_sessions css
         JOIN target t
           ON css.chat_id = t.chat_id
          AND css.scene_session_id = t.active_scene_session_id
+        LEFT JOIN LATERAL app_private.scene_entitlements(css.chat_id, css.scene_session_id) entitlements
+          ON TRUE
         LIMIT 1
       )
       SELECT
@@ -361,6 +365,7 @@ export class ChatAccessRepository {
         CASE WHEN t.user_id = account.user_id THEN t.active_scene_session_id ELSE NULL END AS active_scene_session_id,
         (t.user_id = account.user_id AND active_scene.scene_session_id IS NOT NULL) AS active_scene_exists,
         (t.user_id = account.user_id AND COALESCE(active_scene.scene_access_active, FALSE)) AS scene_access_active,
+        (t.user_id = account.user_id AND COALESCE(active_scene.video_pass_active, FALSE)) AS video_pass_active,
         0 AS turns_today,
         CASE WHEN t.user_id = account.user_id THEN t.scene_turn_no ELSE -1 END AS scene_turn_no,
         ${routing.selected_character_i}::smallint AS selected_character_i,

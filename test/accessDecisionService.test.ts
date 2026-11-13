@@ -164,6 +164,7 @@ function buildAccessContext(
     active_scene_session_id: null,
     active_scene_exists: false,
     scene_access_active: false,
+    video_pass_active: false,
     free_fast_scene_skips: 0,
     free_scene_unlocks: 0,
     free_photo_unlocks: 0,
@@ -813,6 +814,65 @@ test("returns subscription status for /subscription with active subscription", a
   assert.equal(result.decision, "show_subscription_status");
   assert.equal(result.allowed, true);
   assert.equal(result.text, "Gifts:\n• 2 photos\n\ntext");
+});
+
+test("returns the Full upgrade offer only for an eligible active base subscription", async () => {
+  const previousVideoEnabled = config.MEDIA_VIDEO_ENABLED;
+  const previousPlans = config.MEDIA_SUBSCRIPTION_PLANS_JSON;
+  config.MEDIA_VIDEO_ENABLED = true;
+  config.MEDIA_SUBSCRIPTION_PLANS_JSON = [
+    {
+      sku: "base_plan",
+      days: 14,
+      tier: "base",
+      amount_xtr: 200,
+      title: "Base",
+      description: "Base",
+      label: "Base",
+      button_text: "Base",
+    },
+    {
+      sku: "full_plan",
+      days: 30,
+      tier: "full",
+      amount_xtr: 500,
+      title: "Full",
+      description: "Full",
+      label: "Full",
+      button_text: "Full",
+    },
+  ];
+
+  try {
+    const request = buildRequest({
+      command: "/subscription",
+      event_type: "command.received",
+      message_type: "command",
+    });
+    const base = await createService(buildAccessContext({
+      subscription_active: true,
+      subscription_sku: "base_plan",
+    })).service.evaluate(request);
+    assert.equal(base.action, "show_subscription_offer");
+    assert.equal(base.reason, "subscription_upgrade_available");
+    assert.equal(base.subscription_offer_reason, "subscription_command");
+
+    const full = await createService(buildAccessContext({
+      subscription_active: true,
+      subscription_sku: "full_plan",
+    })).service.evaluate(request);
+    assert.equal(full.action, "show_subscription_status");
+
+    const videoPass = await createService(buildAccessContext({
+      subscription_active: true,
+      subscription_sku: "base_plan",
+      video_pass_active: true,
+    })).service.evaluate(request);
+    assert.equal(videoPass.action, "show_subscription_status");
+  } finally {
+    config.MEDIA_VIDEO_ENABLED = previousVideoEnabled;
+    config.MEDIA_SUBSCRIPTION_PLANS_JSON = previousPlans;
+  }
 });
 
 test("formats 14-day subscription plan from sku even when 4 days are left", async () => {

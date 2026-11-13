@@ -18,12 +18,32 @@ import type {
   RouterDomain,
   RouterIntent,
 } from "../types.js";
+import { calculateFullUpgrade, resolveSubscriptionPlans } from "../modules/products/plans.js";
 
 const START_COMMAND = "/start";
 const MENU_COMMAND = "/menu";
 const SUBSCRIPTION_COMMAND = "/subscription";
 const PAYSUPPORT_COMMAND = "/paysupport";
 const LANGUAGE_COMMAND = "/language";
+
+function hasAvailableFullUpgrade(context: AccessContext): boolean {
+  if (!config.MEDIA_VIDEO_ENABLED || context.video_pass_active) return false;
+  const nominal = config.MEDIA_SUBSCRIPTION_PLANS_JSON.find(
+    (plan) => plan.sku === context.subscription_sku,
+  );
+  if (!nominal || nominal.tier === "full") return false;
+  return resolveSubscriptionPlans()
+    .filter((plan) => plan.tier === "full")
+    .some((plan) => {
+      const quote = calculateFullUpgrade(
+        plan,
+        nominal,
+        config.MEDIA_UPGRADE_DISCOUNT_PERCENT,
+      );
+      return quote.amount_xtr > 0
+        || (config.SBP_ENABLED && quote.amount_rub != null && quote.amount_rub > 0);
+    });
+}
 
 const ACCESS_CONTEXT_INTENTS = new Set<RouterIntent>([
   "scene_start",
@@ -901,6 +921,17 @@ export class AccessDecisionService {
 
     if (classification.intent === "subscription") {
       if (accessContext.subscription_active) {
+        if (hasAvailableFullUpgrade(accessContext)) {
+          return attachDismissedSubscriptionOffer({
+            ...resolvedPassthrough,
+            ...contextFields,
+            decision: "show_subscription_offer",
+            action: "show_subscription_offer",
+            allowed: true,
+            subscription_offer_reason: "subscription_command",
+            reason: "subscription_upgrade_available",
+          });
+        }
         return attachDismissedSubscriptionOffer({
           ...resolvedPassthrough,
           ...contextFields,
