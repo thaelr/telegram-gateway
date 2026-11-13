@@ -459,10 +459,11 @@ export class MediaCommerceDecisionService {
           const photo = {...response, current_uuid:input.selected_uuid, target_message_id:panel};
           const context = await this.loadVideoContext(photo);
           const keyboard = parseJsonObject(input.current_reply_markup)?.inline_keyboard;
-          const controls = new Set(context.video_control_tokens ?? []);
+          const videoTokens = new Set(context.video_control_tokens ?? []);
           const alreadyDecorated = Array.isArray(keyboard) && keyboard.flat().some(button => {
             const token = parseJsonObject(button)?.callback_data;
-            return typeof token === 'string' && controls.has(token);
+            return typeof token === 'string' && (videoTokens.has(token) ||
+              (input.commerce_capabilities_version === 1 && /^ui:video:btn_[0-9a-f]{32}$/.test(token)));
           });
           if (context.video && context.scene_active && !context.panel_delivered && !context.delivery && !alreadyDecorated) {
             const root:CommerceUi['return_context']={message_id:panel,kind:'photo',text:photo.caption_text??photo.panel_text,
@@ -796,10 +797,9 @@ original_amount:opt.original_amount,currency:opt.currency,prices:paymentOptionPr
       if(entry?.found&&entry.token&&entry.payload_json&&entry.status==='active'&&!isExpired(entry.expires_at)&&
         entry.scene_session_id===base.scene_session_id)tokenRows.push({...entry,kind:'button_callback',payload_json:entry.payload_json} as InteractionTokenRow);
     }
-    const restoredRoot={...root,reply_markup:snap.root_markup??root.reply_markup};
-    const authorized=await this.allowRootButtons(restoredRoot,receipts,base);
-    return this.commerceRoot({...base,caption_text:restoredRoot.text,current_uuid:typeof snap.source_photo==='string'?snap.source_photo:base.current_uuid,
-      subscription_offer_items:subs,token_rows:tokenRows,subscription_invoice_tokens:receipts as string[]},surface,ctx,restoredRoot,authorized);
+    const authorized=await this.allowRootButtons(root,receipts,base);
+    return this.commerceRoot({...base,caption_text:root.text,current_uuid:typeof snap.source_photo==='string'?snap.source_photo:base.current_uuid,
+      subscription_offer_items:subs,token_rows:tokenRows,subscription_invoice_tokens:receipts as string[]},surface,ctx,root,authorized);
   }
 
   private async commerceCallback(base:MediaCommerceDecisionResponse, payload:Record<string,unknown>, action:string, input:MediaCommerceDecisionRequest) {
@@ -838,8 +838,12 @@ base={
     if(photo && (ctx?.panel_photo_uuid && uuid!==ctx.panel_photo_uuid || ctx?.panel_media_signature && ctx.panel_media_signature!==signature))return stale();
     if(!account && action!=='commerce_back' && !photo && signature && offer.media_signature && offer.media_signature!==signature)return stale();
     const rootText=typeof payload.root_text==='string'?payload.root_text:base.panel_text??null;
-    const currentReplyMarkup=message?.reply_markup??base.current_reply_markup;
-    const rootReplyMarkup=payload.root_markup??currentReplyMarkup;
+    const currentReplyMarkup=message?.reply_markup??base.current_reply_markup??null;
+    const useSubscriptionSnapshot=action==='commerce_account_pay'||
+      (action==='commerce_back'&&payload.from_subscriptions===true);
+    const rootReplyMarkup=useSubscriptionSnapshot
+      ? payload.root_markup??currentReplyMarkup
+      : currentReplyMarkup??payload.root_markup;
     const root:CommerceUi['return_context']={message_id:messageId,kind:surface==='subscription'||surface==='daily_messages'?'subscription':'photo',
       text:rootText,entities:Array.isArray(payload.root_entities)?payload.root_entities:[],
       reply_markup:action==='commerce_pay'?currentReplyMarkup:rootReplyMarkup};
@@ -853,7 +857,7 @@ base={
   user_id:offer.user_id,
   media_signature:signature??offer.media_signature??null,source_photo:uuid};
     if(action==='commerce_subscriptions'){
-      const back=this.videoToken(base,'commerce_back',{...snap,back_step:'root'});
+      const back=this.videoToken(base,'commerce_back',{...snap,back_step:'root',from_subscriptions:true});
       await this.repository.upsertCallbackTokens([back]);
       const prepared=await this.evaluateSubscriptionOffer({
         ...input,
@@ -900,7 +904,8 @@ base={
     const stage=action==='commerce_ui_refresh'?'root':action==='commerce_back'?payload.back_step:action==='commerce_account_pay'||action==='commerce_photo_pay'?'existing':action==='commerce_pay'?payload.product_step:
       action==='video_request'?'video':'scene';
     if(stage==='existing'){
-      const back=this.videoToken(base,'commerce_back',{...snap,back_step:'root',photo_token:payload.photo_token??null});
+      const back=this.videoToken(base,'commerce_back',{...snap,back_step:'root',photo_token:payload.photo_token??null,
+        from_subscriptions:action==='commerce_account_pay'});
       let options:MediaPaymentOption[];
       let sku=typeof payload.sku==='string'?payload.sku:'';
       let key='base';

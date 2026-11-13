@@ -15,6 +15,7 @@ import type {
   StoredInvoiceToken,
 } from "../src/mediaCommerceTypes.js";
 import type { MediaCommerceDecisionRequest } from "../src/mediaCommerce/requestSchema.js";
+import type { VideoContext } from "../src/modules/media/videoRepository.js";
 import { installTestEnv, testTelegramUxCopy } from "./testEnv.js";
 
 installTestEnv();
@@ -120,6 +121,8 @@ const {
   buildAssignment,
   loadExperimentConfigsFromEnv,
 } = await import("../src/modules/experiments/abTesting.js");
+
+type VideoRepository = NonNullable<ConstructorParameters<typeof MediaCommerceDecisionService>[3]>;
 
 function withTestMediaLocalization<T>(execute: () => T): T {
   return runWithMediaLocalization({
@@ -663,6 +666,45 @@ function buildRequest(
   };
 }
 
+function buildVideoContext(
+  overrides: Partial<VideoContext> = {},
+): VideoContext {
+  return {
+    video: null,
+    full_active: false,
+    video_pass_active: false,
+    subscription_sku: null,
+    subscription_until: null,
+    panel_delivered: false,
+    scene_active: true,
+    delivery: null,
+    ...overrides,
+  };
+}
+
+function buildVideoRepository(
+  context: VideoContext,
+  overrides: Partial<VideoRepository> = {},
+): VideoRepository {
+  return {
+    async context() { return context; },
+    async passOfferContext() {
+      return {
+        scene_session_id: "scene-1",
+        user_id: "owner-1",
+        available: Boolean(context.video) && !context.panel_delivered,
+        scene_access_active: false,
+        paid_scene_unlock_token: null,
+        subscription_active: false,
+        full_active: context.full_active,
+        video_pass_active: context.video_pass_active,
+      };
+    },
+    async storePanel() { return { panel_delivered: false }; },
+    ...overrides,
+  } as unknown as VideoRepository;
+}
+
 function buildSbpSubscriptionPayload(
   offerId = "telegram:offer-1",
   sku = "payment_plan_2",
@@ -782,6 +824,7 @@ function createRepository(
   } | null = {
     async getTelegramCopy() { return testTelegramUxCopy; },
   },
+  videos?: VideoRepository,
 ) {
   const calls = {
     loadMediaContext: 0,
@@ -1288,7 +1331,7 @@ function createRepository(
       repository,
       starsClient,
       sbpClient,
-      undefined,
+      videos,
       undefined,
       localization,
     ),
@@ -7710,6 +7753,311 @@ test("free photo finalization uses the dedicated token-bound fulfillment path", 
     uuid: "u2",
     panel_message_id: 555,
   });
+});
+
+test("GATEWAY-PHOTO-01 keeps an already decorated v1 photo panel after finalization", async (t) => {
+  const previousVideoEnabled = config.MEDIA_VIDEO_ENABLED;
+  config.MEDIA_VIDEO_ENABLED = true;
+  t.after(() => { config.MEDIA_VIDEO_ENABLED = previousVideoEnabled; });
+  const photoToken = "photo-current";
+  const videoToken = `ui:video:btn_${"a".repeat(32)}`;
+  const replyMarkup = { inline_keyboard: [
+    [{ text: "More photo", callback_data: photoToken }],
+    [{ text: "Video", callback_data: videoToken }],
+  ] };
+  const context = buildVideoContext({
+    video: {
+      video_id: "00000000-0000-4000-8000-000000000001",
+      bucket_name: "videos",
+      storage_path: "one.mp4",
+      requested_photo_uuid: "u2",
+      source_photo_uuid: "u2",
+      media_signature: "hotel_corridor_close",
+      source_photo_bucket_name: "photos",
+      source_photo_storage_path: "u2.jpg",
+    },
+  });
+  let storePanelCalls = 0;
+  let contextCalls = 0;
+  let tokenWrites = 0;
+  const videos = buildVideoRepository(context, {
+    async storePanel() {
+      storePanelCalls += 1;
+      return { panel_delivered: false };
+    },
+    async context() {
+      contextCalls += 1;
+      return context;
+    },
+  });
+  const { service } = createRepository({
+    async upsertCallbackTokens(rows) {
+      tokenWrites += rows.length;
+      return rows.length;
+    },
+  }, {}, {}, undefined, videos);
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: "finalize_photo_event",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    log_event_type: "media.photo.unlocked.paid",
+    selected_uuid: "u2",
+    panel_message_id: 555,
+    log_price_xtr: 10,
+    access_mode: "paid",
+    action_kind: "photo_payment",
+    fulfillment_invoice_token: "inv_payload",
+    price_required: 10,
+    current_reply_markup: replyMarkup,
+    commerce_capabilities_version: 1,
+  }));
+
+  assert.equal(result.operation, "photo_event_stored");
+  assert.equal(storePanelCalls, 1);
+  assert.equal(contextCalls, 1);
+  assert.equal(tokenWrites, 0);
+  assert.equal(result.video_panel_reconcile, undefined);
+  assert.equal(result.commerce_capabilities, undefined);
+  assert.equal(replyMarkup.inline_keyboard[0]?.[0]?.callback_data, photoToken);
+});
+
+test("GATEWAY-PHOTO-02 decorates a photo when video becomes available after receipt", async (t) => {
+  const previousVideoEnabled = config.MEDIA_VIDEO_ENABLED;
+  config.MEDIA_VIDEO_ENABLED = true;
+  t.after(() => { config.MEDIA_VIDEO_ENABLED = previousVideoEnabled; });
+  const currentPhoto = "photo-current";
+  const stalePhoto = "photo-stale";
+  const context = buildVideoContext({
+    video: {
+      video_id: "00000000-0000-4000-8000-000000000002",
+      bucket_name: "videos",
+      storage_path: "two.mp4",
+      requested_photo_uuid: "u2",
+      source_photo_uuid: "u2",
+      media_signature: "hotel_corridor_close",
+      source_photo_bucket_name: "photos",
+      source_photo_storage_path: "u2.jpg",
+    },
+    panel_photo_uuid: "u2",
+    panel_media_signature: "hotel_corridor_close",
+  });
+  const callback = (token: string, active = true) => buildLoadedCallbackToken({
+    requested_token: token,
+    token,
+    action_kind: "photo_regen",
+    status: active ? "active" : "fulfilled",
+    payload_json: {
+      action_kind: "photo_regen",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      target_message_id: 555,
+      current_uuid: "u2",
+      requested_action: "photo_regen",
+    },
+  });
+  const videos = buildVideoRepository(context);
+  const { service } = createRepository({
+    async loadCallbackToken(token, chatId) {
+      assert.equal(chatId, 101);
+      if (token === currentPhoto) return callback(token);
+      if (token === stalePhoto) return callback(token, false);
+      return null;
+    },
+  }, {}, {}, undefined, videos);
+  const replyMarkup = { inline_keyboard: [[
+    { text: "More photo", callback_data: currentPhoto },
+    { text: "Old photo", callback_data: stalePhoto },
+  ]] };
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: "finalize_photo_event",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    scene_turn_no: 3,
+    log_event_type: "media.photo.unlocked.paid",
+    selected_uuid: "u2",
+    panel_message_id: 555,
+    telegram_chat_id: 900,
+    log_price_xtr: 10,
+    access_mode: "paid",
+    action_kind: "photo_payment",
+    fulfillment_invoice_token: "inv_payload",
+    price_required: 10,
+    current_reply_markup: replyMarkup,
+    commerce_capabilities_version: 1,
+    ui_origin: "media_panel",
+  }));
+
+  assert.equal(result.operation, "photo_event_stored");
+  assert.equal(result.video_panel_reconcile, true);
+  assert.equal(result.commerce_capabilities?.controls.photo?.callback_data, currentPhoto);
+  assert.ok(result.commerce_capabilities?.controls.video_request);
+  assert.deepEqual(result.commerce_ui?.return_context?.allowed_callback_data, [currentPhoto]);
+  assert.equal(result.commerce_ui?.return_context?.allowed_callback_data?.includes(stalePhoto), false);
+});
+
+test("GATEWAY-ROOT-01 normal navigation prefers the current Telegram photo markup", async (t) => {
+  const previousVideoEnabled = config.MEDIA_VIDEO_ENABLED;
+  config.MEDIA_VIDEO_ENABLED = true;
+  t.after(() => { config.MEDIA_VIDEO_ENABLED = previousVideoEnabled; });
+  const refreshToken = "root-refresh";
+  const currentPhoto = "photo-current";
+  const stalePhoto = "photo-stale";
+  const currentMarkup = { inline_keyboard: [[{ text: "Current", callback_data: currentPhoto }]] };
+  const staleMarkup = { inline_keyboard: [[{ text: "Stale", callback_data: stalePhoto }]] };
+  const payload = {
+    action_kind: "commerce_ui_refresh",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    target_message_id: 555,
+    telegram_chat_id: 900,
+    surface: "photo",
+    opened_photo: true,
+    source_photo: "u2",
+    media_signature: "hotel_corridor_close",
+    root_markup: staleMarkup,
+    photo_token: currentPhoto,
+    commerce_capabilities_version: 1,
+    ui_origin: "media_panel",
+    user_id: "owner-1",
+  };
+  const loaded = (token: string, action: string, rowPayload: Record<string, unknown>) => buildLoadedCallbackToken({
+    requested_token: token,
+    token,
+    action_kind: action,
+    payload_json: rowPayload,
+  });
+  const loadedTokens: string[] = [];
+  const videos = buildVideoRepository(buildVideoContext({
+    panel_photo_uuid: "u2",
+    panel_media_signature: "hotel_corridor_close",
+  }));
+  const { service } = createRepository({
+    async loadCallbackToken(token) {
+      if (!token) return null;
+      loadedTokens.push(token);
+      if (token === refreshToken) return loaded(token, "commerce_ui_refresh", payload);
+      if (token === currentPhoto) return loaded(token, "photo_regen", {
+        action_kind: "photo_regen",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        target_message_id: 555,
+        current_uuid: "u2",
+        requested_action: "photo_regen",
+      });
+      if (token === stalePhoto) return loaded(token, "photo_request", {
+        action_kind: "photo_request",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        target_message_id: 555,
+      });
+      return null;
+    },
+  }, {}, {}, undefined, videos);
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: refreshToken,
+    callback_query_id: "cb-root",
+    inbound_message_id: 555,
+    telegram_chat_id: 900,
+    raw_update: { callback_query: {
+      from: { id: 900 },
+      message: { message_id: 555, reply_markup: currentMarkup },
+    } },
+  }));
+
+  assert.equal(result.operation, "video_ui_ready");
+  assert.equal(result.commerce_capabilities?.controls.photo?.callback_data, currentPhoto);
+  assert.deepEqual(result.commerce_ui?.return_context?.reply_markup, currentMarkup);
+  assert.deepEqual(result.commerce_ui?.return_context?.allowed_callback_data, [currentPhoto]);
+  assert.equal(loadedTokens.includes(stalePhoto), false);
+});
+
+test("GATEWAY-BACK-01 embedded subscriptions restore only the authorized photo snapshot", async (t) => {
+  const previousVideoEnabled = config.MEDIA_VIDEO_ENABLED;
+  config.MEDIA_VIDEO_ENABLED = true;
+  t.after(() => { config.MEDIA_VIDEO_ENABLED = previousVideoEnabled; });
+  const backToken = "subscriptions-back";
+  const currentPhoto = "photo-current";
+  const revokedPhoto = "photo-revoked";
+  const subscriptionMarkup = { inline_keyboard: [[{ text: "Back", callback_data: backToken }]] };
+  const rootMarkup = { inline_keyboard: [
+    [{ text: "Current", callback_data: currentPhoto }],
+    [{ text: "Revoked", callback_data: revokedPhoto }],
+    [{ text: "Old checkout", url: "https://checkout.example/stale" }],
+  ] };
+  const payload = {
+    action_kind: "commerce_back",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    target_message_id: 555,
+    telegram_chat_id: 900,
+    surface: "photo",
+    opened_photo: true,
+    source_photo: "u2",
+    media_signature: "hotel_corridor_close",
+    root_markup: rootMarkup,
+    photo_token: currentPhoto,
+    back_step: "root",
+    from_subscriptions: true,
+    commerce_capabilities_version: 1,
+    ui_origin: "media_panel",
+    user_id: "owner-1",
+  };
+  const callback = (token: string, action: string, status: "active" | "fulfilled", rowPayload: Record<string, unknown>) =>
+    buildLoadedCallbackToken({ requested_token: token, token, action_kind: action, status, payload_json: rowPayload });
+  const videos = buildVideoRepository(buildVideoContext({
+    panel_photo_uuid: "u2",
+    panel_media_signature: "hotel_corridor_close",
+  }));
+  const { service } = createRepository({
+    async loadCallbackToken(token) {
+      if (token === backToken) return callback(token, "commerce_back", "active", payload);
+      if (token === currentPhoto) return callback(token, "photo_regen", "active", {
+        action_kind: "photo_regen",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        target_message_id: 555,
+        current_uuid: "u2",
+        requested_action: "photo_regen",
+      });
+      if (token === revokedPhoto) return callback(token, "photo_regen", "fulfilled", {
+        action_kind: "photo_regen",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        target_message_id: 555,
+      });
+      return null;
+    },
+  }, {}, {}, undefined, videos);
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: backToken,
+    callback_query_id: "cb-back",
+    inbound_message_id: 555,
+    telegram_chat_id: 900,
+    raw_update: { callback_query: {
+      from: { id: 900 },
+      message: { message_id: 555, reply_markup: subscriptionMarkup },
+    } },
+  }));
+
+  assert.equal(result.operation, "video_ui_ready");
+  assert.equal(result.target_message_id, 555);
+  assert.equal(result.scene_session_id, "scene-1");
+  assert.equal(result.commerce_capabilities?.controls.photo?.callback_data, currentPhoto);
+  assert.deepEqual(result.commerce_ui?.return_context?.reply_markup, rootMarkup);
+  assert.deepEqual(result.commerce_ui?.return_context?.allowed_callback_data, [currentPhoto]);
+  assert.deepEqual(result.commerce_ui?.return_context?.allowed_urls, []);
+  assert.equal(result.commerce_ui?.return_context?.allowed_callback_data?.includes(revokedPhoto), false);
 });
 
 test("finalize_offer stores panel_text for photo caption persistence", async () => {
