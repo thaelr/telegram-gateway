@@ -8094,6 +8094,12 @@ test("GATEWAY-ROOT-01 normal navigation prefers the current Telegram photo marku
     panel_photo_uuid: "u2",
     panel_media_signature: "hotel_corridor_close",
   }));
+  let offerReads=0;
+  const originalOffer=videos.passOfferContext.bind(videos);
+  videos.passOfferContext=async (...args) => {
+    offerReads++;
+    return originalOffer(...args);
+  };
   const { service } = createRepository({
     async loadCallbackToken(token) {
       if (!token) return null;
@@ -8135,6 +8141,7 @@ test("GATEWAY-ROOT-01 normal navigation prefers the current Telegram photo marku
   assert.deepEqual(result.commerce_ui?.return_context?.reply_markup, currentMarkup);
   assert.deepEqual(result.commerce_ui?.return_context?.allowed_callback_data, [currentPhoto]);
   assert.equal(loadedTokens.includes(stalePhoto), false);
+  assert.equal(offerReads, 1, 'ROOT must reuse the already-authorized offer');
 });
 
 test("GATEWAY-BACK-01 embedded subscriptions restore only the authorized photo snapshot", async (t) => {
@@ -8174,6 +8181,12 @@ test("GATEWAY-BACK-01 embedded subscriptions restore only the authorized photo s
     panel_photo_uuid: "u2",
     panel_media_signature: "hotel_corridor_close",
   }));
+  let offerReads=0;
+  const originalOffer=videos.passOfferContext.bind(videos);
+  videos.passOfferContext=async (...args) => {
+    offerReads++;
+    return originalOffer(...args);
+  };
   const { service } = createRepository({
     async loadCallbackToken(token) {
       if (token === backToken) return callback(token, "commerce_back", "active", payload);
@@ -8216,6 +8229,7 @@ test("GATEWAY-BACK-01 embedded subscriptions restore only the authorized photo s
   assert.deepEqual(result.commerce_ui?.return_context?.allowed_callback_data, [currentPhoto]);
   assert.deepEqual(result.commerce_ui?.return_context?.allowed_urls, []);
   assert.equal(result.commerce_ui?.return_context?.allowed_callback_data?.includes(revokedPhoto), false);
+  assert.equal(offerReads, 1, 'BACK must reuse the already-authorized offer');
 });
 
 test("GATEWAY-DUP-01 excludes a superseded primary PHOTO callback without dropping navigation", async (t) => {

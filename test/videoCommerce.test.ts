@@ -55,6 +55,26 @@ function setup(overrides:Partial<VideoContext>={}, paidSceneUnlockToken: string 
     async upsertInvoiceToken(row:Record<string,unknown>){invoices.push(row);return {...row,stored:true,status:'invoice_sent',invoice_link:'https://pay.test/'+row.token};},
     async upsertCallbackTokens(rows:InteractionTokenRow[]){rows.forEach(row=>tokens.set(row.token,row));return rows.length;},
     async loadCallbackToken(token:string){const row=tokens.get(token);return row ? {...row,found:true,requested_token:token} : null;},
+    async loadCallbackTokens(ids:string[]) {
+      return ids.map(token => {
+        const row = tokens.get(token);
+        return row
+          ? {...row, found:true, requested_token:token}
+          : {
+              requested_token:token,
+              token:null,
+              kind:null,
+              chat_id:null,
+              scene_session_id:null,
+              turn_no:null,
+              payload_json:null,
+              status:null,
+              action_kind:null,
+              expires_at:null,
+              found:false
+            };
+      });
+    },
     async loadMediaContext(){return {unlocked_items_json:[{uuid:photoId,photo_url:'https://private.test/photo'}]};},
     async loadPhotoByUuid(){return {photo_url:'https://private.test/photo'};},
     async upsertInvoiceTokens(rows:Record<string,unknown>[]){invoices.push(...rows);return rows.map(row=>({...row,stored:true,status:'invoice_sent',invoice_link:`https://pay.test/${row.token}`,checkout_url:`https://pay.test/${row.token}`}));},
