@@ -675,6 +675,7 @@ currency:price.currency,prices,...(token?{callback_data:token}:{}),
   scene_token:sceneEntry?.token??null,
   selected_payment_source:base.selected_payment_source??null,
   payment_source_toggle_tokens:base.payment_source_toggle_tokens??null,
+  ...(base.commerce_capabilities_version===1?{commerce_capabilities_version:1,ui_origin:base.ui_origin??null}:{}),
   user_id:offer.user_id,media_signature:base.media_signature??offer.media_signature??null,source_photo:base.current_uuid??base.selected_uuid??null};
     const rows:InteractionTokenRow[]=sceneEntry && sceneEntry!==oldEntry?[sceneEntry]:[];
     const actions:CommerceUi['actions']={};
@@ -773,6 +774,43 @@ original_amount:opt.original_amount,currency:opt.currency,prices:paymentOptionPr
       const refresh=panel?this.videoToken(base,'commerce_ui_refresh',capabilitySnap):null;
       if(refresh)capabilityRows.push(refresh);
       capabilities=this.commerceCapabilities(base,surface,panel,capabilityProducts,actions,authorizedRows,refresh?.token,subscriptions);
+      if (
+        photo &&
+        root &&
+        Array.isArray(root.allowed_callback_data)
+      ) {
+        const paidPhoto = capabilities.products.find(
+          product =>
+            product.feature_key === 'photo_unlock' &&
+            product.callback_data
+        );
+
+        const currentPhotoToken =
+          paidPhoto?.callback_data ??
+          capabilities.controls.bonus_photo ??
+          capabilities.controls.photo?.callback_data;
+
+        const primaryPhotoKinds = new Set([
+          'photo_request',
+          'photo_regen',
+          'free_photo_unlock',
+        ]);
+
+        const supersededTokens = new Set(
+          authorizedRows
+            .filter(row =>
+              row.action_kind != null &&
+              primaryPhotoKinds.has(row.action_kind) &&
+              row.token !== currentPhotoToken
+            )
+            .map(row => row.token)
+        );
+
+        root.allowed_callback_data =
+          root.allowed_callback_data.filter(
+            token => !supersededTokens.has(token)
+          );
+      }
       rows.push(...capabilityRows);
     }
     if(rows.length)await this.repository.upsertCallbackTokens(rows);
@@ -1029,7 +1067,8 @@ base={
       ui.step='payment';ui.payment_options=options;ui.payment_origin_step=stage;
       await this.repository.upsertCallbackTokens(rows);
     }else await this.repository.upsertCallbackTokens(rows);
-    const result={...base,operation:'video_ui_ready' as const,commerce_ui:ui,reason:'commerce_'+ui.step};
+    const result={...base,operation:'video_ui_ready' as const,commerce_ui:ui,reason:'commerce_'+ui.step,
+      ...(action==='commerce_scene'?{ui_intent:'chat' as const}:{})};
     if(base.commerce_capabilities_version!==1)return result;
     const projected=await this.restoredCommerceRoot(base,surface,ctx,root,snap);
     const capabilities=projected.commerce_capabilities;
@@ -1053,7 +1092,7 @@ base={
       if(!stored?.found || stored.status!=='active' || isExpired(stored.expires_at) || Number(stored.chat_id)!==base.chat_id ||
         (stored.scene_session_id && stored.scene_session_id!==base.scene_session_id) ||
         (stored.payload_json?.target_message_id != null && Number(stored.payload_json.target_message_id)!==root.message_id) ||
-        ['video_request','video_pass_options','commerce_scene','commerce_pay','commerce_back','commerce_account_pay','commerce_photo_pay','commerce_ui_refresh'].includes(stored.action_kind??''))continue;
+        ['video_request','video_pass_options','commerce_scene','commerce_pay','commerce_back','commerce_account_pay','commerce_photo_pay','commerce_subscriptions','commerce_ui_refresh'].includes(stored.action_kind??''))continue;
       if(stored.action_kind==='free_scene_unlock' && !(Number((await this.repository.loadFreeCredits(base.chat_id!))?.free_scene_unlocks)>0))continue;
       allowed.push(token);
       if(stored.token&&stored.payload_json&&stored.action_kind)authorized.push({token:stored.token,kind:'button_callback',chat_id:Number(stored.chat_id),
@@ -1199,7 +1238,8 @@ base={
       return deliveryResponse(frozen,await this.videos.prepareDelivery({request_key:`video:${base.callback_data}`,
         chat_id:frozen.chat_id!,scene_session_id:frozen.scene_session_id ?? null,video_id:context.video!.video_id,
         photo_message_id:targetMessageId,telegram_chat_id:frozen.telegram_chat_id,source:'telegram',
-        requested_photo_uuid:context.video!.requested_photo_uuid,panel_caption:frozen.caption_text ?? frozen.panel_text,
+        requested_photo_uuid:context.video!.requested_photo_uuid,media_signature:frozen.media_signature,
+        panel_caption:frozen.caption_text ?? frozen.panel_text,
         panel_caption_entities:(frozen.caption_entities_json ?? frozen.panel_entities_json ?? []) as unknown[]}));
     }
     const unlock = resolveActionPlanByFeatureKey('video_unlock');
@@ -1209,6 +1249,7 @@ base={
       : createHash('sha256').update([frozen.chat_id,frozen.scene_session_id,targetMessageId,context.video?.video_id ?? 'pass'].join(':')).digest('hex').slice(0,24);
     const snapshot = {chat_id:frozen.chat_id,scene_session_id:frozen.scene_session_id,character_i:context.character_i ?? frozen.character_i,
       media_signature:frozen.media_signature,video_id:passOnly ? null : context.video?.video_id,
+      video_media_signature:passOnly ? null : context.video?.media_signature,
       photo_message_id:passOnly ? null : targetMessageId,target_message_id:targetMessageId,
       telegram_chat_id:frozen.telegram_chat_id,source:'telegram',current_uuid:frozen.current_uuid,
       requested_photo_uuid:passOnly ? null : context.video?.requested_photo_uuid,
@@ -2321,7 +2362,7 @@ if (sceneEntryRows.length) {
   await this.repository.upsertCallbackTokens(sceneEntryRows);
 }
 
-    return {
+    const result: MediaCommerceDecisionResponse = {
       ...base,
       operation: "subscription_offer_ready",
       callback_valid: true,
@@ -2343,6 +2384,120 @@ token_rows_prepared: sceneEntryRows.length,
           | null,
       payment_ui: buildPaymentUiCopy(),
       reason: "subscription_payment_source_toggled",
+    };
+    return this.restoreEmbeddedSubscriptionContext(result, base);
+  }
+
+  /**
+   * A payment-source toggle inside embedded subscriptions rebuilds the offer,
+   * so it must also rebuild the embedded UI contract. Otherwise the renderer
+   * receives a standalone subscription screen and loses BACK.
+   */
+  private async restoreEmbeddedSubscriptionContext(
+    result: MediaCommerceDecisionResponse,
+    base: MediaCommerceDecisionResponse,
+  ): Promise<MediaCommerceDecisionResponse> {
+    if (
+      base.commerce_capabilities_version !== 1
+      || base.source !== "commerce_subscriptions"
+      || !base.chat_id
+    ) {
+      return result;
+    }
+    const messageId = base.target_message_id ?? base.panel_message_id ?? null;
+    const markup = parseJsonObject(base.current_reply_markup);
+    const buttons = Array.isArray(markup?.inline_keyboard)
+      ? (markup.inline_keyboard as unknown[]).flatMap((row) =>
+        Array.isArray(row) ? row : [])
+      : [];
+    let back: { token: string; payload: Record<string, unknown> } | null = null;
+    for (const button of buttons) {
+      const raw = parseJsonObject(button)?.callback_data;
+      if (typeof raw !== "string") continue;
+      const token = raw.replace(/^ui:(?:chat|video):/u, "");
+      if (!token || token === base.callback_data) continue;
+      const stored = await this.repository.loadCallbackToken(
+        token,
+        base.chat_id,
+      );
+      if (
+        !stored?.found
+        || stored.status !== "active"
+        || isExpired(stored.expires_at)
+      ) {
+        continue;
+      }
+      if (normalizePositiveInteger(stored.chat_id) !== base.chat_id) continue;
+      if (
+        stored.scene_session_id
+        && base.scene_session_id
+        && stored.scene_session_id !== base.scene_session_id
+      ) {
+        continue;
+      }
+      const storedPayload = parseJsonObject(stored.payload_json) ?? {};
+      if (
+        normalizeString(stored.action_kind) !== "commerce_back"
+        || storedPayload.from_subscriptions !== true
+      ) {
+        continue;
+      }
+      const storedMessageId = normalizePositiveInteger(
+        storedPayload.target_message_id,
+      );
+      if (
+        storedMessageId != null
+        && messageId != null
+        && storedMessageId !== messageId
+      ) {
+        continue;
+      }
+      back = { token, payload: storedPayload };
+      break;
+    }
+    // Without a verified embedded BACK the rebuilt offer is not embedded.
+    // Keep the standalone result rather than rendering an unrecoverable screen.
+    if (!back) {
+      return result;
+    }
+    const surface = normalizeString(
+      typeof back.payload.surface === "string" ? back.payload.surface : null,
+    ) ?? "photo";
+    const kind: "photo" | "daily_messages" =
+      surface === "daily_messages" ? "daily_messages" : "photo";
+    const actions: CommerceUi["actions"] = { back: back.token };
+    const capabilities = this.commerceCapabilities(
+      base,
+      kind,
+      messageId,
+      [],
+      actions,
+      [],
+    );
+    const rootText = typeof back.payload.root_text === "string"
+      ? back.payload.root_text
+      : base.panel_text ?? null;
+    const rootEntities = Array.isArray(back.payload.root_entities)
+      ? back.payload.root_entities
+      : Array.isArray(base.panel_entities_json) ? base.panel_entities_json : [];
+    const ui: CommerceUi = {
+      surface: kind,
+      step: "root",
+      products: [],
+      actions,
+      return_context: {
+        message_id: messageId,
+        kind: "photo",
+        text: rootText,
+        entities: rootEntities,
+        reply_markup: base.current_reply_markup ?? null,
+      },
+    };
+    return {
+      ...result,
+      source: "commerce_subscriptions",
+      commerce_ui: ui,
+      commerce_capabilities: capabilities,
     };
   }
 

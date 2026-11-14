@@ -18,7 +18,7 @@ const query = async (db: DB, statement: string, args: any[] = []): Promise<Row[]
 const iso = (value: unknown) => value == null ? null : new Date(String(value)).toISOString();
 export const WEB_VIDEO_ACCESS_SECONDS = 120;
 export type WebVideoContext = {
- video: { video_id: string; bucket_name: string; storage_path: string; requested_photo_uuid:string; source_photo_uuid:string; source_photo_bucket_name:string; source_photo_storage_path:string } | null;
+ video: { video_id: string; bucket_name: string; storage_path: string; requested_photo_uuid:string; source_photo_uuid:string; media_signature:string; source_photo_bucket_name:string; source_photo_storage_path:string } | null;
  full_active: boolean; video_pass_active: boolean; panel_delivered: boolean; scene_active: boolean;
  delivery?: Row | null;
 };

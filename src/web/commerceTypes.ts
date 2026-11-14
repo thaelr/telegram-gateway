@@ -33,7 +33,7 @@ export type WebCommerceQuote = Omit<WebCommerceContext,'chat_id'|'chat_code'|'ch
  sku:string; title:string; description:string; kind:'subscription'|'photo'|'feature';
  amount:string; currency:string; amount_xtr:number|null; subscription_days?:number;
  feature_key?:string; media_id?:string; media_signature?:string; panel_id?:number; video_id?:string;
- requested_photo_uuid?:string;source_photo_uuid?:string;
+ requested_photo_uuid?:string;source_photo_uuid?:string;video_media_signature?:string;
  price_required?:number; payload?:Record<string,unknown>;
 };
 export type WebPurchase = {

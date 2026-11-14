@@ -33,7 +33,7 @@ function fixture(){
   findByClient:async()=>saved??null,redeemFreeFeature:async()=>({available:false}),claimCreation:async()=>false,
   createOrGet:async(_u:string,_c:string,fingerprint:string,quote:WebCommerceQuote,provider:string)=>{saved={purchase_id:'44444444-4444-4444-8444-444444444444',quote,provider,chat_id:100,payment_token:'invoice',status:'created',fingerprint,created_at:'2026-10-28T00:00:00Z',updated_at:'2026-10-28T00:00:00Z'} as WebPurchase;return {purchase:saved,created:true};},
   getOwned:async()=>saved,
-  videos:{context:async()=>({video:{video_id:video,bucket_name:'private-video',storage_path:'synthetic.mp4',requested_photo_uuid:photo,source_photo_uuid:photo,source_photo_bucket_name:'media_bucket',source_photo_storage_path:'synthetic.jpg'},full_active:false,video_pass_active:false,scene_active:true,panel_delivered:false})},
+  videos:{context:async()=>({video:{video_id:video,bucket_name:'private-video',storage_path:'synthetic.mp4',requested_photo_uuid:photo,source_photo_uuid:photo,media_signature:'lounge_close_standing_dress_front',source_photo_bucket_name:'media_bucket',source_photo_storage_path:'synthetic.jpg'},full_active:false,video_pass_active:false,scene_active:true,panel_delivered:false})},
  };
  const providers={list:()=>['test'],get:()=>({id:'test'})} as unknown as PaymentProviderRegistry;
  const decisions={webProductPlans:async()=>plans} as unknown as MediaCommerceDecisionService;
@@ -45,12 +45,14 @@ test('Web video checkout freezes server-selected video, scene and source photo p
  const first=await f.service.purchase('u0000001',input),second=await f.service.purchase('u0000001',input);
  assert.deepEqual(second,first);assert.equal(f.snapshot().quote.video_id,video);assert.equal(f.snapshot().quote.panel_id,-10);assert.equal(f.snapshot().quote.scene_session_id,'scene-a');
  assert.equal(f.snapshot().quote.requested_photo_uuid,photo);assert.equal(f.snapshot().quote.source_photo_uuid,photo);
+ assert.equal(f.snapshot().quote.media_signature,'lounge_close_sitting_dress_front');
+ assert.equal(f.snapshot().quote.video_media_signature,'lounge_close_standing_dress_front');
  assert.equal('storage_path' in first,false);
  await assert.rejects(f.service.purchase('u0000001',{...input,media_id:video}),e=>e instanceof WebError&&e.code==='idempotency_conflict');
 });
 test('Web rejects one-video purchase without photo and rejects duplicate entitlement purchase',async()=>{
  const f=fixture();await assert.rejects(f.service.purchase('u0000001',{client_message_id:'x',chat_code:context.chat_code,sku:'video',provider:'test'}),e=>e instanceof WebError&&e.code==='media_id_required');
- f.repo.videos.context=async()=>({video:{video_id:video,bucket_name:'private',storage_path:'x.mp4',requested_photo_uuid:photo,source_photo_uuid:photo,source_photo_bucket_name:'media_bucket',source_photo_storage_path:'x.jpg'},full_active:true,video_pass_active:false,scene_active:true,panel_delivered:false});
+ f.repo.videos.context=async()=>({video:{video_id:video,bucket_name:'private',storage_path:'x.mp4',requested_photo_uuid:photo,source_photo_uuid:photo,media_signature:'lounge_close_standing_dress_front',source_photo_bucket_name:'media_bucket',source_photo_storage_path:'x.jpg'},full_active:true,video_pass_active:false,scene_active:true,panel_delivered:false});
  await assert.rejects(f.service.purchase('u0000001',{client_message_id:'y',chat_code:context.chat_code,sku:'video',provider:'test',media_id:photo}),e=>e instanceof WebError&&e.code==='video_already_available');
 });
 test('Web upgrade subtracts nominal Base and freezes independent discounts without time proration',async(t)=>{

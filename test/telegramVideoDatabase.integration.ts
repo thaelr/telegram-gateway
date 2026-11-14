@@ -226,5 +226,32 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
       assert.equal(fullRow!.payload_json.subscription_change,'upgrade');await check('base to full',full);
     }
   });
+  await t.test('pose-only fallback delivers its own source photo and reuses the frozen delivery',async()=>{
+    const f=await fixture();
+    const poseSignature=f.signature.replace('_sitting_','_standing_'),posePhoto=randomUUID();
+    await db`UPDATE public.video_catalog SET status='disabled' WHERE video_id=${f.video}`;
+    await db`INSERT INTO public.media_catalog(character_i,uuid,scene_hint,bucket_name,storage_path,status) VALUES(1,${posePhoto},${poseSignature},'media_bucket',${posePhoto+'.jpg'},'ready')`;
+    const [fallback]=await db`INSERT INTO public.video_catalog(character_i,media_signature,source_photo_uuid,storage_path,status) VALUES(1,${poseSignature},${posePhoto},${randomUUID()+'.mp4'},'ready') RETURNING video_id`;
+    const context=await service.evaluate({interaction_mode:'video_context',chat_id:f.chatId,telegram_chat_id:f.telegram,scene_session_id:f.scene,
+      media_signature:f.signature,panel_message_id:f.panel,current_uuid:f.photo});
+    assert.ok(context.video?.animate_callback_data);
+    const options=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:context.video.animate_callback_data,raw_update:{callback_query:{message:{message_id:f.panel,chat:{id:f.telegram},reply_markup:f.markup}}}});
+    const selected=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:options.commerce_ui!.products.find(p=>p.feature_key==='video_unlock')!.callback_data});
+    const token=selected.commerce_ui!.payment_options![0]!.token;
+    const [snapshot]=await db`SELECT payload_json FROM public.interaction_tokens WHERE token=${token}`;
+    assert.equal(snapshot!.payload_json.video_id,fallback!.video_id);
+    assert.equal(snapshot!.payload_json.media_signature,f.signature);
+    assert.equal(snapshot!.payload_json.video_media_signature,poseSignature);
+    assert.equal(snapshot!.payload_json.source_photo_uuid,posePhoto);
+    const first=await pay(f.chatId,token);assert.equal(first.operation,'video_delivery_required');
+    assert.equal(first.requested_photo_uuid,f.photo);assert.equal(first.source_photo_uuid,posePhoto);assert.equal(first.same_photo,false);
+    assert.ok(first.source_photo_reveal_at&&first.eligible_at&&first.source_photo_reveal_at<first.eligible_at);
+    const [row]=await db`SELECT video_id,source_photo_uuid FROM app_private.video_deliveries WHERE delivery_id=${first.delivery_id!}`;
+    assert.equal(row!.video_id,fallback!.video_id);assert.equal(row!.source_photo_uuid,posePhoto);
+    const again=await pay(f.chatId,token);assert.equal(again.delivery_id,first.delivery_id);
+    const [count]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE payment_token=${token}`;assert.equal(count!.n,1);
+  });
 
 });

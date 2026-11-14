@@ -50,7 +50,7 @@ export async function buildWebQuote(repository:WebCommerceRepository,plans:(user
     if(!access.video||access.panel_delivered||access.delivery||!access.scene_active)throw new WebError(409,'video_unavailable');
     if(access.full_active||access.video_pass_active)throw new WebError(409,'video_already_available');
     Object.assign(quote,{video_id:access.video.video_id,media_id:offer.media_id,requested_photo_uuid:access.video.requested_photo_uuid,
-     source_photo_uuid:access.video.source_photo_uuid,media_signature:offer.media_signature,panel_id:offer.panel_id,turn_no:offer.turn_no,scene_turn_no:offer.scene_turn_no});
+     source_photo_uuid:access.video.source_photo_uuid,video_media_signature:access.video.media_signature,media_signature:offer.media_signature,panel_id:offer.panel_id,turn_no:offer.turn_no,scene_turn_no:offer.scene_turn_no});
    }
   } else if(input.media_id) throw new WebError(400,'unexpected_media_id');
   return quote;

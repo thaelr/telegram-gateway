@@ -7006,6 +7006,140 @@ test("subscription payment source toggle callback rejects mismatched payload off
   assert.equal(calls.createStarsInvoice, 0);
 });
 
+test("embedded subscription payment source toggle keeps the verified BACK button", async () => {
+  const invoiceRows = [
+    buildStoredInvoiceToken({
+      token: "stars-token",
+      chat_id: "101" as unknown as number,
+      action_kind: "subscription_payment",
+      sku: "payment_plan_7",
+      payment_source: "stars",
+      amount: 100,
+      currency: "XTR",
+      amount_xtr: 100,
+      invoice_link: "https://t.me/invoice",
+      scene_session_id: null,
+      payload_json: {
+        action_kind: "subscription_payment",
+        idempotency_key: "telegram:offer-7",
+        subscription_days: 7,
+        subscription_sku: "payment_plan_7",
+        sort_order: 1,
+      },
+      invoice_button_text: "star 100",
+    }),
+  ];
+  const loadedTokens: string[] = [];
+  const { service, calls } = createRepository({
+    async loadCallbackToken(token, chatId) {
+      loadedTokens.push(String(token));
+      if (token === "btn_toggle_stars") {
+        return buildLoadedCallbackToken({
+          token: "btn_toggle_stars",
+          scene_session_id: null,
+          turn_no: null,
+          action_kind: "subscription_payment_source_toggle",
+          payload_json: {
+            action_kind: "subscription_payment_source_toggle",
+            chat_id: chatId,
+            offer_id: "telegram:offer-7",
+            selected_payment_source: "stars",
+            invoice_tokens: ["stars-token"],
+            payment_source_toggle_tokens: {
+              stars: "btn_toggle_stars",
+              sbp: "btn_toggle_sbp",
+            },
+            source: "commerce_subscriptions",
+          },
+        });
+      }
+      if (token === "btn_back_embedded") {
+        return buildLoadedCallbackToken({
+          token: "btn_back_embedded",
+          scene_session_id: null,
+          turn_no: null,
+          action_kind: "commerce_back",
+          payload_json: {
+            action_kind: "commerce_back",
+            chat_id: chatId,
+            target_message_id: 777,
+            from_subscriptions: true,
+            surface: "photo",
+            root_text: "Media panel",
+          },
+        });
+      }
+      if (token === "btn_back_decoy") {
+        return buildLoadedCallbackToken({
+          token: "btn_back_decoy",
+          scene_session_id: null,
+          turn_no: null,
+          action_kind: "commerce_back",
+          payload_json: {
+            action_kind: "commerce_back",
+            chat_id: chatId,
+            target_message_id: 777,
+            from_subscriptions: false,
+            surface: "photo",
+          },
+        });
+      }
+      return null;
+    },
+    async loadStoredInvoiceTokens(tokens) {
+      calls.loadStoredInvoiceTokens += 1;
+      return invoiceRows.filter((row) => tokens.includes(row.token));
+    },
+    async loadActiveSubscriptionOfferId() {
+      return "telegram:offer-7";
+    },
+  });
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: "btn_toggle_stars",
+    callback_query_id: "cbq-toggle-embedded",
+    inbound_message_id: 777,
+    target_message_id: 777,
+    scene_session_id: null,
+    media_signature: null,
+    commerce_capabilities_version: 1,
+    raw_update: {
+      callback_query: {
+        from: { id: 101 },
+        message: {
+          message_id: 777,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "stale back", callback_data: "ui:chat:btn_back_decoy" }],
+              [{ text: "← Назад", callback_data: "ui:chat:btn_back_embedded" }],
+            ],
+          },
+        },
+      },
+    },
+  }));
+
+  assert.equal(result.operation, "subscription_offer_ready");
+  assert.equal(result.reason, "subscription_payment_source_toggled");
+  assert.equal(result.source, "commerce_subscriptions");
+  assert.equal(result.commerce_ui?.surface, "photo");
+  assert.equal(result.commerce_ui?.actions.back, "btn_back_embedded");
+  assert.deepEqual(result.commerce_capabilities?.context, {
+    origin: "commerce_subscriptions",
+    kind: "photo",
+    scene_session_id: null,
+    message_id: 777,
+    current_uuid: null,
+    media_signature: null,
+  });
+  assert.equal(result.commerce_ui?.return_context?.kind, "photo");
+  assert.equal(result.commerce_ui?.return_context?.text, "Media panel");
+  assert.ok(loadedTokens.includes("btn_back_decoy"));
+  assert.ok(loadedTokens.includes("btn_back_embedded"));
+});
+
 test("restored subscription source falls back to the first available policy method", async () => {
   const invoiceRows = [
     buildStoredInvoiceToken({
@@ -8058,6 +8192,188 @@ test("GATEWAY-BACK-01 embedded subscriptions restore only the authorized photo s
   assert.deepEqual(result.commerce_ui?.return_context?.allowed_callback_data, [currentPhoto]);
   assert.deepEqual(result.commerce_ui?.return_context?.allowed_urls, []);
   assert.equal(result.commerce_ui?.return_context?.allowed_callback_data?.includes(revokedPhoto), false);
+});
+
+test("GATEWAY-DUP-01 excludes a superseded primary PHOTO callback without dropping navigation", async (t) => {
+  const previousVideoEnabled = config.MEDIA_VIDEO_ENABLED;
+  config.MEDIA_VIDEO_ENABLED = true;
+  t.after(() => { config.MEDIA_VIDEO_ENABLED = previousVideoEnabled; });
+  const refreshToken = "dup-photo-refresh";
+  const currentPhoto = "dup-photo-current";
+  const stalePhoto = "dup-photo-stale";
+  const previousPhoto = "dup-photo-prev";
+  const nextPhoto = "dup-photo-next";
+  const rootMarkup = { inline_keyboard: [[
+    { text: "Old photo", callback_data: stalePhoto },
+    { text: "Previous", callback_data: previousPhoto },
+    { text: "Next", callback_data: nextPhoto },
+  ]] };
+  const refreshPayload = {
+    action_kind: "commerce_ui_refresh",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    target_message_id: 555,
+    telegram_chat_id: 900,
+    surface: "photo",
+    opened_photo: true,
+    source_photo: "u2",
+    media_signature: "hotel_corridor_close",
+    root_markup: rootMarkup,
+    photo_token: currentPhoto,
+    commerce_capabilities_version: 1,
+    ui_origin: "media_panel",
+    user_id: "owner-1",
+  };
+  const loaded = (token: string, action: string, rowPayload: Record<string, unknown>) => buildLoadedCallbackToken({
+    requested_token: token,
+    token,
+    action_kind: action,
+    payload_json: rowPayload,
+  });
+  const videos = buildVideoRepository(buildVideoContext({
+    panel_photo_uuid: "u2",
+    panel_media_signature: "hotel_corridor_close",
+  }));
+  const { service, calls } = createRepository({
+    async loadCallbackToken(token, chatId) {
+      calls.loadCallbackTokenArgs.push({ token, chatId });
+      if (token === refreshToken) return loaded(token, "commerce_ui_refresh", refreshPayload);
+      if (token === currentPhoto) return loaded(token, "free_photo_unlock", {
+        action_kind: "free_photo_unlock",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        target_message_id: 555,
+        current_uuid: "u2",
+        requested_action: "photo_regen",
+        photo_sku: "payment_media_1",
+      });
+      if (token === stalePhoto) return loaded(token, "photo_request", {
+        action_kind: "photo_request",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        target_message_id: 555,
+      });
+      if (token === previousPhoto || token === nextPhoto) return loaded(token, token === previousPhoto ? "photo_prev" : "photo_next", {
+        action_kind: token === previousPhoto ? "photo_prev" : "photo_next",
+        chat_id: 101,
+        scene_session_id: "scene-1",
+        target_message_id: 555,
+      });
+      return null;
+    },
+  }, {}, {}, undefined, videos);
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: refreshToken,
+    callback_query_id: "cb-dup-photo",
+    inbound_message_id: 555,
+    telegram_chat_id: 900,
+    raw_update: { callback_query: {
+      from: { id: 900 },
+      message: { message_id: 555, reply_markup: rootMarkup },
+    } },
+  }));
+
+  const paidPhoto = result.commerce_capabilities?.products.find(product => product.feature_key === "photo_unlock");
+  assert.ok(paidPhoto?.callback_data, "current paid photo_unlock is missing");
+  assert.deepEqual(result.commerce_ui?.return_context?.allowed_callback_data, [previousPhoto, nextPhoto]);
+  assert.equal(result.commerce_ui?.return_context?.allowed_callback_data?.includes(stalePhoto), false);
+  assert.equal(result.commerce_capabilities?.controls.photo_prev, previousPhoto);
+  assert.equal(result.commerce_capabilities?.controls.photo_next, nextPhoto);
+  assert.deepEqual(calls.loadCallbackTokenArgs.map(call => call.token), [
+    refreshToken,
+    currentPhoto,
+    stalePhoto,
+    previousPhoto,
+    nextPhoto,
+  ]);
+});
+
+test("GATEWAY-DUP-02 excludes old subscription entry callbacks while keeping the current control", async (t) => {
+  const previousVideoEnabled = config.MEDIA_VIDEO_ENABLED;
+  config.MEDIA_VIDEO_ENABLED = true;
+  t.after(() => { config.MEDIA_VIDEO_ENABLED = previousVideoEnabled; });
+  const refreshToken = "dup-subscriptions-refresh";
+  const oldSubscriptionOne = "dup-subscriptions-old-1";
+  const oldSubscriptionTwo = "dup-subscriptions-old-2";
+  const previousPhoto = "dup-subscriptions-prev";
+  const rootMarkup = { inline_keyboard: [
+    [{ text: "Old subscriptions 1", callback_data: oldSubscriptionOne }],
+    [{ text: "Old subscriptions 2", callback_data: oldSubscriptionTwo }],
+    [{ text: "Previous", callback_data: previousPhoto }],
+  ] };
+  const refreshPayload = {
+    action_kind: "commerce_ui_refresh",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    target_message_id: 555,
+    telegram_chat_id: 900,
+    surface: "photo",
+    opened_photo: true,
+    source_photo: "u2",
+    media_signature: "hotel_corridor_close",
+    root_markup: rootMarkup,
+    commerce_capabilities_version: 1,
+    ui_origin: "media_panel",
+    user_id: "owner-1",
+  };
+  const loaded = (token: string, action: string) => buildLoadedCallbackToken({
+    requested_token: token,
+    token,
+    action_kind: action,
+    payload_json: {
+      action_kind: action,
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      target_message_id: 555,
+    },
+  });
+  const videos = buildVideoRepository(buildVideoContext({
+    panel_photo_uuid: "u2",
+    panel_media_signature: "hotel_corridor_close",
+  }));
+  const { service, calls } = createRepository({
+    async loadCallbackToken(token, chatId) {
+      calls.loadCallbackTokenArgs.push({ token, chatId });
+      if (token === refreshToken) return buildLoadedCallbackToken({
+        requested_token: token,
+        token,
+        action_kind: "commerce_ui_refresh",
+        payload_json: refreshPayload,
+      });
+      if (token === oldSubscriptionOne || token === oldSubscriptionTwo) return loaded(token, "commerce_subscriptions");
+      if (token === previousPhoto) return loaded(token, "photo_prev");
+      return null;
+    },
+  }, {}, {}, undefined, videos);
+
+  const result = await service.evaluate(buildRequest({
+    interaction_mode: null,
+    event_type: "callback_query.received",
+    callback_data: refreshToken,
+    callback_query_id: "cb-dup-subscriptions",
+    inbound_message_id: 555,
+    telegram_chat_id: 900,
+    raw_update: { callback_query: {
+      from: { id: 900 },
+      message: { message_id: 555, reply_markup: rootMarkup },
+    } },
+  }));
+
+  const currentSubscriptions = result.commerce_capabilities?.controls.subscriptions;
+  assert.ok(currentSubscriptions, "current subscriptions control is missing");
+  assert.notEqual(currentSubscriptions, oldSubscriptionOne);
+  assert.notEqual(currentSubscriptions, oldSubscriptionTwo);
+  assert.deepEqual(result.commerce_ui?.return_context?.allowed_callback_data, [previousPhoto]);
+  assert.equal(result.commerce_capabilities?.controls.photo_prev, previousPhoto);
+  assert.deepEqual(calls.loadCallbackTokenArgs.map(call => call.token), [
+    refreshToken,
+    oldSubscriptionOne,
+    oldSubscriptionTwo,
+    previousPhoto,
+  ]);
 });
 
 test("finalize_offer stores panel_text for photo caption persistence", async () => {

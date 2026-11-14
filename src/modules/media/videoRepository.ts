@@ -11,7 +11,7 @@ export interface VideoContextInput {
 }
 export interface VideoContext {
   video: { video_id: string; bucket_name: string; storage_path: string;
-    requested_photo_uuid: string; source_photo_uuid: string;
+    requested_photo_uuid: string; source_photo_uuid: string; media_signature: string;
     source_photo_bucket_name: string; source_photo_storage_path: string } | null;
   full_active: boolean; video_pass_active: boolean; subscription_sku: string | null;
   subscription_until: string | null; panel_delivered: boolean; scene_active: boolean;
@@ -24,6 +24,7 @@ export interface VideoDeliveryRequest {
   request_key: string; chat_id: number; scene_session_id: string | null; video_id: string;
   photo_message_id: number | null; telegram_chat_id: number | null; source: 'telegram' | 'web';
   requested_photo_uuid?: string | null;
+  media_signature?: string | null;
   panel_caption?: string | null; panel_caption_entities?: unknown[] | null;
   payment_token?: string | null;
 }

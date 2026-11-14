@@ -21,7 +21,7 @@ const videoId='00000000-0000-4000-8000-000000000001';
 const deliveryId='00000000-0000-4000-8000-000000000002';
 const photoId='11111111-1111-4111-8111-111111111111';
 const context:VideoContext={video:{video_id:videoId,bucket_name:'videos',storage_path:'one.mp4',requested_photo_uuid:photoId,
-  source_photo_uuid:photoId,source_photo_bucket_name:'photos',source_photo_storage_path:'one.jpg'},full_active:false,video_pass_active:false,
+  source_photo_uuid:photoId,media_signature:'signature',source_photo_bucket_name:'photos',source_photo_storage_path:'one.jpg'},full_active:false,video_pass_active:false,
   subscription_sku:null,subscription_until:null,panel_delivered:false,scene_active:true};
 const delivery:VideoDelivery={delivery_id:deliveryId,status:'pending',eligible_at:'2026-10-28T12:00:05Z',video_id:videoId,
   photo_message_id:77,telegram_chat_id:900,source:'telegram',bucket_name:'videos',storage_path:'one.mp4',chat_id:1,
@@ -60,6 +60,8 @@ function setup(overrides:Partial<VideoContext>={}, paidSceneUnlockToken: string 
     async upsertInvoiceTokens(rows:Record<string,unknown>[]){invoices.push(...rows);return rows.map(row=>({...row,stored:true,status:'invoice_sent',invoice_link:`https://pay.test/${row.token}`,checkout_url:`https://pay.test/${row.token}`}));},
     async loadAbTestAssignment(){return null;},
     async storeAbTestAssignment(_chatId:number,_key:string,assignment:unknown){return assignment;},
+    async loadActiveSubscriptionOfferId(){return null;},
+    async loadStoredInvoiceTokens(){return [];},
     async loadFreeCredits(){return {free_scene_unlocks:0};},
     async loadSceneAccessStatus(){return {subscription_active:!!overrides.subscription_sku,scene_is_active:true,active_scene_session_id:'scene',scene_access_active:!!paidSceneUnlockToken};},
   } as unknown as Repo;
@@ -184,6 +186,7 @@ test('entitled click freezes video and original panel into a delivery without in
   const result=await service.evaluate({event_type:'callback_query.received',interaction_mode:'callback',chat_id:1,telegram_chat_id:900,callback_data:prepared.video!.animate_callback_data!});
   assert.equal(result.operation,'video_delivery_required');assert.equal(result.target_message_id,77);assert.equal(invoices.length,0);
   assert.equal((requests[0] as {video_id:string}).video_id,videoId);
+  assert.equal((requests[0] as {media_signature:string}).media_signature,'signature');
 });
 test('claims are required before exposing signed URL; duplicate claims do not send',async()=>{
   const {service}=setup();
@@ -250,6 +253,19 @@ test('animate checkout snapshots the selected video; reveal replaces only known 
     ['scene_unlock','video_unlock','video_pass','base','base','full']);assert.ok(invoices.length>=beforeSelected);
   const pass=await click(service,back.commerce_ui!.products.find(product=>product.feature_key==='video_pass')!.callback_data!);
   assert.equal(pass.commerce_ui?.payment_origin_step,'video');assert.equal(pass.commerce_ui?.payment_options?.[0]?.feature_key,'video_pass');
+});
+test('pose fallback freezes scene and selected video signatures separately',async()=>{
+  const sourcePhoto='22222222-2222-4222-8222-222222222222';
+  const fallback={...context.video!,media_signature:'scene_close_standing_dress_front',source_photo_uuid:sourcePhoto};
+  const {service,invoices}=setup({video:fallback});
+  const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',
+    media_signature:'scene_close_sitting_dress_front',panel_message_id:77});
+  assert.ok(prepared.video?.animate_callback_data);
+  await service.evaluate({event_type:'callback_query.received',chat_id:1,callback_data:prepared.video!.animate_callback_data!});
+  const snapshot=(invoices[0] as {payload_json:Record<string,unknown>}).payload_json;
+  assert.equal(snapshot.media_signature,'scene_close_sitting_dress_front');
+  assert.equal(snapshot.video_media_signature,'scene_close_standing_dress_front');
+  assert.equal(snapshot.video_id,videoId);assert.equal(snapshot.source_photo_uuid,sourcePhoto);
 });
 test('active Base uses nominal configured SKU and keeps existing subscription conditions',async()=>{
   const {service,invoices}=setup({subscription_sku:'base_long',subscription_until:'2099-01-01T00:00:00Z'});
@@ -358,6 +374,27 @@ test('capabilities v1 keeps subscription choices and scene context separate',asy
   assert.equal(noScene.commerce_capabilities?.context.scene_session_id,null);
   assert.equal(noScene.commerce_capabilities?.products.some(product=>product.feature_key==='scene_unlock'||product.feature_key==='video_pass'),false);
   assert.ok(noScene.commerce_capabilities?.products.some(product=>product.subscription_tier));
+});
+
+test('scene action from a capabilities subscription keeps chat intent and origin',async()=>{
+  const active=setup();
+  const offer=await active.service.evaluate({interaction_mode:'subscription_offer',subscription_offer_reason:'subscription_command',
+    idempotency_key:'chat-intent',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',
+    commerce_capabilities_version:1,ui_origin:'active_chat'});
+  assert.equal(offer.commerce_capabilities?.context.kind,'subscription');
+  const sceneToken=offer.commerce_ui?.actions.scene;
+  assert.ok(sceneToken,'scene action must be available from the active-chat subscription menu');
+  const chat=await click(active.service,sceneToken);
+  assert.equal(chat.operation,'video_ui_ready');
+  assert.equal(chat.ui_intent,'chat');
+  assert.equal(chat.commerce_ui?.step,'scene');
+  assert.ok(chat.commerce_ui?.products.some(product=>product.feature_key==='scene_unlock'));
+  assert.ok(chat.commerce_ui?.products.some(product=>product.feature_key==='video_pass'));
+  assert.equal(chat.commerce_capabilities?.context.kind,'subscription');
+  assert.equal(chat.commerce_capabilities?.context.origin,'active_chat');
+  assert.deepEqual(chat.commerce_capabilities?.products
+    .filter(product=>product.feature_key==='scene_unlock'||product.feature_key==='video_pass')
+    .map(product=>product.feature_key),['scene_unlock','video_pass']);
 });
 
 test('scene offer uses separate upgrade prices, original amount and server-selected variant',async(t)=>{

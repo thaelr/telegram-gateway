@@ -176,6 +176,7 @@ export interface MediaCommerceDecisionResponse {
   commerce_capabilities?:CommerceCapabilitiesV1;
   commerce_capabilities_version?:1;
   ui_origin?:string|null;
+  ui_intent?:'chat'|'video'|null;
   language?: string;
   ux_copy?: unknown;
   video?: import('./modules/media/videoRepository.js').VideoUi;
