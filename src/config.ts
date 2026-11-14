@@ -110,7 +110,7 @@ const mediaPromotionsSchema = z.array(mediaPromotionSchema).superRefine((value, 
 
 const rewardDefinitionSchema = z.discriminatedUnion("type", [
   z.object({
-    type: z.enum(["scene_unlock", "scene_skip", "photo_unlock"]),
+    type: z.enum(["scene_unlock", "scene_skip", "photo_unlock", "video_unlock", "video_pass"]),
     amount: z.number().int().positive(),
   }).strict(),
   z.object({
