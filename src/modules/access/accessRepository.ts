@@ -98,7 +98,15 @@ export async function loadFreeCredits(query: QueryClient, chatId: number): Promi
         COALESCE(
           (account.entitlements_jsonb ->> 'free_photo_unlocks')::integer,
           0
-        ) AS free_photo_unlocks
+        ) AS free_photo_unlocks,
+        COALESCE(
+          (account.entitlements_jsonb ->> 'free_video_unlocks')::integer,
+          0
+        ) AS free_video_unlocks,
+        COALESCE(
+          (account.entitlements_jsonb ->> 'free_video_passes')::integer,
+          0
+        ) AS free_video_passes
       FROM public.chat_state cs
       JOIN public.users account
         ON account.user_id = cs.user_id

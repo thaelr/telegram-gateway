@@ -807,6 +807,8 @@ export class AccessDecisionService {
       free_fast_scene_skips: accessContext.free_fast_scene_skips,
       free_scene_unlocks: accessContext.free_scene_unlocks,
       free_photo_unlocks: accessContext.free_photo_unlocks,
+      free_video_unlocks: accessContext.free_video_unlocks,
+      free_video_passes: accessContext.free_video_passes,
       turns_today: accessContext.turns_today,
       turn_limit: config.DAILY_FREE_LIMITS_JSON.messages,
       daily_photo_limit: config.DAILY_FREE_LIMITS_JSON.photos,

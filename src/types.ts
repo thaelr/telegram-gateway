@@ -134,6 +134,8 @@ export interface AccessDecisionResponse {
   free_fast_scene_skips?: number | null;
   free_scene_unlocks?: number | null;
   free_photo_unlocks?: number | null;
+  free_video_unlocks?: number | null;
+  free_video_passes?: number | null;
   turns_today?: number | null;
   turn_limit?: number | null;
   daily_photo_limit?: number;
@@ -182,6 +184,8 @@ export interface AccessContext {
   free_fast_scene_skips: number;
   free_scene_unlocks: number;
   free_photo_unlocks: number;
+  free_video_unlocks?: number;
+  free_video_passes?: number;
   turns_today: number;
   scene_turn_no: number;
   selected_character_i: number | null;

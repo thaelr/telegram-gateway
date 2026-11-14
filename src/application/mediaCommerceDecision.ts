@@ -555,7 +555,8 @@ export class MediaCommerceDecisionService {
     return {scene_session_id:state?.scene_is_active?state.active_scene_session_id:null,scene_access_active:!!state?.scene_access_active,
       subscription_active:!!state?.subscription_active,available:false,full_active:false,video_pass_active:false,
       paid_scene_unlock_token:null,user_id:state?.user_id??null,matching_video:false,media_signature:null,scene_access_valid_until:null,
-      video_pass_valid_until:null,video_pass_payment_token:null,scene_access_payment_token:state?.scene_access_payment_token??null};
+      video_pass_valid_until:null,video_pass_payment_token:null,scene_access_payment_token:state?.scene_access_payment_token??null,
+      free_video_unlocks:0,free_video_passes:0};
   }
 
   private commerceItem(plan:NonNullable<ReturnType<typeof resolveActionPlanByFeatureKey>>,key:string,token:string|undefined,
@@ -693,13 +694,16 @@ currency:price.currency,prices,...(token?{callback_data:token}:{}),
     const unlockPlan=photo&&videoAvailable&&!offer.full_active&&!offer.video_pass_active
       ? resolveActionPlanByFeatureKey('video_unlock'):null;
     const passPlan=canPass?resolveVideoPassPlan(offer.paid_scene_unlock_token):null;
+    const giftAvailable=(feature:string)=>feature==='video_unlock'
+      ? offer.free_video_unlocks>0
+      : feature==='video_pass'&&offer.free_video_passes>0;
     for(const plan of [scenePlan,unlockPlan,passPlan]){
       if(!plan)continue;
       const variant=plan.feature_key==='video_pass'?passPlan?.purchase_variant:undefined;
       const item=this.commerceItem(plan,plan.feature_key,undefined,variant,
         plan.feature_key==='video_pass'?offer.video_pass_valid_until:offer.scene_access_valid_until,
         base.selected_payment_source);
-      if(item)products.push(item);
+      if(item)products.push({...item,...(giftAvailable(plan.feature_key)?{gift_available:true}:{})});
     }
     for(const sub of base.subscription_offer_items??[]){
       const opts=sub.payment_options.filter(o=>o.payment_kind==='subscription' && getMediaPaymentMethods().includes(o.source));
@@ -755,7 +759,8 @@ original_amount:opt.original_amount,currency:opt.currency,prices:paymentOptionPr
         const item=this.commerceItem(plan,plan.feature_key,row.token,variant,
           plan.feature_key==='video_pass'?offer.video_pass_valid_until:offer.scene_access_valid_until,
           base.selected_payment_source);
-        if(item){capabilityRows.push(row);capabilityProducts.push({...item,purchase_context:purchaseContext});}
+        if(item){capabilityRows.push(row);capabilityProducts.push({...item,purchase_context:purchaseContext,
+          ...(giftAvailable(plan.feature_key)?{gift_available:true}:{})});}
       };
       if(scenePlan)addProduct(scenePlan,'scene','access_only');
       if(unlockPlan)addProduct(unlockPlan,'video','access_and_video');
@@ -998,6 +1003,9 @@ base={
       ? applySceneUnlockOverride(resolveActionPlanByFeatureKey('scene_unlock'),abParams) : null;
     const unlockPlan=photo&&hasVideo&&!offer.full_active&&!offer.video_pass_active?resolveActionPlanByFeatureKey('video_unlock'):null;
     const pass=hasVideo && !offer.full_active && !offer.video_pass_active?resolveVideoPassPlan(offer.paid_scene_unlock_token):null;
+    const giftAvailable=(feature:string)=>feature==='video_unlock'
+      ? offer.free_video_unlocks>0
+      : feature==='video_pass'&&offer.free_video_passes>0;
     const back=this.videoToken(base,'commerce_back',{...snap,back_step:action==='commerce_pay'?stage:'root'});
     const rows=[back],products:CommerceProduct[]=[];
     for(const plan of [scenePlan,unlockPlan,pass]){
@@ -1017,7 +1025,7 @@ base={
     : offer.scene_access_valid_until,
   base.selected_payment_source
 );
-      if(item){if(!selected)rows.push(row);products.push(item);}
+      if(item){if(!selected)rows.push(row);products.push({...item,...(giftAvailable(plan.feature_key)?{gift_available:true}:{})});}
     }
     const actions:CommerceUi['actions']={back:back.token};
     const subscriptions=await this.availableSubscriptionPlans(base.chat_id!,base.scene_session_id??null,abParams,ctx);
@@ -1033,14 +1041,15 @@ base={
     if(!products.length)return stale();
     let directVideoPaymentOptions:MediaPaymentOption[]|undefined;
     const directVideoProduct=stage==='video'&&action!=='commerce_pay'
-      ? products.find(item=>item.feature_key==='video_unlock' && item.prices?.length===1)
+      ? products.find(item=>item.feature_key==='video_unlock' && (item.gift_available===true||item.prices?.length===1))
       : undefined;
     if(directVideoProduct&&unlockPlan){
       const directKey=createHash('sha256').update(JSON.stringify([base.chat_id,base.scene_session_id,messageId,stage,
         directVideoProduct.feature_key,directVideoProduct.purchase_variant,offer.video_pass_payment_token??null,
         unlockPlan.amount_xtr,unlockPlan.amount_rub??null,uuid,snap.media_signature])).digest('hex').slice(0,24);
       const opened=await this.evaluateVideoCallback({...base,current_uuid:uuid,media_signature:snap.media_signature},
-        {...payload,chosen_feature:'video_unlock',video_purchase_key:directKey});
+        {...payload,chosen_feature:'video_unlock',video_purchase_key:directKey,allow_gift:action==='video_request'});
+      if(opened.operation!=='video_ui_ready')return opened;
       const options=opened.operation==='video_ui_ready'?opened.video?.unlock_payment_options??[]:[];
       if(options.length===1&&options[0]?.checkout_url)directVideoPaymentOptions=options;
     }
@@ -1061,7 +1070,7 @@ base={
           user_id:offer.user_id,signature:snap.media_signature,commerce_origin:snap});
       }else{
         const opened=await this.evaluateVideoCallback({...base,current_uuid:uuid,media_signature:snap.media_signature},
-          {...payload,chosen_feature:product.feature_key,pass_only:stage==='scene',pass_menu:!photo,video_purchase_key:key});
+          {...payload,chosen_feature:product.feature_key,pass_only:stage==='scene',pass_menu:!photo,video_purchase_key:key,allow_gift:true});
         if(opened.operation!=='video_ui_ready')return opened;
         options=product.feature_key==='video_pass'?opened.video?.pass_payment_options??[]:opened.video?.unlock_payment_options??[];
       }
@@ -1225,6 +1234,45 @@ base={
       current_reply_markup:delivery.current_reply_markup, reason:'video_panel_media_ready'};
   }
 
+  private async redeemVideoGift(input:{
+    frozen:MediaCommerceDecisionResponse;
+    payload:Record<string,unknown>;
+    context:VideoContext;
+    offer:Awaited<ReturnType<MediaCommerceDecisionService['sceneOffer']>>;
+    passOnly:boolean;
+    menu:boolean;
+    targetMessageId:number|null;
+    snapshot:Record<string,unknown>;
+  }):Promise<MediaCommerceDecisionResponse|null>{
+    if(input.payload.allow_gift!==true)return null;
+    const chosen=input.payload.chosen_feature;
+    const feature=chosen==='video_pass'||chosen==='video_unlock'
+      ? chosen
+      : (input.offer.free_video_unlocks??0)>0?'video_unlock':(input.offer.free_video_passes??0)>0?'video_pass':null;
+    if(!feature || (feature==='video_unlock'&&(input.offer.free_video_unlocks??0)<=0) ||
+      (feature==='video_pass'&&(input.offer.free_video_passes??0)<=0) || (input.passOnly&&feature!=='video_pass'))return null;
+    const action=feature==='video_pass'?'free_video_pass':'free_video_unlock';
+    const gift=this.videoToken(input.frozen,action,{...input.snapshot,feature_key:feature,
+      ...(feature==='video_pass'?{duration_days:config.SCENE_ACCESS_DAYS}:{}),gift_basis:true});
+    await this.repository.upsertCallbackTokens([gift]);
+    if(feature==='video_pass'){
+      if(await this.videos.redeemFreeVideoPass(gift.token,input.frozen.chat_id!)!==1)return null;
+      if(input.passOnly)return {...input.frozen,operation:'video_pass_activated',target_message_id:input.targetMessageId,
+        current_reply_markup:input.menu?input.payload.base_reply_markup:input.frozen.current_reply_markup,
+        reply_markup:input.menu?input.payload.base_reply_markup:input.frozen.current_reply_markup,
+        ...(input.menu?{video:{available:false,consumed:true,pass_menu:true}}:{}),
+        text:renderUx(getMediaUxCopy().video?.pass_activated),reason:'video_pass_activated'};
+    }
+    if(!input.context.video||!input.targetMessageId||!input.frozen.telegram_chat_id)return null;
+    return deliveryResponse(input.frozen,await this.videos.prepareDelivery({request_key:`gift:${gift.token}`,
+      chat_id:input.frozen.chat_id!,scene_session_id:input.frozen.scene_session_id??null,video_id:input.context.video.video_id,
+      photo_message_id:input.targetMessageId,telegram_chat_id:input.frozen.telegram_chat_id,source:'telegram',
+      requested_photo_uuid:input.context.video.requested_photo_uuid,media_signature:input.frozen.media_signature,
+      panel_caption:input.frozen.caption_text??input.frozen.panel_text,
+      panel_caption_entities:(input.frozen.caption_entities_json??input.frozen.panel_entities_json??[]) as unknown[],
+      ...(feature==='video_unlock'?{payment_token:gift.token}:{})}));
+  }
+
   private async evaluateVideoCallback(base: MediaCommerceDecisionResponse, payload: Record<string,unknown>): Promise<MediaCommerceDecisionResponse> {
     const targetMessageId = base.target_message_id ?? base.inbound_message_id ?? null;
     const frozen = {...base,target_message_id:targetMessageId,character_i:normalizePositiveInteger(payload.character_i) ?? base.character_i,
@@ -1268,6 +1316,8 @@ base={
       panel_text:frozen.caption_text ?? frozen.panel_text ?? null,
       panel_entities_json:frozen.caption_entities_json ?? frozen.panel_entities_json ?? [],
       requested_action:'video_request',base_reply_markup:base.current_reply_markup};
+    const gift=await this.redeemVideoGift({frozen,payload,context,offer,passOnly,menu,targetMessageId,snapshot});
+    if(gift)return gift;
     const plans = [!passOnly && payload.chosen_feature!=='video_pass' ? unlock : null,payload.chosen_feature==='video_unlock'?null:pass].filter((plan): plan is NonNullable<typeof plan> => plan != null);
     const inputs = plans.flatMap(plan => {
       const variant = plan.feature_key === 'video_pass' ? pass : null;

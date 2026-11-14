@@ -45,6 +45,8 @@ test("claimReward delegates all reward types to the atomic database function", a
       { type: "scene_unlock", amount: 1 },
       { type: "scene_skip", amount: 2 },
       { type: "photo_unlock", amount: 3 },
+      { type: "video_unlock", amount: 4 },
+      { type: "video_pass", amount: 5 },
       { type: "subscription", days: 5 },
     ],
   });

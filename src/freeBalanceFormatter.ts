@@ -5,6 +5,8 @@ export type FreeBalances = {
   free_scene_unlocks?: number | null;
   free_photo_unlocks?: number | null;
   free_fast_scene_skips?: number | null;
+  free_video_unlocks?: number | null;
+  free_video_passes?: number | null;
 };
 
 function count(value: number | null | undefined): number {
@@ -30,20 +32,17 @@ export function formatFreeBalances(
   copy?: FreeBalanceCopy,
 ): string | null {
   if (!copy) return null;
-  const sceneUnlocks = count(balances.free_scene_unlocks);
-  const photos = count(balances.free_photo_unlocks);
-  const sceneSkips = count(balances.free_fast_scene_skips);
-  const lines: string[] = [];
-
-  if (sceneUnlocks > 0) {
-    lines.push(`• ${plural(sceneUnlocks, copy.scene_unlock).replaceAll("{count}", String(sceneUnlocks))}`);
-  }
-  if (photos > 0) {
-    lines.push(`• ${plural(photos, copy.photo).replaceAll("{count}", String(photos))}`);
-  }
-  if (sceneSkips > 0) {
-    lines.push(`• ${plural(sceneSkips, copy.fast_scene_skip).replaceAll("{count}", String(sceneSkips))}`);
-  }
+  const entries = [
+    [count(balances.free_video_passes), copy.video_pass],
+    [count(balances.free_scene_unlocks), copy.scene_unlock],
+    [count(balances.free_video_unlocks), copy.video_unlock],
+    [count(balances.free_photo_unlocks), copy.photo],
+    [count(balances.free_fast_scene_skips), copy.fast_scene_skip],
+  ] as const;
+  const lines = entries
+    .filter((entry): entry is [number, NonNullable<typeof entry[1]>] => entry[0] > 0 && entry[1] != null)
+    .slice(0, 3)
+    .map(([value, forms]) => `• ${plural(value, forms).replaceAll("{count}", String(value))}`);
 
   return lines.length > 0 ? `${copy.heading}\n${lines.join("\n")}` : null;
 }

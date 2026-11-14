@@ -48,6 +48,8 @@ export const telegramUxCopySchema = z.object({
   free_balances: z.object({
     heading: textSchema,
     scene_unlock: z.object({ one: textSchema, few: textSchema, many: textSchema }),
+    video_pass: z.object({ one: textSchema, few: textSchema, many: textSchema }).optional(),
+    video_unlock: z.object({ one: textSchema, few: textSchema, many: textSchema }).optional(),
     photo: z.object({ one: textSchema, few: textSchema, many: textSchema }),
     fast_scene_skip: z.object({ one: textSchema, few: textSchema, many: textSchema }),
   }).optional(),
@@ -111,7 +113,7 @@ export const telegramUxCopySchema = z.object({
   commerce_ui: z.object({
     video:textSchema, scene_photo:textSchema, scene_subscription:textSchema, back:textSchema,
     scene_unlock:textSchema, video_pass:textSchema, scene_unlock_upgrade:textSchema, video_unlock:textSchema,
-    free_scene_unlock:textSchema,
+    free_scene_unlock:textSchema, free:textSchema.optional(),
   }).passthrough().optional(),
   video: z.object({
     duplicate_payment_review: textSchema,

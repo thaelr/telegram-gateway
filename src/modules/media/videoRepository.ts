@@ -58,6 +58,8 @@ export interface VideoPassOfferContext {
   subscription_active: boolean;
   full_active: boolean;
   video_pass_active: boolean;
+  free_video_unlocks: number;
+  free_video_passes: number;
 }
 export interface VideoUi {
   pass_button_text?: string;
@@ -96,6 +98,11 @@ export class VideoCommerceRepository {
   async prepareDelivery(input: VideoDeliveryRequest): Promise<VideoDelivery | null> {
     const rows = await this.query<{ value: VideoDelivery | null }[]>`SELECT public.media_prepare_video_delivery(${this.query.json(input as unknown as JSONValue)}::jsonb) AS value`;
     return normalizeDelivery(rows[0]?.value ?? null);
+  }
+  async redeemFreeVideoPass(token: string, chatId: number): Promise<number> {
+    const rows = await this.query<Array<{ redeemed_count: number }>>`SELECT public.media_redeem_free_video_pass(
+      ${token}::text, ${chatId}::bigint) AS redeemed_count`;
+    return rows[0]?.redeemed_count ?? 0;
   }
   async claimDelivery(id: string, claimToken: string): Promise<VideoDelivery | null> {
     const rows = await this.query<{ value: VideoDelivery | null }[]>`SELECT public.media_claim_video_delivery(${id}::uuid,${claimToken}::uuid) AS value`;

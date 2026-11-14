@@ -36,6 +36,8 @@ type AccessContextRow = {
   free_fast_scene_skips: number;
   free_scene_unlocks: number;
   free_photo_unlocks: number;
+  free_video_unlocks: number;
+  free_video_passes: number;
 };
 
 export class ChatAccessRepository {
@@ -382,7 +384,15 @@ export class ChatAccessRepository {
         COALESCE(
           (account.entitlements_jsonb ->> 'free_photo_unlocks')::integer,
           0
-        ) AS free_photo_unlocks
+        ) AS free_photo_unlocks,
+        COALESCE(
+          (account.entitlements_jsonb ->> 'free_video_unlocks')::integer,
+          0
+        ) AS free_video_unlocks,
+        COALESCE(
+          (account.entitlements_jsonb ->> 'free_video_passes')::integer,
+          0
+        ) AS free_video_passes
       FROM target t
       LEFT JOIN public.users account
         ON account.user_id = ${routing.user_id}::varchar(8)

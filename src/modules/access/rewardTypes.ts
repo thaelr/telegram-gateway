@@ -1,4 +1,9 @@
-export type CreditRewardType = "scene_unlock" | "scene_skip" | "photo_unlock";
+export type CreditRewardType =
+  | "scene_unlock"
+  | "scene_skip"
+  | "photo_unlock"
+  | "video_unlock"
+  | "video_pass";
 
 export type RewardDefinition =
   | { type: CreditRewardType; amount: number }

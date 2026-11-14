@@ -152,6 +152,7 @@ export type CommerceProduct = {
   subscription_tier?:'base'|'full'; subscription_change?:'upgrade'; upgrade_base_sku?:string;
   upgrade_discount_percent?:number; promo_key?:string|null;
   prices?: Array<Pick<MediaPaymentOption, 'source'|'amount'|'currency'|'original_amount'|'discount_percent'>>;
+  gift_available?: boolean;
 label_key:string; label?:string; amount:number; original_amount?:number|null; currency:'XTR'|'RUB'; callback_data?:string; title:string; description:string;};
 export type CommerceUi = {
   surface:CommerceSurface; step:'root'|'scene'|'video'|'payment'; products:CommerceProduct[]; actions:{video?:string;scene?:string;subscriptions?:string;back?:string;bonus_scene?:string;bonus_photo?:string};
@@ -339,6 +340,8 @@ export interface FreeCredits {
   free_fast_scene_skips: number;
   free_scene_unlocks: number;
   free_photo_unlocks?: number;
+  free_video_unlocks?: number;
+  free_video_passes?: number;
 }
 
 export interface LoadedCallbackToken {
