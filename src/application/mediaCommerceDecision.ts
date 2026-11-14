@@ -3184,11 +3184,21 @@ token_rows_prepared: sceneEntryRows.length,
       item.payment_kind === "subscription"
       && item.payment_options.some((option) => option.source === "stars"));
     const defaultPaymentSource = getFirstAvailablePaymentSource(subscriptionOfferItems);
-    const offerMessageId =
+    // Stored invoice rows prove the checkout links still exist, but their
+    // `telegram_invoice_message_id` may point at an open media panel (the
+    // embedded commerce_subscriptions flow renders the offer there). A
+    // standalone /subscription command (and the daily-limit offer) must never
+    // hand that panel to the workflow as an editable target: editing it resets
+    // the panel. Only the embedded flow and the payment-source toggle
+    // (subscriptionOfferReason == null) reuse the on-screen message.
+    const storedOfferMessageId =
       sortedRows
         .map((row) => normalizePositiveInteger(row.telegram_invoice_message_id))
         .find((value) => value != null)
       ?? null;
+    const standaloneOffer =
+      subscriptionOfferReason != null && input.source !== "commerce_subscriptions";
+    const offerMessageId = standaloneOffer ? null : storedOfferMessageId;
     const subscriptionPaymentToggleTokenRows =
       hasSbpSubscriptionOption && hasStarsSubscriptionOption
         ? (["stars", "sbp"] as const).map((source) =>
@@ -3230,7 +3240,7 @@ token_rows_prepared: sceneEntryRows.length,
       scene_session_id: activeSceneSessionId,
       offer_message_id: offerMessageId,
       offer_sent: false,
-      offer_reused: offerMessageId != null,
+      offer_reused: storedOfferMessageId != null,
       subscription_offer_reason: subscriptionOfferReason,
       turn_limit: turnLimit,
       turns_today: turnsToday,
@@ -3250,7 +3260,7 @@ token_rows_prepared: sceneEntryRows.length,
       payment_ui: buildPaymentUiCopy(),
       subscription_invoice_tokens: tokenList,
       reason:
-        offerMessageId != null
+        storedOfferMessageId != null
           ? "subscription_offer_reused"
           : "subscription_offer_ready",
     };
