@@ -1769,3 +1769,75 @@ test("SBP safety repository methods delegate to dedicated RPCs", async () => {
   assert.match(calls[1]?.sql ?? "", /media_mark_sbp_invoice_canceled/u);
   assert.match(calls[2]?.sql ?? "", /media_record_sbp_status_conflict/u);
 });
+
+
+test("loadCallbackTokens skips SQL on empty input", async () => {
+  const { query, calls } = createTaggedQueryStub();
+  const repository = new MediaCommerceRepository(query as never);
+  assert.deepEqual(await repository.loadCallbackTokens([], 101), []);
+  assert.equal(calls.length, 0);
+});
+
+test("loadCallbackTokens uses one ordered SQL for found, missing and repeated tokens", async () => {
+  const found = {
+    requested_token: "cb-1",
+    token: "cb-1",
+    kind: "button_callback",
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    turn_no: 5,
+    payload_json: '{"current_uuid":"u-1"}',
+    status: "active",
+    action_kind: "photo_request",
+    expires_at: "2030-01-01T00:00:00.000Z",
+    found: true,
+  };
+  const missing = {
+    requested_token: "missing",
+    token: null,
+    kind: null,
+    chat_id: null,
+    scene_session_id: null,
+    turn_no: null,
+    payload_json: null,
+    status: null,
+    action_kind: null,
+    expires_at: null,
+    found: false,
+  };
+  const { query, calls } = createTaggedQueryStub([[found, missing, found]]);
+  const repository = new MediaCommerceRepository(query as never);
+  const result = await repository.loadCallbackTokens(["cb-1", "missing", "cb-1"], 101);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.sql, /jsonb_array_elements_text/u);
+  assert.match(calls[0]!.sql, /WITH ORDINALITY/u);
+  assert.match(calls[0]!.sql, /CROSS JOIN LATERAL public\.media_load_interaction_token/u);
+  assert.match(calls[0]!.sql, /ORDER BY requested\.position/u);
+  assertJsonbParameter(calls[0]!.values[0], ["cb-1", "missing", "cb-1"]);
+  assert.equal(calls[0]!.values[1], 101);
+  assert.deepEqual(result.map((row) => [row.token, row.found]), [
+    ["cb-1", true], [null, false], ["cb-1", true],
+  ]);
+  assert.deepEqual(result[0]!.payload_json, { current_uuid: "u-1" });
+  assert.equal(result[1]!.payload_json, null);
+});
+
+test("loadCallbackTokens rejects corrupt stored payload_json", async () => {
+  const { query } = createTaggedQueryStub([[
+    {
+      requested_token: "cb-bad",
+      token: "cb-bad",
+      kind: "button_callback",
+      chat_id: 101,
+      scene_session_id: "scene-1",
+      turn_no: 5,
+      payload_json: "not-json",
+      status: "active",
+      action_kind: "photo_request",
+      expires_at: "2030-01-01T00:00:00.000Z",
+      found: true,
+    },
+  ]]);
+  const repository = new MediaCommerceRepository(query as never);
+  await assert.rejects(() => repository.loadCallbackTokens(["cb-bad"], 101), MediaRepositoryContractError);
+});

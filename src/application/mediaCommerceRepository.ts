@@ -64,6 +64,13 @@ export class MediaCommerceRepository {
     return this.tokenRepository.loadCallbackToken(token, chatId);
   }
 
+  async loadCallbackTokens(
+    tokens: string[],
+    chatId: number | null,
+  ): Promise<LoadedCallbackToken[]> {
+    return this.tokenRepository.loadCallbackTokens(tokens, chatId);
+  }
+
   async loadMediaContext(input: LoadMediaContextInput): Promise<MediaContext> {
     return this.catalogRepository.loadMediaContext(input);
   }

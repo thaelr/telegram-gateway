@@ -140,6 +140,40 @@ export class MediaInteractionTokenRepository {
       : null;
   }
 
+  async loadCallbackTokens(
+    tokens: string[],
+    chatId: number | null,
+  ): Promise<LoadedCallbackToken[]> {
+    if (tokens.length === 0) return [];
+
+    const rows = await this.query<LoadedCallbackToken[]>`
+      SELECT loaded.*
+      FROM jsonb_array_elements_text(${sql.json(asJsonValue(tokens))}::jsonb)
+        WITH ORDINALITY AS requested(value, position)
+      CROSS JOIN LATERAL public.media_load_interaction_token(
+        requested.value,
+        ${chatId}::bigint
+      ) AS loaded
+      ORDER BY requested.position
+    `;
+
+    return rows.map((row) => ({
+      requested_token: row.requested_token,
+      token: row.token,
+      kind: row.kind,
+      chat_id: row.chat_id,
+      scene_session_id: row.scene_session_id,
+      turn_no: row.turn_no,
+      payload_json: row.found
+        ? parseStrictJsonObject(row.payload_json, "media_load_interaction_token")
+        : row.payload_json,
+      status: row.status,
+      action_kind: row.action_kind,
+      expires_at: row.expires_at,
+      found: row.found,
+    }));
+  }
+
   async loadInvoiceToken(
     token: string | null,
     chatId: number | null,

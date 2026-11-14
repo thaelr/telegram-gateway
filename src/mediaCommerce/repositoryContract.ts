@@ -7,6 +7,7 @@ export type MediaRepository = Pick<
   | "upsertInvoiceToken"
   | "upsertInvoiceTokens"
   | "loadCallbackToken"
+  | "loadCallbackTokens"
   | "loadMediaContext"
   | "authorizeDailyPhoto"
   | "loadPhotoByUuid"

@@ -1084,16 +1084,23 @@ base={
   private async allowRootButtons(root:CommerceUi['return_context'], receipts:unknown[],base:MediaCommerceDecisionResponse) {
     const markup=parseJsonObject(root.reply_markup);
     const buttons=Array.isArray(markup?.inline_keyboard)?markup.inline_keyboard.flat().map(parseJsonObject):[];
+    const tokens=buttons.flatMap(button=>
+      typeof button?.callback_data==='string' && button.callback_data ? [button.callback_data] : []);
+    const storedTokens=await this.repository.loadCallbackTokens(tokens,base.chat_id);
     const allowed:string[]=[],authorized:InteractionTokenRow[]=[];
-    for(const button of buttons){
-      const token=typeof button?.callback_data==='string'?button.callback_data:null;
-      if(!token)continue;
-      const stored=await this.repository.loadCallbackToken(token,base.chat_id);
+    let freeSceneUnlockAvailable:boolean|undefined;
+    for(let i=0;i<tokens.length;i++){
+      const token=tokens[i]!;
+      const stored=storedTokens[i];
       if(!stored?.found || stored.status!=='active' || isExpired(stored.expires_at) || Number(stored.chat_id)!==base.chat_id ||
         (stored.scene_session_id && stored.scene_session_id!==base.scene_session_id) ||
         (stored.payload_json?.target_message_id != null && Number(stored.payload_json.target_message_id)!==root.message_id) ||
         ['video_request','video_pass_options','commerce_scene','commerce_pay','commerce_back','commerce_account_pay','commerce_photo_pay','commerce_subscriptions','commerce_ui_refresh'].includes(stored.action_kind??''))continue;
-      if(stored.action_kind==='free_scene_unlock' && !(Number((await this.repository.loadFreeCredits(base.chat_id!))?.free_scene_unlocks)>0))continue;
+      if(stored.action_kind==='free_scene_unlock'){
+        if(freeSceneUnlockAvailable===undefined)
+          freeSceneUnlockAvailable=Number((await this.repository.loadFreeCredits(base.chat_id!))?.free_scene_unlocks)>0;
+        if(!freeSceneUnlockAvailable)continue;
+      }
       allowed.push(token);
       if(stored.token&&stored.payload_json&&stored.action_kind)authorized.push({token:stored.token,kind:'button_callback',chat_id:Number(stored.chat_id),
         scene_session_id:stored.scene_session_id??null,turn_no:stored.turn_no??null,payload_json:stored.payload_json,

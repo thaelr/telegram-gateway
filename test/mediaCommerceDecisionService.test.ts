@@ -172,6 +172,10 @@ type MockRepository = {
     token: string | null,
     chatId: number | null,
   ) => Promise<LoadedCallbackToken | null>;
+  loadCallbackTokens: (
+    tokens: string[],
+    chatId: number | null,
+  ) => Promise<LoadedCallbackToken[]>;
   loadMediaContext: (
     input: unknown,
   ) => Promise<MediaContext>;
@@ -849,6 +853,7 @@ function createRepository(
     recordSbpProviderEvent: 0,
     recordSbpProviderEventArgs: [] as unknown[],
     loadCallbackTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
+    loadCallbackTokensArgs: [] as Array<{ tokens: string[]; chatId: number | null }>,
     loadInvoiceTokenArgs: [] as Array<{ token: string | null; chatId: number | null }>,
     loadInvoiceTokenByExternalPaymentIdArgs: [] as Array<string | null>,
     markInvoicePaid: 0,
@@ -986,6 +991,25 @@ function createRepository(
     async loadCallbackToken(token, chatId) {
       calls.loadCallbackTokenArgs.push({ token, chatId });
       return buildLoadedCallbackToken();
+    },
+    async loadCallbackTokens(tokens, chatId) {
+      calls.loadCallbackTokensArgs.push({ tokens: [...tokens], chatId });
+      // Test-only adapter: preserve existing per-scenario loadCallbackToken overrides.
+      // Production repository executes a single SQL query instead.
+      const loaded = await Promise.all(tokens.map((token) => repository.loadCallbackToken(token, chatId)));
+      return loaded.map((row) => row ?? {
+        requested_token: null,
+        token: null,
+        kind: null,
+        chat_id: null,
+        scene_session_id: null,
+        turn_no: null,
+        payload_json: null,
+        status: null,
+        action_kind: null,
+        expires_at: null,
+        found: false,
+      } as LoadedCallbackToken);
     },
     async loadMediaContext(input) {
       calls.loadMediaContext += 1;
@@ -8374,6 +8398,10 @@ test("GATEWAY-DUP-02 excludes old subscription entry callbacks while keeping the
     oldSubscriptionTwo,
     previousPhoto,
   ]);
+  assert.deepEqual(calls.loadCallbackTokensArgs, [{
+    tokens: [oldSubscriptionOne, oldSubscriptionTwo, previousPhoto],
+    chatId: 101,
+  }]);
 });
 
 test("finalize_offer stores panel_text for photo caption persistence", async () => {
@@ -10237,4 +10265,65 @@ test("missing mandatory free-action copy cannot downgrade a free entitlement to 
   } finally {
     Reflect.set(uxCopy, "free_actions", previous);
   }
+});
+
+
+test("allowRootButtons batch preserves authorization and loads free scene credits once", async () => {
+  const tokens = [
+    "bonus-1", "bonus-2", "photo-valid", "revoked", "expired",
+    "foreign-chat", "wrong-scene", "wrong-message", "commerce-back", "missing",
+  ];
+  const valid = (token: string, actionKind: string) => buildLoadedCallbackToken({
+    requested_token: token,
+    token,
+    chat_id: 101,
+    scene_session_id: "scene-1",
+    action_kind: actionKind,
+    status: "active",
+    expires_at: "2030-01-01T00:00:00.000Z",
+    payload_json: { target_message_id: 555 },
+  });
+  const { service, calls } = createRepository({
+    async loadCallbackToken(token) {
+      if (token === "missing") return null;
+      const kind = token?.startsWith("bonus-") ? "free_scene_unlock"
+        : token === "commerce-back" ? "commerce_back" : "photo_prev";
+      const row = valid(String(token), kind);
+      if (token === "revoked") row.status = "fulfilled";
+      if (token === "expired") row.expires_at = "2000-01-01T00:00:00.000Z";
+      if (token === "foreign-chat") row.chat_id = 999;
+      if (token === "wrong-scene") row.scene_session_id = "other-scene";
+      if (token === "wrong-message") row.payload_json = { target_message_id: 666 };
+      return row;
+    },
+    async loadFreeCredits(chatId) {
+      calls.loadFreeCredits += 1;
+      return {
+        chat_id: chatId,
+        active_scene_session_id: "scene-1",
+        free_fast_scene_skips: 0,
+        free_scene_unlocks: 1,
+      };
+    },
+  });
+  const root: {
+    kind: "photo";
+    message_id: number;
+    reply_markup: unknown;
+    allowed_callback_data?: string[];
+    allowed_urls?: string[];
+  } = {
+    kind: "photo",
+    message_id: 555,
+    reply_markup: { inline_keyboard: tokens.map((token) => [{ text: token, callback_data: token }]) },
+  };
+  const helper = service as unknown as {
+    allowRootButtons(root: unknown, receipts: unknown[], base: unknown): Promise<InteractionTokenRow[]>;
+  };
+  const authorized = await helper.allowRootButtons(root, [], { chat_id: 101, scene_session_id: "scene-1" });
+  assert.deepEqual(calls.loadCallbackTokensArgs, [{ tokens, chatId: 101 }]);
+  assert.equal(calls.loadFreeCredits, 1);
+  assert.deepEqual(root.allowed_callback_data, ["bonus-1", "bonus-2", "photo-valid"]);
+  assert.deepEqual(root.allowed_urls, []);
+  assert.deepEqual(authorized.map((row) => row.token), ["bonus-1", "bonus-2", "photo-valid"]);
 });
