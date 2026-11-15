@@ -226,6 +226,47 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
       assert.equal(fullRow!.payload_json.subscription_change,'upgrade');await check('base to full',full);
     }
   });
+  await t.test('VideoPass delivers a pose-only fallback with its own source photo and no new invoice',async()=>{
+    const f=await fixture();
+    await db`UPDATE public.video_catalog SET status='disabled' WHERE video_id=${f.video}`;
+    const poseSignature=f.signature.replace('_sitting_','_standing_'),posePhoto=randomUUID();
+    await db`INSERT INTO public.media_catalog(character_i,uuid,scene_hint,bucket_name,storage_path,status)
+      VALUES(1,${posePhoto},${poseSignature},'media_bucket',${posePhoto+'.jpg'},'ready')`;
+    const [fallback]=await db`INSERT INTO public.video_catalog(character_i,media_signature,source_photo_uuid,storage_path,status)
+      VALUES(1,${poseSignature},${posePhoto},${randomUUID()+'.mp4'},'ready') RETURNING video_id`;
+    const passToken='test-video-pass-'+randomUUID();
+    await db`INSERT INTO public.interaction_tokens(token,kind,chat_id,scene_session_id,sku,action_kind,payload_json,status,payment_source,amount,currency,amount_xtr,paid_at)
+      VALUES(${passToken},'invoice_payload',${f.chatId},${f.scene},'tg_pass','feature_payment',${db.json({feature_key:'video_pass',duration_days:7})},'paid','stars',100,'XTR',100,now())`;
+    assert.equal(await videos.activateVideoPass(passToken,f.chatId),1);
+    const activated=await videos.context({chat_id:f.chatId,scene_session_id:f.scene,media_signature:f.signature,
+      panel_message_id:f.panel,requested_photo_uuid:f.photo});
+    assert.equal(activated.video_pass_active,true);
+    assert.equal(activated.video?.video_id,fallback!.video_id,'VideoPass selection prefers the pose-only fallback clip');
+    const context=await service.evaluate({interaction_mode:'video_context',chat_id:f.chatId,telegram_chat_id:f.telegram,scene_session_id:f.scene,
+      media_signature:f.signature,panel_message_id:f.panel,current_uuid:f.photo});
+    assert.ok(context.video?.animate_callback_data);
+    const invoices=async()=>Number((await db`SELECT count(*)::int AS n FROM public.interaction_tokens
+      WHERE chat_id=${f.chatId} AND kind='invoice_payload'`)[0]!.n);
+    const before=await invoices();
+    const deliver=()=>service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:context.video!.animate_callback_data!,raw_update:{callback_query:{message:{message_id:f.panel,chat:{id:f.telegram},reply_markup:f.markup}}}});
+    const result=await deliver();
+    assert.equal(result.operation,'video_delivery_required');
+    assert.equal(await invoices(),before,'VideoPass delivery never creates a new invoice');
+    assert.equal(result.requested_photo_uuid,f.photo);assert.equal(result.source_photo_uuid,posePhoto);assert.equal(result.same_photo,false);
+    assert.ok(result.source_photo_reveal_at&&result.eligible_at&&result.source_photo_reveal_at<result.eligible_at);
+    const [row]=await db`SELECT video_id,source_photo_uuid,photo_message_id FROM app_private.video_deliveries WHERE delivery_id=${result.delivery_id!}`;
+    assert.equal(row!.video_id,fallback!.video_id);assert.equal(row!.source_photo_uuid,posePhoto);assert.equal(Number(row!.photo_message_id),f.panel);
+    const again=await deliver();assert.equal(again.delivery_id,result.delivery_id);
+    const [count]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE chat_id=${f.chatId} AND photo_message_id=${f.panel}`;
+    assert.equal(count!.n,1);
+    await db`UPDATE app_private.video_deliveries SET eligible_at=clock_timestamp()-interval '1 second' WHERE delivery_id=${result.delivery_id!}`;
+    const claimed=await service.evaluate({interaction_mode:'claim_video_delivery',delivery_id:result.delivery_id});
+    assert.equal(claimed.operation,'video_delivery_claimed');
+    assert.equal(claimed.source_photo_uuid,posePhoto);assert.equal(claimed.same_photo,false);
+    assert.ok(claimed.source_photo_url?.includes(posePhoto));
+    assert.equal(claimed.target_message_id,f.panel);
+  });
   await t.test('pose-only fallback delivers its own source photo and reuses the frozen delivery',async()=>{
     const f=await fixture();
     const poseSignature=f.signature.replace('_sitting_','_standing_'),posePhoto=randomUUID();
