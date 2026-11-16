@@ -105,9 +105,10 @@ function setup(overrides:Partial<VideoContext>={}, paidSceneUnlockToken: string 
     async redeemFreeVideoPass(token:string){if(redeemedGifts.has(token))return 1;if(freeVideoPasses<=0)return 0;
       redeemedGifts.add(token);freeVideoPasses--;videoPassActive=true;return 1;},
     async getDelivery(){return currentDelivery;},
-    async claimDelivery(){if(claimed)return null;claimed=true;return currentDelivery;},
+    async listDeliveredPanelVideos(){return [];},
+    async claimDelivery(){if(claimed)return null;claimed=true;currentDelivery={...currentDelivery,status:'sending'};return currentDelivery;},
     async completeDelivery(){currentDelivery={...delivery,status:'delivered',telegram_message_id:77,current_reply_markup:{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]}};return currentDelivery;},
-    async failDelivery(...args:unknown[]){requests.push(args);return {...delivery,status:args[3]?'failed':'uncertain'};},
+    async failDelivery(...args:unknown[]){requests.push(args);currentDelivery={...delivery,status:args[3]?'failed':'uncertain'};return currentDelivery;},
   } as unknown as VideoRepo;
   const service=new MediaCommerceDecisionService(repo,{async createStarsInvoice(){throw Error('Unexpected Stars call');}},null,videos,
     async()=> 'https://private.test/signed',localization);
@@ -235,19 +236,23 @@ test('video gifts redeem unlock and VideoPass without invoices, remain idempoten
   assert.equal(payment.operation,'video_ui_ready');assert.ok(paid.invoices.length>0);
 });
 test('no matching video hides animate, Full and pass suppress the extra commercial offer',async()=>{
-  for(const override of [{video:null},{panel_delivered:true},{delivery},{full_active:true},{video_pass_active:true}]){
+  for(const override of [{video:null},{delivery},{full_active:true},{video_pass_active:true}]){
     const {service,tokens}=setup(override);const result=await service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
-    if('video'in override || 'panel_delivered'in override) assert.equal(result.video?.animate_callback_data,undefined);
+    if('video'in override) assert.equal(result.video?.animate_callback_data,undefined);
     if('full_active' in override)assert.equal(result.commerce_ui?.actions.scene,undefined);
     else {
       assert.ok(result.commerce_ui?.actions.scene,'scene commerce remains available when at least one independent product exists');
       assert.equal(tokens.get(result.commerce_ui.actions.scene!)?.action_kind,'commerce_scene');
     }
     if(override.video===null)assert.equal(result.commerce_ui?.actions.video,undefined);
-    if(override.video===null||override.panel_delivered||override.delivery||override.full_active||override.video_pass_active){
+    if(override.video===null||override.delivery||override.full_active||override.video_pass_active){
       assert.equal(result.commerce_ui?.products.some(product=>product.feature_key==='video_unlock'||product.feature_key==='video_pass'),false);
     }
   }
+  // A historical receipt no longer blocks the next compatible clip of the same panel.
+  const historical=setup({panel_delivered:true});
+  const next=await historical.service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
+  assert.ok(next.video?.animate_callback_data);
 });
 test('entitled click freezes video and original panel into a delivery without invoices',async()=>{
   const {service,requests,invoices}=setup({full_active:true});
@@ -269,7 +274,12 @@ test('success returns latest persisted panel; ambiguous failure is never made re
   try {
     const {service,requests}=setup();
     const success=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:true,sent_message_id:100});
-    assert.equal(success.delivered,true);assert.deepEqual(success.reply_markup,{inline_keyboard:[[{text:'Next',callback_data:'photo_next'}]]});
+    assert.equal(success.delivered,true);
+    const keyboard=(success.reply_markup as {inline_keyboard:Array<Array<{text:string;callback_data:string}>>}).inline_keyboard;
+    assert.deepEqual(keyboard[0],[{text:'Next',callback_data:'photo_next'}]);
+    assert.deepEqual(keyboard[1]?.map(button=>button.text),['video']);
+    assert.match(keyboard[1]![0]!.callback_data,/^btn_/);
+    assert.equal(success.video_control_tokens?.includes(keyboard[1]![0]!.callback_data),false);
     assert.ok(success.video_payment_urls?.includes('https://gateway.example/v1/pay/sbp/pay_v_fixture_u%3Asbp'));
     const failure=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:deliveryId,delivery_success:false});
     assert.equal(failure.reason,'video_delivery_uncertain');assert.equal((requests.at(-1) as unknown[])[3],false);
@@ -292,11 +302,22 @@ test('confirmed navigation survives financial TTL; claim, foreign owner and wron
   assert.deepEqual(video.panel_navigation_row?.map(button=>button.callback_data),
     [claimed.video_panel_requested_callback_data,token,claimed.video_panel_requested_callback_data]);
 });
-test('failed paid one-shot delivery retries without another checkout',async()=>{
-  const {service,invoices}=setup({delivery:{...delivery,status:'failed'}});
-  const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
-  const result=await service.evaluate({event_type:'callback_query.received',interaction_mode:'callback',chat_id:1,callback_data:prepared.video!.animate_callback_data!});
-  assert.equal(result.operation,'video_delivery_required');assert.equal(result.delivery_id,deliveryId);assert.equal(invoices.length,0);
+test('failed paid delivery retries without another checkout',async()=>{
+  const {service,invoices}=setup({full_active:true});
+  const prepare={interaction_mode:'video_context' as const,chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77};
+  const prepared=await service.evaluate(prepare);
+  const token=prepared.video!.animate_callback_data!;
+  const first=await click(service,token);
+  assert.equal(first.operation,'video_delivery_required');assert.equal(first.delivery_id,deliveryId);
+  const claim=await service.evaluate({interaction_mode:'claim_video_delivery',delivery_id:deliveryId});
+  await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:claim.claim_token,
+    delivery_success:false,retryable:true,delivery_error:'telegram_rejected_400'});
+  const retry=await click(service,token);
+  assert.equal(retry.operation,'video_delivery_required');assert.equal(retry.delivery_id,deliveryId);
+  assert.equal(invoices.length,0);
+  // While that delivery is unfinished the panel does not offer a second request.
+  const root=await service.evaluate(prepare);
+  assert.equal(root.video?.animate_callback_data,undefined);
 });
 test('active Full subscription retains its terms and end date without another upgrade',async()=>{
   const {service,invoices}=setup({full_active:true,subscription_sku:'full',subscription_until:'2099-01-01T00:00:00Z'});

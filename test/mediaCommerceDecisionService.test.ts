@@ -705,6 +705,7 @@ function buildVideoRepository(
       };
     },
     async storePanel() { return { panel_delivered: false }; },
+    async listDeliveredPanelVideos() { return []; },
     ...overrides,
   } as unknown as VideoRepository;
 }

@@ -339,7 +339,7 @@ export function deliveryResponse(base: MediaCommerceDecisionResponse, delivery: 
       source_photo_uuid:delivery.source_photo_uuid,source_photo_reveal_at:delivery.source_photo_reveal_at,
       source_photo_url:sourcePhotoUrl(delivery.source_photo_bucket_name,delivery.source_photo_storage_path),
       panel_caption:delivery.panel_caption,panel_caption_entities:delivery.panel_caption_entities,
-      same_photo:delivery.same_photo,reason:`video_delivery_${delivery.status}`};
+      same_photo:delivery.same_photo,needs_source_photo_reveal:delivery.needs_source_photo_reveal,reason:`video_delivery_${delivery.status}`};
   }
 
 export function buildFeatureFulfillmentResponse(base: MediaCommerceDecisionResponse,

@@ -42,6 +42,8 @@ export interface VideoDelivery {
   panel_insert_after_uuid?: string | null; source_photo_reveal_at?: string | null;
   panel_caption?: string | null; panel_caption_entities?: unknown[] | null;
   same_photo?: boolean | null;
+  needs_source_photo_reveal?: boolean | null;
+  created_at?: string | null;
 }
 export interface VideoPassOfferContext {
   scene_session_id: string | null;
@@ -107,6 +109,24 @@ export class VideoCommerceRepository {
   async claimDelivery(id: string, claimToken: string): Promise<VideoDelivery | null> {
     const rows = await this.query<{ value: VideoDelivery | null }[]>`SELECT public.media_claim_video_delivery(${id}::uuid,${claimToken}::uuid) AS value`;
     return normalizeDelivery(rows[0]?.value ?? null);
+  }
+  /** Delivered Telegram clips of one panel, oldest first; the only extra query for panel history. */
+  async listDeliveredPanelVideos(chatId: number, panelId: number): Promise<VideoDelivery[]> {
+    const rows = await this.query<Array<Record<string, unknown>>>`
+      SELECT delivery_id, video_id, scene_session_id, photo_message_id, telegram_chat_id,
+        requested_photo_uuid, source_photo_uuid, source_photo_bucket_name, source_photo_storage_path,
+        bucket_name, storage_path, panel_caption, panel_caption_entities, created_at
+      FROM app_private.video_deliveries
+      WHERE chat_id = ${chatId}::bigint
+        AND photo_message_id = ${panelId}::bigint
+        AND source = 'telegram'
+        AND status = 'delivered'
+        AND telegram_message_id = photo_message_id
+      ORDER BY created_at, delivery_id`;
+    return rows.map(row => normalizeDelivery({
+      ...row, status: 'delivered', source: 'telegram',
+      eligible_at: row.created_at == null ? null : String(row.created_at)
+    } as unknown as VideoDelivery)).filter((delivery): delivery is VideoDelivery => delivery != null);
   }
   async getDelivery(id: string): Promise<VideoDelivery | null> {
     const rows=await this.query<{value:VideoDelivery|null}[]>`SELECT app_private.video_delivery_json(d) AS value

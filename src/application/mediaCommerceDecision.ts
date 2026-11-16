@@ -303,6 +303,11 @@ function cleanDeliveredVideoMarkup(markup: unknown, tokens: unknown, urls: strin
   return {...parsed,inline_keyboard:inlineKeyboard};
 }
 
+/** Only an unfinished delivery blocks the next clip of the same panel. */
+function pendingVideoDelivery(delivery: VideoDelivery | null | undefined): VideoDelivery | null {
+  return delivery && delivery.status !== 'delivered' ? delivery : null;
+}
+
 function classifyRoute(input: MediaCommerceDecisionRequest): MediaCommerceRoute {
   const mode = normalizeString(input.interaction_mode);
   const eventType = normalizeString(input.event_type);
@@ -446,11 +451,17 @@ export class MediaCommerceDecisionService {
           const selected = input.selected_uuid ?? input.current_uuid;
           const delivery = context.delivery;
           const nav = delivery?.status === 'delivered' && selected
-            ? await this.videoPanelTokens(response, delivery, selected === delivery.requested_photo_uuid ? 'video_panel_requested_photo' : 'photo_next', selected)
+            ? await this.videoPanelTokens(response, delivery, 'photo_next', selected)
             : null;
-          return {...response,...nav,target_message_id:panel,video_panel_reconcile:true,video:{available:false,consumed:true},
+          // The restored request button is the next clip's offer, so it must survive reconciliation.
+          const controls = nav?.video_control_tokens ?? await this.retainedVideoControls(response.chat_id,
+            context.current_reply_markup,context.video_control_tokens ?? context.delivery?.video_control_tokens ?? [],
+            !pendingVideoDelivery(context.delivery));
+          const navFields = nav ? {...nav} as Record<string,unknown> : {};
+          delete navFields.ordinaryPhoto; delete navFields.video_control_tokens;
+          return {...response,...navFields,target_message_id:panel,video_panel_reconcile:true,video:{available:false,consumed:true},
             current_reply_markup:context.current_reply_markup,reply_markup:context.current_reply_markup,
-            video_control_tokens:context.video_control_tokens ?? context.delivery?.video_control_tokens ?? [],
+            video_control_tokens:controls,
             video_payment_urls:videoPaymentCleanupUrls(context.video_payment_urls ?? context.delivery?.video_payment_urls,
               context.delivery?.payment_token,context.current_reply_markup)};
         }
@@ -639,6 +650,15 @@ currency:price.currency,prices,...(token?{callback_data:token}:{}),
       products};
   }
 
+  /** One video-request payload shared by the root offer and the post-delivery button restore. */
+  private videoRequestToken(base:MediaCommerceDecisionResponse,snapshot:Record<string,unknown>,panel:number|null,
+    video:{video_id:string;requested_photo_uuid:string;source_photo_uuid:string}|null) {
+    return this.videoToken({...base,target_message_id:panel??base.target_message_id},'video_request',{...snapshot,
+      video_id:video?.video_id??null,
+      requested_photo_uuid:video?.requested_photo_uuid??snapshot.source_photo??null,
+      source_photo_uuid:video?.source_photo_uuid??null});
+  }
+
   private async commerceRoot(base:MediaCommerceDecisionResponse,surface:CommerceSurface,ctx?:VideoContext|null,
     root?:CommerceUi['return_context'],authorizedRows:InteractionTokenRow[] = [],
     knownOffer?:Awaited<ReturnType<MediaCommerceDecisionService['sceneOffer']>>) {
@@ -648,8 +668,9 @@ currency:price.currency,prices,...(token?{callback_data:token}:{}),
     const current=!!base.scene_session_id && offer.scene_session_id===base.scene_session_id;
     const trustedFirstPhoto=base.operation==='edit_photo' && !!base.selected_uuid && !!offer.matching_video &&
       !!base.media_signature && base.media_signature===offer.media_signature;
-    const videoAvailable=!!ctx && current && ctx.scene_active && !ctx.panel_delivered &&
-      (!!ctx.video || trustedFirstPhoto) && (!ctx.delivery || ctx.delivery.status==='failed');
+    const pending=pendingVideoDelivery(ctx?.delivery);
+    const videoAvailable=!!ctx && current && ctx.scene_active && !pending &&
+      (!!ctx.video || trustedFirstPhoto);
     const canPass=current && !offer.full_active && !offer.video_pass_active && !!resolveVideoPassPlan(offer.paid_scene_unlock_token) &&
       (photo?videoAvailable&&!ctx?.delivery:offer.available);
     const responseExperiment=base.ab_test?config.EXPERIMENTS.find(experiment=>experiment.key===base.ab_test?.key&&
@@ -685,8 +706,7 @@ currency:price.currency,prices,...(token?{callback_data:token}:{}),
       const row=this.videoToken(base,'commerce_scene',snap);rows.push(row);actions.scene=row.token;
     }
     if(photo && videoAvailable){
-      const row=this.videoToken(base,'video_request',{...snap,video_id:ctx?.video?.video_id??null,
-        requested_photo_uuid:ctx?.video?.requested_photo_uuid??snap.source_photo,source_photo_uuid:ctx?.video?.source_photo_uuid??null});
+      const row=this.videoRequestToken(base,snap,panel,ctx?.video??null);
       rows.push(row);actions.video=row.token;
     }
     const products:CommerceProduct[]=[];
@@ -993,9 +1013,13 @@ base={
       return {...restored,operation:'video_ui_ready' as const,reason:'commerce_root'};
     }
     if(stage!=='scene'&&stage!=='video')return stale();
-    const hasVideo=photo?!!ctx?.video&&ctx.scene_active&&!ctx.panel_delivered&&!ctx.delivery:offer.available;
     if(stage==='video' && (!photo || !ctx))return stale();
-    if(stage==='video' && ctx && (ctx.delivery || ctx.full_active || ctx.video_pass_active)){
+    const pending=pendingVideoDelivery(ctx?.delivery);
+    // A button frozen to a delivered clip never buys the next one.
+    const frozenVideoId=typeof payload.video_id==='string'?payload.video_id:null;
+    if(stage==='video' && !pending && frozenVideoId && ctx?.video?.video_id!==frozenVideoId)return stale();
+    const hasVideo=photo?!!ctx?.video&&ctx.scene_active&&!pending:offer.available;
+    if(stage==='video' && ctx && (pending || ctx.full_active || ctx.video_pass_active)){
       return this.evaluateVideoCallback({...base,current_uuid:uuid},payload);
     }
     const abParams=(await resolveAbTestSelection(this.repository,base.chat_id!,'subscription_offer'))?.params??{};
@@ -1046,7 +1070,7 @@ base={
     if(directVideoProduct&&unlockPlan){
       const directKey=createHash('sha256').update(JSON.stringify([base.chat_id,base.scene_session_id,messageId,stage,
         directVideoProduct.feature_key,directVideoProduct.purchase_variant,offer.video_pass_payment_token??null,
-        unlockPlan.amount_xtr,unlockPlan.amount_rub??null,uuid,snap.media_signature])).digest('hex').slice(0,24);
+        unlockPlan.amount_xtr,unlockPlan.amount_rub??null,uuid,snap.media_signature,ctx?.video?.video_id??null])).digest('hex').slice(0,24);
       const opened=await this.evaluateVideoCallback({...base,current_uuid:uuid,media_signature:snap.media_signature},
         {...payload,chosen_feature:'video_unlock',video_purchase_key:directKey,allow_gift:action==='video_request'});
       if(opened.operation!=='video_ui_ready')return opened;
@@ -1063,8 +1087,11 @@ base={
          (stage==='video'&&ctx?.video?.video_id!==payload.video_id))return stale();
       let options:MediaPaymentOption[];
       const cycle=product.feature_key==='scene_unlock'?offer.scene_access_payment_token:offer.video_pass_payment_token;
+      // A video purchase attempt is bound to the clip it quotes; other purchases keep their key.
+      const quotedVideoId=product.feature_key==='video_unlock'||(product.feature_key==='video_pass'&&stage==='video')
+        ? ctx?.video?.video_id??null : null;
       const key=createHash('sha256').update(JSON.stringify([base.chat_id,base.scene_session_id,messageId,stage,product.feature_key,
-        product.purchase_variant,cycle??null,plan.amount_xtr,plan.amount_rub,uuid,snap.media_signature])).digest('hex').slice(0,24);
+        product.purchase_variant,cycle??null,plan.amount_xtr,plan.amount_rub,uuid,snap.media_signature,quotedVideoId])).digest('hex').slice(0,24);
       if(product.feature_key==='scene_unlock'){
         options=await this.buildSceneUnlockPaymentOptionsAtClick({chat_id:base.chat_id!,scene_session_id:base.scene_session_id!,target_message_id:messageId,token:key,
           user_id:offer.user_id,signature:snap.media_signature,commerce_origin:snap});
@@ -1135,42 +1162,103 @@ base={
       .map(row=>row.payment_source==='sbp'?buildSbpGatewayRow(row):row);
   }
 
+  /**
+   * Controls that must be removed from a panel: every commercial token except an already
+   * rendered, still active video-request button (the restored offer of the next clip).
+   */
+  private async retainedVideoControls(chatId: number | null | undefined, markup: unknown, tokens: unknown,
+    retainCurrentRequest: boolean) {
+    const all = normalizeInvoiceTokens(tokens);
+    if (!retainCurrentRequest || !chatId || !all.length) return all;
+    const parsed = parseJsonObject(markup);
+    const buttons = Array.isArray(parsed?.inline_keyboard) ? parsed.inline_keyboard.flat().map(parseJsonObject) : [];
+    const present = new Set(buttons.flatMap(button =>
+      typeof button?.callback_data === 'string' ? [button.callback_data] : []));
+    const candidates = all.filter(token => present.has(token));
+    if (!candidates.length) return all;
+    const stored = await this.repository.loadCallbackTokens(candidates, chatId);
+    const keep = new Set(stored.flatMap(row => row?.found && row.status === 'active' && !isExpired(row.expires_at) &&
+      row.action_kind === 'video_request' ? [row.requested_token ?? row.token ?? ''] : []).filter(Boolean));
+    return all.filter(token => !keep.has(token));
+  }
+
   private async videoPanelTokens(base: MediaCommerceDecisionResponse, delivery: VideoDelivery,
     currentAction = 'video_panel_video', ordinaryUuid?: string) {
-    const { chat_id: chat, requested_photo_uuid: requested, source_photo_uuid: source, photo_message_id: panel } = delivery;
-    if (!chat || !requested || !source || !panel) return null;
+    const { chat_id: chat, photo_message_id: panel } = delivery;
+    const requested = delivery.requested_photo_uuid ?? null;
+    const source = delivery.source_photo_uuid ?? null;
+    if (!chat || !panel) return null;
+    if (delivery.status !== 'delivered' && delivery.status !== 'sending') return null;
     if (delivery.status === 'delivered' && delivery.telegram_message_id !== panel) return null;
     const scope = await this.videos.context({chat_id: chat, scene_session_id: delivery.scene_session_id ?? null, panel_message_id: panel});
     const context = await this.repository.loadMediaContext({
       chat_id: chat, scene_session_id: delivery.scene_session_id ?? null, turn_no: null, scene_turn_no: null,
-      media_signature: scope.panel_media_signature ?? null, current_uuid: requested, target_message_id: panel,
+      media_signature: scope.panel_media_signature ?? null, current_uuid: requested ?? scope.panel_photo_uuid ?? null, target_message_id: panel,
       base_price_xtr: 0, action_kind: 'photo_next', requested_action: null, invoice_token: null,
       force_deliver_after_payment: false, paid_access_mode: null, callback_valid: true, panel_text: null, panel_entities_json: []
     });
     const photos = normalizeUnlockedItems(context.unlocked_items_json);
-    const make = (action: string, uuid: string) => {
+    // Ordinary photos keep their order; a delivered clip joins the photo it belongs to.
+    const history = await this.videos.listDeliveredPanelVideos(chat, panel);
+    const clips = [...history];
+    if (!clips.some(item => item.delivery_id === delivery.delivery_id)) clips.push(delivery);
+    type PanelElement = {kind: 'photo'; uuid: string; photo_url: string | null} | {kind: 'video'; delivery: VideoDelivery};
+    const elements: PanelElement[] = photos.map(photo => ({kind: 'photo', uuid: photo.uuid, photo_url: photo.photo_url}));
+    const photoIndex = (uuid: string | null) => uuid
+      ? elements.findIndex(item => item.kind === 'photo' && item.uuid === uuid) : -1;
+    const groupEnd = (start: number) => {
+      let index = start;
+      while (index + 1 < elements.length && elements[index + 1]!.kind === 'video') index++;
+      return index;
+    };
+    // An older paid snapshot can outlive its panel's ordinary-photo event.
+    if (requested && photoIndex(requested) < 0) elements.push({kind: 'photo', uuid: requested, photo_url: null});
+    for (const clip of clips) {
+      const clipSource = clip.source_photo_uuid ?? null;
+      if (!clipSource) continue;
+      let index = photoIndex(clipSource);
+      if (index < 0) {
+        const anchor = photoIndex(clip.requested_photo_uuid ?? null);
+        const photo: PanelElement = {kind: 'photo', uuid: clipSource, photo_url: null};
+        if (anchor >= 0) {
+          index = groupEnd(anchor) + 1;
+          elements.splice(index, 0, photo);
+        } else {
+          elements.push(photo);
+          index = elements.length - 1;
+        }
+      }
+      elements.splice(groupEnd(index) + 1, 0, {kind: 'video', delivery: clip});
+    }
+    const makePhoto = (uuid: string) => {
       const row = this.videoToken({...base, chat_id: chat, scene_session_id: delivery.scene_session_id,
-        telegram_chat_id: delivery.telegram_chat_id, target_message_id: panel, current_uuid: uuid}, action, {
+        telegram_chat_id: delivery.telegram_chat_id, target_message_id: panel, current_uuid: uuid}, 'photo_next', {
           delivery_id: delivery.delivery_id, requested_photo_uuid: requested, source_photo_uuid: source
         });
-      const identity = action === 'photo_next' ? [action, delivery.delivery_id, uuid] : [action, delivery.delivery_id];
-      row.token = 'btn_' + createHash('sha256').update(identity.join(':')).digest('hex').slice(0,32);
-      if (delivery.status === 'delivered' && action !== 'photo_next') row.expires_at = null;
+      row.token = 'btn_' + createHash('sha256').update(['photo_next', panel, uuid].join(':')).digest('hex').slice(0,32);
       return row;
     };
-    const requestedRow = make('video_panel_requested_photo', requested);
-    const sourceRow = requested === source ? requestedRow : make('video_panel_source_photo', source);
-    const videoRow = make('video_panel_video', source);
-    const rows = photos.map(photo => photo.uuid === requested ? requestedRow : make('photo_next', photo.uuid));
-    // An older paid snapshot can outlive its panel's ordinary-photo event.
-    if (!rows.includes(requestedRow)) rows.push(requestedRow);
-    rows.splice(rows.indexOf(requestedRow) + 1, 0, ...(source === requested ? [videoRow] : [sourceRow, videoRow]));
-    const index = rows.findIndex(row => row.action_kind === currentAction &&
-      (currentAction !== 'photo_next' || row.payload_json.current_uuid === ordinaryUuid));
+    const makeVideo = (clip: VideoDelivery) => {
+      const row = this.videoToken({...base, chat_id: chat, scene_session_id: delivery.scene_session_id,
+        telegram_chat_id: delivery.telegram_chat_id, target_message_id: panel, current_uuid: clip.source_photo_uuid ?? null},
+        'video_panel_video', {delivery_id: clip.delivery_id, requested_photo_uuid: clip.requested_photo_uuid ?? null,
+          source_photo_uuid: clip.source_photo_uuid ?? null});
+      row.token = 'btn_' + createHash('sha256').update(['video_panel_video', clip.delivery_id].join(':')).digest('hex').slice(0,32);
+      if (clip.status === 'delivered') row.expires_at = null;
+      return row;
+    };
+    const rows = elements.map(element => element.kind === 'photo' ? makePhoto(element.uuid) : makeVideo(element.delivery));
+    const index = currentAction === 'video_panel_video'
+      ? rows.findIndex(row => row.action_kind === 'video_panel_video' && row.payload_json.delivery_id === delivery.delivery_id)
+      : rows.findIndex(row => row.action_kind === 'photo_next' && row.payload_json.current_uuid === (ordinaryUuid ?? requested));
     if (index < 0) return null;
+    const photoRow = (uuid: string | null) => uuid
+      ? rows.find(row => row.action_kind === 'photo_next' && row.payload_json.current_uuid === uuid) ?? null : null;
     const callbacks = {
-      video_panel_requested_callback_data: requestedRow.token,
-      video_panel_source_callback_data: sourceRow.token, video_panel_video_callback_data: videoRow.token
+      video_panel_requested_callback_data: photoRow(requested)?.token ?? null,
+      video_panel_source_callback_data: (photoRow(source) ?? photoRow(requested))?.token ?? null,
+      video_panel_video_callback_data: rows.find(row => row.action_kind === 'video_panel_video' &&
+        row.payload_json.delivery_id === delivery.delivery_id)?.token ?? null
     };
     for (const row of rows) Object.assign(row.payload_json, callbacks);
     await this.repository.upsertCallbackTokens(rows);
@@ -1183,10 +1271,36 @@ base={
       return saved?.action_kind === 'photo_prev' || saved?.action_kind === 'photo_next' ? token : null;
     }));
     const button = (text: string, offset: number) => ({text, callback_data: rows[(index + offset + rows.length) % rows.length]!.token});
-    const ordinaryPhoto = currentAction === 'photo_next' ? photos.find(photo => photo.uuid === ordinaryUuid) : null;
-    return {...callbacks, ordinaryPhoto,
+    const ordinaryPhoto = ordinaryUuid ? photos.find(photo => photo.uuid === ordinaryUuid) ?? null : null;
+    const controlTokens = await this.retainedVideoControls(chat, delivery.current_reply_markup,
+      delivery.video_control_tokens, delivery.status === 'delivered' && !pendingVideoDelivery(scope.delivery));
+    return {...callbacks, ordinaryPhoto, video_control_tokens: controlTokens,
       panel_navigation_row: [button('‹', -1), button(String(index + 1) + '/' + rows.length, 0), button('›', 1)],
       panel_navigation_tokens: [...rows.map(row => row.token), ...oldNav.filter((token): token is string => token !== null)]};
+  }
+
+  /**
+   * After a delivery the panel offers the next compatible clip again. The button is only
+   * added when the band still matches the saved panel hint and nothing is in flight.
+   */
+  private async restoredVideoRequest(base: MediaCommerceDecisionResponse, delivery: VideoDelivery,
+    markup: Record<string, unknown>) {
+    const chat = delivery.chat_id, panel = delivery.photo_message_id;
+    if (!chat || !panel) return null;
+    const scope = await this.videos.context({chat_id:chat,scene_session_id:delivery.scene_session_id ?? null,panel_message_id:panel});
+    if (!scope.scene_active) return null;
+    const requested = delivery.requested_photo_uuid ?? scope.panel_photo_uuid ?? null;
+    if (!requested) return null;
+    const context = await this.videos.context({chat_id:chat,scene_session_id:delivery.scene_session_id ?? null,
+      media_signature:scope.panel_media_signature ?? null,panel_message_id:panel,requested_photo_uuid:requested});
+    if (!context.scene_active || !context.video || pendingVideoDelivery(context.delivery)) return null;
+    if (!Array.isArray(markup.inline_keyboard)) return null;
+    const row = this.videoRequestToken({...base,chat_id:chat,scene_session_id:delivery.scene_session_id ?? base.scene_session_id ?? null,
+      telegram_chat_id:delivery.telegram_chat_id,target_message_id:panel,current_uuid:requested},{
+        delivery_id:delivery.delivery_id,source_photo:requested,media_signature:scope.panel_media_signature ?? null,
+        panel_media_signature:scope.panel_media_signature ?? null,panel_photo_uuid:requested},panel,context.video);
+    await this.repository.upsertCallbackTokens([row]);
+    return row;
   }
 
   private async evaluateVideoPanelCallback(base: MediaCommerceDecisionResponse, payload: Record<string,unknown>,
@@ -1209,27 +1323,27 @@ base={
     }
     const nav = await this.videoPanelTokens(base, delivery, action, base.current_uuid ?? undefined);
     if (!nav) return {...base, operation:'noop', reason:'video_panel_changed'};
-    const {ordinaryPhoto, ...callbacks} = nav;
+    const {ordinaryPhoto, video_control_tokens: controlTokens, ...callbacks} = nav;
     let mediaUrl: string | null;
     let uuid: string | null = null;
     if (action === 'video_panel_video') {
       mediaUrl = await this.videoSigner(delivery.bucket_name, delivery.storage_path);
     } else if (action === 'video_panel_source_photo') {
-      uuid = delivery.source_photo_uuid;
+      uuid = delivery.source_photo_uuid ?? null;
       mediaUrl = sourcePhotoUrl(delivery.source_photo_bucket_name, delivery.source_photo_storage_path);
     } else if (action === 'photo_next') {
-      uuid = ordinaryPhoto?.uuid ?? null;
-      mediaUrl = ordinaryPhoto?.photo_url ?? null;
+      uuid = ordinaryPhoto?.uuid ?? base.current_uuid ?? null;
+      mediaUrl = ordinaryPhoto?.photo_url ?? (uuid ? (await this.repository.loadPhotoByUuid(uuid))?.photo_url ?? null : null);
     } else {
-      uuid = delivery.requested_photo_uuid;
-      mediaUrl = (await this.repository.loadPhotoByUuid(uuid))?.photo_url ?? null;
+      uuid = delivery.requested_photo_uuid ?? null;
+      mediaUrl = uuid ? (await this.repository.loadPhotoByUuid(uuid))?.photo_url ?? null : null;
     }
     if (!mediaUrl) return {...base, operation:'noop', reason:'video_panel_media_unavailable'};
     return {...base,...callbacks, operation:'video_panel_media_ready', delivery_id:delivery.delivery_id,
       target_message_id:panel, telegram_chat_id:transport, panel_media_kind:uuid ? 'photo' : 'video',
       panel_media_url:mediaUrl, panel_media_uuid:uuid, requested_photo_uuid:delivery.requested_photo_uuid,
       source_photo_uuid:delivery.source_photo_uuid, panel_caption:delivery.panel_caption,
-      panel_caption_entities:delivery.panel_caption_entities, video_control_tokens:delivery.video_control_tokens ?? [],
+      panel_caption_entities:delivery.panel_caption_entities, video_control_tokens:controlTokens,
       video_payment_urls:videoPaymentCleanupUrls(delivery.video_payment_urls,delivery.payment_token,delivery.current_reply_markup), reply_markup:delivery.current_reply_markup,
       current_reply_markup:delivery.current_reply_markup, reason:'video_panel_media_ready'};
   }
@@ -1279,11 +1393,12 @@ base={
       telegram_chat_id:normalizePositiveInteger(payload.telegram_chat_id) ?? base.telegram_chat_id};
     const context = await this.loadVideoContext(frozen);
     const passOnly = payload.pass_only === true;
-    if (!passOnly && context.delivery) return deliveryResponse(frozen,context.delivery);
+    const pending = pendingVideoDelivery(context.delivery);
+    if (!passOnly && pending) return deliveryResponse(frozen,pending);
     const menu = passOnly && payload.pass_menu === true;
     const offer = await this.videos.passOfferContext(frozen.chat_id!, frozen.scene_session_id ?? null, 'telegram');
     if (!context.scene_active || offer.scene_session_id !== frozen.scene_session_id ||
-      (menu ? !offer.available : !context.video || context.panel_delivered || !!context.delivery)) {
+      (menu ? !offer.available : !context.video || !!pending)) {
       return {...frozen,operation:'noop',reason:'video_unavailable',callback_answer_text:renderUx(getMediaUxCopy().video?.unavailable)};
     }
     // The callback belongs to the displayed photo, never to a photo visited earlier.
@@ -1366,6 +1481,7 @@ base={
           source_photo_bucket_name:delivery.source_photo_bucket_name,source_photo_storage_path:delivery.source_photo_storage_path,
           source_photo_url:sourcePhotoUrl(delivery.source_photo_bucket_name,delivery.source_photo_storage_path),
           source_photo_reveal_at:delivery.source_photo_reveal_at,same_photo:delivery.same_photo,
+          needs_source_photo_reveal:delivery.needs_source_photo_reveal,
           panel_caption:delivery.panel_caption,panel_caption_entities:delivery.panel_caption_entities,
           ...callbacks,
           current_reply_markup:delivery.current_reply_markup,
@@ -1387,9 +1503,14 @@ base={
       if (cleaned) {
         const scope=await this.videos.context({chat_id:delivery.chat_id,scene_session_id:delivery.scene_session_id ?? null,
           panel_message_id:delivery.photo_message_id});
-        await this.videos.storePanel(delivery.chat_id,delivery.photo_message_id,cleaned,
+        const restored=await this.restoredVideoRequest(base,delivery,cleaned);
+        const markup=restored
+          ? {...cleaned,inline_keyboard:[...(Array.isArray(cleaned.inline_keyboard)?cleaned.inline_keyboard:[]),
+              [{text:getMediaUxCopy().commerce_ui?.video ?? '',callback_data:restored.token}]]}
+          : cleaned;
+        await this.videos.storePanel(delivery.chat_id,delivery.photo_message_id,markup,
           scope.panel_media_signature ?? null,scope.panel_photo_uuid ?? null);
-        delivery={...delivery,current_reply_markup:cleaned};
+        delivery={...delivery,current_reply_markup:markup};
       }
     }
     const callbacks=delivered&&delivery?await this.videoPanelTokens(base,delivery):null;
@@ -1397,7 +1518,7 @@ base={
       target_message_id:delivery?.photo_message_id ?? null,telegram_chat_id:delivery?.telegram_chat_id ?? null,
       current_reply_markup:delivery?.current_reply_markup,reply_markup:delivery?.current_reply_markup,
       requested_photo_uuid:delivery?.requested_photo_uuid,source_photo_uuid:delivery?.source_photo_uuid,
-      same_photo:delivery?.same_photo,
+      same_photo:delivery?.same_photo,needs_source_photo_reveal:delivery?.needs_source_photo_reveal,
       ...callbacks,
       video_control_tokens:delivery?.video_control_tokens ?? [],video_payment_urls:cleanupUrls,
       reason:delivered ? 'video_delivered' : `video_delivery_${delivery?.status ?? 'not_updated'}`};

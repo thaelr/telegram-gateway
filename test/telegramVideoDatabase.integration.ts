@@ -294,5 +294,117 @@ test('Telegram video uses actual PostgreSQL payment snapshots and claim protocol
     const again=await pay(f.chatId,token);assert.equal(again.delivery_id,first.delivery_id);
     const [count]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE payment_token=${token}`;assert.equal(count!.n,1);
   });
+  await t.test('MULTI-01: one panel delivers two sequential clips and keeps one navigation',async()=>{
+    const f=await fixture();
+    await db`UPDATE public.users SET subscription_sku='tg_full',subscription_until=now()+interval '30 days',subscription_tier='full',subscription_tier_sku='tg_full' WHERE user_id=${f.userId}`;
+    const second=randomUUID();
+    await db`INSERT INTO public.video_catalog(video_id,character_i,media_signature,source_photo_uuid,storage_path,status,selection_priority)
+      VALUES(${second},1,${f.signature},${f.photo},${second+'.mp4'},'ready',-10)`;
+    const deliver=async(deliveryId:string)=>{
+      await db`UPDATE app_private.video_deliveries SET eligible_at=clock_timestamp()-interval '1 second' WHERE delivery_id=${deliveryId}`;
+      const claimed=await service.evaluate({interaction_mode:'claim_video_delivery',delivery_id:deliveryId});
+      assert.equal(claimed.operation,'video_delivery_claimed');
+      const done=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:deliveryId,claim_token:claimed.claim_token,delivery_success:true,sent_message_id:f.panel});
+      assert.equal(done.delivered,true);
+      return done;
+    };
+    const first=await callback(f);assert.equal(first.operation,'video_delivery_required');
+    assert.equal(first.needs_source_photo_reveal,false);
+    const done=await deliver(first.delivery_id!);
+    const keyboard=(done.reply_markup as {inline_keyboard:Array<Array<{text:string;callback_data:string}>>}).inline_keyboard;
+    const restored=keyboard.at(-1)![0]!;
+    assert.ok(restored.text,'the delivered panel re-offers the next clip');
+    assert.match(restored.callback_data,/^btn_/);
+    assert.equal(done.video_control_tokens?.includes(restored.callback_data),false);
+    const next=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:restored.callback_data,raw_update:{callback_query:{from:{id:f.telegram},message:{message_id:f.panel,chat:{id:f.telegram},reply_markup:done.reply_markup}}}});
+    assert.equal(next.operation,'video_delivery_required');
+    assert.notEqual(next.delivery_id,first.delivery_id);
+    const [row]=await db`SELECT video_id FROM app_private.video_deliveries WHERE delivery_id=${next.delivery_id!}`;
+    assert.equal(row!.video_id,second);
+    const secondDone=await deliver(next.delivery_id!);
+    assert.equal(secondDone.needs_source_photo_reveal,false);
+    const [table]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE chat_id=${f.chatId} AND photo_message_id=${f.panel} AND status='delivered'`;
+    assert.equal(table!.n,2);
+    const navigation=secondDone.panel_navigation_row??[];
+    assert.equal(navigation.length,3);
+    assert.equal(navigation[1]!.text,'3/3','both clips stay in the panel history with one page counter');
+  });
+  await t.test('MULTI-02: a paired source photo is revealed once for the whole panel',async()=>{
+    const f=await fixture();
+    await db`UPDATE public.users SET subscription_sku='tg_full',subscription_until=now()+interval '30 days',subscription_tier='full',subscription_tier_sku='tg_full' WHERE user_id=${f.userId}`;
+    await db`UPDATE public.video_catalog SET status='disabled' WHERE video_id=${f.video}`;
+    const poseSignature=f.signature.replace('_sitting_','_standing_'),posePhoto=randomUUID();
+    await db`INSERT INTO public.media_catalog(character_i,uuid,scene_hint,bucket_name,storage_path,status)
+      VALUES(1,${posePhoto},${poseSignature},'media_bucket',${posePhoto+'.jpg'},'ready')`;
+    await db`INSERT INTO public.video_catalog(character_i,media_signature,source_photo_uuid,storage_path,status)
+      VALUES(1,${poseSignature},${posePhoto},${randomUUID()+'.mp4'},'ready')`;
+    const context=await service.evaluate({interaction_mode:'video_context',chat_id:f.chatId,telegram_chat_id:f.telegram,scene_session_id:f.scene,
+      media_signature:f.signature,panel_message_id:f.panel,current_uuid:f.photo});
+    assert.ok(context.video?.animate_callback_data);
+    const first=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:context.video.animate_callback_data,raw_update:{callback_query:{message:{message_id:f.panel,chat:{id:f.telegram},reply_markup:f.markup}}}});
+    assert.equal(first.operation,'video_delivery_required');
+    assert.equal(first.source_photo_uuid,posePhoto);assert.equal(first.needs_source_photo_reveal,true);
+    assert.ok(Date.parse(first.source_photo_reveal_at!)-Date.parse(first.eligible_at!)<0);
+    const [stored]=await db`SELECT created_at,source_photo_reveal_at FROM app_private.video_deliveries WHERE delivery_id=${first.delivery_id!}`;
+    assert.ok(Date.parse(stored!.source_photo_reveal_at)-Date.parse(stored!.created_at)>=1900,'an unseen source photo waits before the reveal');
+    const [again]=await db`INSERT INTO public.video_catalog(character_i,media_signature,source_photo_uuid,storage_path,status,selection_priority)
+      VALUES(1,${poseSignature},${posePhoto},${randomUUID()+'.mp4'},'ready',-10) RETURNING video_id`;
+    await db`UPDATE app_private.video_deliveries SET eligible_at=clock_timestamp()-interval '1 second' WHERE delivery_id=${first.delivery_id!}`;
+    const claimed=await service.evaluate({interaction_mode:'claim_video_delivery',delivery_id:first.delivery_id!});
+    assert.equal(claimed.needs_source_photo_reveal,true,'the delivery itself never proves that its own photo was shown');
+    const done=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:first.delivery_id!,claim_token:claimed.claim_token,delivery_success:true,sent_message_id:f.panel});
+    const keyboard=(done.reply_markup as {inline_keyboard:Array<Array<{text:string;callback_data:string}>>}).inline_keyboard;
+    const restored=keyboard.at(-1)![0]!;
+    const second=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:restored.callback_data,raw_update:{callback_query:{from:{id:f.telegram},message:{message_id:f.panel,chat:{id:f.telegram},reply_markup:done.reply_markup}}}});
+    assert.equal(second.operation,'video_delivery_required');
+    assert.equal(second.source_photo_uuid,posePhoto);
+    assert.equal(second.needs_source_photo_reveal,false,'the same source photo is already part of the panel');
+    const [secondRow]=await db`SELECT created_at,source_photo_reveal_at,video_id FROM app_private.video_deliveries WHERE delivery_id=${second.delivery_id!}`;
+    assert.equal(secondRow!.video_id,again!.video_id);
+    assert.ok(Date.parse(secondRow!.source_photo_reveal_at)-Date.parse(secondRow!.created_at)<1000,'a known source photo needs no new reveal');
+    const history=await videos.listDeliveredPanelVideos(f.chatId,f.panel);
+    assert.equal(history.length,1);
+    assert.equal(history[0]!.source_photo_uuid,posePhoto);
+  });
+  await t.test('MULTI-03: a completed clip never funds the next one and its token is replayed safely',async()=>{
+    const f=await fixture();
+    const second=randomUUID();
+    await db`INSERT INTO public.video_catalog(video_id,character_i,media_signature,source_photo_uuid,storage_path,status,selection_priority)
+      VALUES(${second},1,${f.signature},${f.photo},${second+'.mp4'},'ready',-10)`;
+    const options=await callback(f);assert.equal(options.operation,'video_ui_ready');
+    const selected=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:options.commerce_ui!.products.find(p=>p.feature_key==='video_unlock')!.callback_data});
+    const firstToken=selected.commerce_ui!.payment_options![0]!.token;
+    const [firstSnapshot]=await db`SELECT payload_json FROM public.interaction_tokens WHERE token=${firstToken}`;
+    assert.equal(firstSnapshot!.payload_json.video_id,f.video);
+    const first=await pay(f.chatId,firstToken);assert.equal(first.operation,'video_delivery_required');
+    await db`UPDATE app_private.video_deliveries SET eligible_at=clock_timestamp()-interval '1 second' WHERE delivery_id=${first.delivery_id!}`;
+    const claimed=await service.evaluate({interaction_mode:'claim_video_delivery',delivery_id:first.delivery_id!});
+    const done=await service.evaluate({interaction_mode:'finalize_video_delivery',delivery_id:first.delivery_id!,claim_token:claimed.claim_token,delivery_success:true,sent_message_id:f.panel});
+    assert.equal(done.delivered,true);
+    assert.equal((await pay(f.chatId,firstToken)).reason,'payment_already_fulfilled');
+    const stale=await callback(f);assert.notEqual(stale.operation,'video_delivery_required');
+    assert.equal(stale.callback_valid,false,'the old request token is frozen to the delivered clip');
+    const [count]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE payment_token=${firstToken}`;assert.equal(count!.n,1);
+    const keyboard=(done.reply_markup as {inline_keyboard:Array<Array<{text:string;callback_data:string}>>}).inline_keyboard;
+    const restored=keyboard.at(-1)![0]!;
+    const next=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:restored.callback_data,raw_update:{callback_query:{from:{id:f.telegram},message:{message_id:f.panel,chat:{id:f.telegram},reply_markup:done.reply_markup}}}});
+    assert.equal(next.operation,'video_ui_ready');
+    const secondSelected=await service.evaluate({event_type:'callback_query.received',chat_id:f.chatId,telegram_chat_id:f.telegram,inbound_message_id:f.panel,
+      callback_data:next.commerce_ui!.products.find(p=>p.feature_key==='video_unlock')!.callback_data});
+    const secondToken=secondSelected.commerce_ui!.payment_options![0]!.token;
+    assert.notEqual(secondToken,firstToken);
+    const [secondSnapshot]=await db`SELECT payload_json FROM public.interaction_tokens WHERE token=${secondToken}`;
+    assert.equal(secondSnapshot!.payload_json.video_id,second,'the next purchase freezes the next clip');
+    const paid=await pay(f.chatId,secondToken);assert.equal(paid.operation,'video_delivery_required');
+    assert.notEqual(paid.delivery_id,first.delivery_id);
+    assert.equal((await pay(f.chatId,firstToken)).reason,'payment_already_fulfilled');
+    const [total]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE chat_id=${f.chatId}`;assert.equal(total!.n,2);
+    const [old]=await db`SELECT count(*)::int AS n FROM app_private.video_deliveries WHERE payment_token=${firstToken}`;assert.equal(old!.n,1);
+  });
 
 });

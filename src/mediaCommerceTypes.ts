@@ -196,6 +196,7 @@ export interface MediaCommerceDecisionResponse {
   source_photo_url?: string | null;
   source_photo_reveal_at?: string | null;
   same_photo?: boolean | null;
+  needs_source_photo_reveal?: boolean | null;
   panel_caption?: string | null;
   panel_caption_entities?: unknown[] | null;
   video_panel_requested_callback_data?: string | null;
