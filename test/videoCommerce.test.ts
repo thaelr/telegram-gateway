@@ -254,6 +254,36 @@ test('no matching video hides animate, Full and pass suppress the extra commerci
   const next=await historical.service.evaluate({interaction_mode:'video_context',chat_id:1,scene_session_id:'scene',panel_message_id:77});
   assert.ok(next.video?.animate_callback_data);
 });
+
+test('a delivered video keeps the next clip purchasable while pending statuses do not',async()=>{
+  const open=(state:ReturnType<typeof setup>)=>state.service.evaluate({interaction_mode:'video_context' as const,chat_id:1,
+    telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',current_uuid:photoId,panel_message_id:77,
+    commerce_capabilities_version:1 as const,ui_origin:'media_panel'});
+  const products=async(state:ReturnType<typeof setup>)=>{
+    const result=await open(state);
+    return result.commerce_capabilities?.products.map(product=>[product.feature_key,product.purchase_context])??[];
+  };
+  for(const state of [setup({panel_delivered:true}),
+    setup({panel_delivered:true,delivery:{...delivery,status:'delivered',telegram_message_id:77}})]){
+    const offered=await products(state);
+    assert.ok(offered.some(([feature,context])=>feature==='video_unlock'&&context==='access_and_video'),
+      'a delivered first clip leaves the next video unlock on sale');
+    assert.ok(offered.some(([feature,context])=>feature==='video_pass'&&context==='access_and_video'),
+      'a delivered first clip leaves the paired VideoPass on sale');
+    assert.ok(offered.some(([feature,context])=>feature==='video_pass'&&context==='access_only'));
+  }
+  for(const status of ['queued','sending','failed','uncertain'] as const){
+    const offered=await products(setup({panel_delivered:true,delivery:{...delivery,status}}));
+    assert.equal(offered.some(([feature])=>feature==='video_unlock'||feature==='video_pass'),false,
+      status+' delivery must not offer another clip');
+  }
+  for(const override of [{panel_delivered:true,video:null},{panel_delivered:true,full_active:true,subscription_sku:'full'},
+    {panel_delivered:true,video_pass_active:true}]){
+    const offered=await products(setup(override));
+    assert.equal(offered.some(([feature])=>feature==='video_unlock'||feature==='video_pass'),false,
+      'no compatible clip or active access suppresses the video purchase');
+  }
+});
 test('entitled click freezes video and original panel into a delivery without invoices',async()=>{
   const {service,requests,invoices}=setup({full_active:true});
   const prepared=await service.evaluate({interaction_mode:'video_context',chat_id:1,telegram_chat_id:900,scene_session_id:'scene',media_signature:'signature',panel_message_id:77});
@@ -631,4 +661,78 @@ test('root and payment prices exclude disabled SBP or absent RUB for either Tele
       assert.deepEqual(amounts(payment.commerce_ui?.products[0]?.prices),amounts(product.prices));
     }
   }
+});
+
+test('photo navigation tokens are unique per chat and stable inside one chat',async()=>{
+  const {service,tokens}=setup();
+  type PanelTokens={videoPanelTokens:(base:unknown,delivery:VideoDelivery,action:string,uuid:string)=>
+    Promise<{video_panel_requested_callback_data:string|null}>};
+  const panelTokens=service as unknown as PanelTokens;
+  const photoToken=async(chat:number)=>{
+    const delivered:VideoDelivery={...delivery,chat_id:chat,status:'delivered',telegram_message_id:77};
+    const nav=await panelTokens.videoPanelTokens({chat_id:chat,scene_session_id:'scene',target_message_id:77},
+      delivered,'photo_next',photoId);
+    return nav.video_panel_requested_callback_data!;
+  };
+  const first=await photoToken(1),second=await photoToken(2);
+  assert.match(first,/^btn_[0-9a-f]{32}$/);
+  assert.equal(Buffer.byteLength(first),36,'the photo token keeps its 36-byte Telegram form');
+  assert.notEqual(first,second,'the same panel and photo in another chat cannot collide');
+  assert.equal(await photoToken(1),first,'repeating the token inside one chat is deterministic');
+  assert.equal(tokens.get(first)?.chat_id,1);
+  assert.equal(tokens.get(second)?.chat_id,2);
+  assert.notEqual(tokens.get(first),tokens.get(second),'each chat keeps its own stored photo token');
+  assert.equal(tokens.get(first)?.payload_json.current_uuid,photoId);
+  assert.equal(tokens.get(second)?.payload_json.current_uuid,photoId);
+});
+
+test('non-video purchases keep their pre-Stage-2 key while video purchases bind the clip',async()=>{
+  const {createHash}=await import('node:crypto');
+  const hash=(parts:unknown[])=>createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0,24);
+  type InvoiceRow={token:string;payload_json:Record<string,unknown>};
+  const harness=setup();
+  const {service,tokens,invoices}=harness;
+  const purchase=async(feature:string,context:'access_only'|'access_and_video',
+    state:ReturnType<typeof setup>=harness)=>{
+    const root=await state.service.evaluate({interaction_mode:'video_context' as const,chat_id:1,telegram_chat_id:900,
+      scene_session_id:'scene',media_signature:'signature',current_uuid:photoId,panel_message_id:77,
+      commerce_capabilities_version:1 as const,ui_origin:'media_panel'});
+    const product=root.commerce_capabilities!.products.find(item=>
+      item.feature_key===feature&&item.purchase_context===context)!;
+    const tokenRow=state.tokens.get(product.callback_data!)!;
+    const before=(state.invoices as InvoiceRow[]).length;
+    const result=await click(state.service,product.callback_data!);
+    const invoice=(state.invoices as InvoiceRow[]).slice(before).find(row=>row.payload_json.feature_key===feature)!;
+    const idempotency=String(invoice.payload_json.idempotency_key);
+    const actual=feature==='scene_unlock'
+      ? idempotency.replace(/^scene-unlock-click:/,'')
+      : idempotency.replace(/^video:/,'').split(':')[0]!;
+    const payload=tokenRow.payload_json as Record<string,unknown>;
+    const parts:unknown[]=[1,'scene',77,payload.product_step,feature,payload.purchase_variant??null,null,
+      payload.quoted_xtr,payload.quoted_rub,payload.source_photo??null,payload.media_signature??null];
+    if(payload.product_step==='video')parts.push(payload.video_id??null);
+    return {result,invoice,actual,expected:hash(parts),tokenRow};
+  };
+  const scene=await purchase('scene_unlock','access_only');
+  assert.equal(scene.actual,scene.expected,'scene_unlock keeps the exact pre-Stage-2 hash');
+  assert.equal(scene.expected.length,24);
+  const sceneSnapshot=JSON.stringify(scene.invoice);
+  const passScene=await purchase('video_pass','access_only');
+  assert.equal(passScene.actual,passScene.expected,'access-only VideoPass never appends a clip id');
+  const unlock=await purchase('video_unlock','access_and_video');
+  assert.equal(unlock.actual,unlock.expected,'a video unlock binds the quoted clip');
+  assert.notEqual(unlock.actual,hash([1,'scene',77,'video','video_unlock',null,null,
+    unlock.tokenRow.payload_json.quoted_xtr,unlock.tokenRow.payload_json.quoted_rub,
+    unlock.tokenRow.payload_json.source_photo,unlock.tokenRow.payload_json.media_signature]));
+  const passVideo=await purchase('video_pass','access_and_video');
+  assert.equal(passVideo.actual,passVideo.expected,'a stage-video VideoPass binds the quoted clip');
+
+  const repeat=await purchase('video_unlock','access_and_video');
+  assert.equal(repeat.actual,unlock.actual,'repeating the same video purchase keeps its key');
+  assert.equal(JSON.stringify(scene.invoice),sceneSnapshot,'older payment snapshots are never rewritten');
+  assert.equal(tokens.get(scene.tokenRow.token!)?.action_kind,'commerce_pay');
+
+  const changed=await purchase('video_unlock','access_and_video',
+    setup({video:{...context.video!,video_id:'00000000-0000-4000-8000-000000000003'}}));
+  assert.notEqual(changed.actual,unlock.actual,'a different clip produces a different key');
 });

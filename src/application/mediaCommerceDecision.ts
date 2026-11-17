@@ -672,7 +672,7 @@ currency:price.currency,prices,...(token?{callback_data:token}:{}),
     const videoAvailable=!!ctx && current && ctx.scene_active && !pending &&
       (!!ctx.video || trustedFirstPhoto);
     const canPass=current && !offer.full_active && !offer.video_pass_active && !!resolveVideoPassPlan(offer.paid_scene_unlock_token) &&
-      (photo?videoAvailable&&!ctx?.delivery:offer.available);
+      (photo?videoAvailable:offer.available);
     const responseExperiment=base.ab_test?config.EXPERIMENTS.find(experiment=>experiment.key===base.ab_test?.key&&
       experiment.version===base.ab_test.version&&experiment.starts_at===base.ab_test.starts_at):null;
     const abParams=base.ab_test
@@ -1087,11 +1087,12 @@ base={
          (stage==='video'&&ctx?.video?.video_id!==payload.video_id))return stale();
       let options:MediaPaymentOption[];
       const cycle=product.feature_key==='scene_unlock'?offer.scene_access_payment_token:offer.video_pass_payment_token;
-      // A video purchase attempt is bound to the clip it quotes; other purchases keep their key.
-      const quotedVideoId=product.feature_key==='video_unlock'||(product.feature_key==='video_pass'&&stage==='video')
-        ? ctx?.video?.video_id??null : null;
-      const key=createHash('sha256').update(JSON.stringify([base.chat_id,base.scene_session_id,messageId,stage,product.feature_key,
-        product.purchase_variant,cycle??null,plan.amount_xtr,plan.amount_rub,uuid,snap.media_signature,quotedVideoId])).digest('hex').slice(0,24);
+      // Only a video purchase is bound to the clip it quotes; other purchases keep their historical key.
+      const keyParts=[base.chat_id,base.scene_session_id,messageId,stage,product.feature_key,
+        product.purchase_variant,cycle??null,plan.amount_xtr,plan.amount_rub,uuid,snap.media_signature];
+      if(product.feature_key==='video_unlock'||(product.feature_key==='video_pass'&&stage==='video'))
+        keyParts.push(ctx?.video?.video_id??null);
+      const key=createHash('sha256').update(JSON.stringify(keyParts)).digest('hex').slice(0,24);
       if(product.feature_key==='scene_unlock'){
         options=await this.buildSceneUnlockPaymentOptionsAtClick({chat_id:base.chat_id!,scene_session_id:base.scene_session_id!,target_message_id:messageId,token:key,
           user_id:offer.user_id,signature:snap.media_signature,commerce_origin:snap});
@@ -1235,7 +1236,7 @@ base={
         telegram_chat_id: delivery.telegram_chat_id, target_message_id: panel, current_uuid: uuid}, 'photo_next', {
           delivery_id: delivery.delivery_id, requested_photo_uuid: requested, source_photo_uuid: source
         });
-      row.token = 'btn_' + createHash('sha256').update(['photo_next', panel, uuid].join(':')).digest('hex').slice(0,32);
+      row.token = 'btn_' + createHash('sha256').update(['photo_next', chat, panel, uuid].join(':')).digest('hex').slice(0,32);
       return row;
     };
     const makeVideo = (clip: VideoDelivery) => {
